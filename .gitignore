@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+*.spec
+.env
+.env.*
+!.env.example
+
+# Private vault, local application state and host configuration.
+/example-vault/
+/会话总结/
+/项目/
+/知识/
+/技能/
+/资料/
+/.obsidian/
+/.codex/
+/.claude/
+/.ohdsh/
+/.dsh/
+/Tbrain/
+/settings.json
+/errors/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local handoff notes.
+/*交接*.md
+
+# Native desktop build output.
+desktop/bin/
+desktop/obj/
+
+# Research scratch (isolated host experiments; not part of the product).
+/.research/

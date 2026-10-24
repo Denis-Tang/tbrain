@@ -1,0 +1,65 @@
+#requires -Version 7.0
+param([string]$OutputDirectory = 'dist')
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+Push-Location -LiteralPath $projectRoot
+try {
+    New-Item -ItemType Directory -Path build -Force | Out-Null
+    $initFile = Join-Path $projectRoot 'src/tbrain/__init__.py'
+    $versionMatch = Select-String -LiteralPath $initFile -Pattern '__version__\s*=\s*"([^"]+)"'
+    if (-not $versionMatch) { throw "无法从 tbrain/__init__.py 读取版本号" }
+    $version = $versionMatch.Matches[0].Groups[1].Value
+    dotnet publish desktop/Tbrain.Desktop.csproj -c Release -r win-x64 `
+        --self-contained true -o build/desktop --nologo -v:q `
+        -p:Version=$version -p:FileVersion=$version -p:InformationalVersion=$version
+    if ($LASTEXITCODE -ne 0) { throw "Desktop host build failed with exit code $LASTEXITCODE" }
+    $launcher = Join-Path $projectRoot 'build/launcher.py'
+    $iconPath = Join-Path $projectRoot 'src/tbrain/web/icon.ico'
+    Set-Content -LiteralPath $launcher -Encoding utf8NoBOM -Value @'
+import ctypes
+import msvcrt
+import os
+import sys
+
+# Windowed PyInstaller sets stdio to None; reconnect inherited MCP/Hook pipes.
+if getattr(sys, "frozen", False):
+    get_handle = ctypes.windll.kernel32.GetStdHandle
+    get_handle.restype = ctypes.c_void_p
+    for name, number, mode, flags in (("stdin", -10, "r", os.O_RDONLY),
+                                      ("stdout", -11, "w", os.O_WRONLY),
+                                      ("stderr", -12, "w", os.O_WRONLY)):
+        handle = get_handle(number)
+        fd = msvcrt.open_osfhandle(handle, flags) if handle not in (None, ctypes.c_void_p(-1).value) else os.open(os.devnull, flags)
+        stream = os.fdopen(fd, mode, encoding="utf-8", buffering=1)
+        setattr(sys, name, stream)
+        setattr(sys, "__" + name + "__", stream)
+
+from tbrain.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'@
+    python -m PyInstaller --noconfirm --onedir --windowed `
+        --distpath $OutputDirectory --icon $iconPath `
+        --name tbrain --paths src --specpath build --workpath build/pyinstaller `
+        --collect-data tbrain --hidden-import keyring.backends.Windows `
+        $launcher
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
+    $packageDirectory = Join-Path $OutputDirectory 'tbrain'
+    Copy-Item -LiteralPath @('README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') -Destination $packageDirectory
+    Copy-Item -LiteralPath 'build/desktop' -Destination $packageDirectory -Recurse -Force
+    $integrationDirectory = Join-Path $packageDirectory 'integrations'
+    New-Item -ItemType Directory -Path $integrationDirectory -Force | Out-Null
+    Copy-Item -Path 'integrations/*.mjs' -Destination $integrationDirectory
+    Copy-Item -LiteralPath 'integrations/README.md' -Destination $integrationDirectory
+    $nodeExecutable = @(Get-Command node -CommandType Application)[0].Source
+    $nodeVersion = & $nodeExecutable --version
+    $runtimeDirectory = Join-Path $packageDirectory 'runtime'
+    New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $nodeExecutable -Destination (Join-Path $runtimeDirectory 'node.exe')
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE" `
+        -OutFile (Join-Path $runtimeDirectory 'NODE-LICENSE.txt')
+}
+finally {
+    Pop-Location
+}

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tbrain"
+dynamic = ["version"]
+description = "A local Markdown memory workspace for desktop users and MCP agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Tbrain contributors"}]
+dependencies = [
+    "mcp>=1.26,<2",
+    "httpx>=0.27,<1",
+    "keyring>=25,<26",
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "Pillow>=11.2.1,<13"]
+build = ["pyinstaller>=6,<7"]
+
+[project.scripts]
+tbrain = "tbrain.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tbrain = ["web/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "tbrain.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

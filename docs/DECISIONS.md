@@ -1,0 +1,58 @@
+# 设计决策（DECISIONS）
+
+> 记录设计稿未写到、或实现时按“最简单方式”定下的细节。后续每个阶段继续追加。
+> 设计稿目录：`本地设计稿`。
+
+## 0. 已确认的用户决定（2026-10-24）
+
+| 编号 | 问题 | 决定 |
+|---|---|---|
+| P1 | 开工节奏 | 先只做第 1 步调研；调研汇报、确认后再进入第 2 步。 |
+| P2 | 桌面端范围 | 外壳/风格/导航不变，页面换新内容：总观=会话列表，项目配置=项目名+工作目录增删，设置=时区/NTP/超时/全局提示词/版本；去掉知识统计、提交合并、维护、引导等旧功能。 |
+| P3 | 项目与全局提示词维护 | 参照老版本方式：桌面页面维护项目路径与全局提示词（同时提供同名 CLI，便于脚本与验收）。 |
+| P4 | “单实例” | 同版本允许多进程共存，只淘汰旧版本进程：PID/版本登记 + 锁文件，新版本启动时通知旧版本退出，超时强制结束；不造后台 daemon。 |
+| P5 | 升级包来源 | 沿用 0.5.2 的 GitHub Releases 检查逻辑；验收用本地假包/本地 HTTP 源。 |
+| P6 | 调研实测许可 | 允许用临时 HOME/配置目录启动宿主做隔离实测，不碰真实配置。 |
+| P7 | 构建与文件改动 | 允许删改新仓库内文件、pip 装依赖、本地构建 exe、生成 0.6.1 测试包（仅升级模拟，不入主版本历史）。 |
+| P8 | 新 vault 位置 | `%USERPROFILE%\Documents\TbrainVault`。 |
+| P9 | 会话身份传递 | hook 注入会话身份，模型在 bootstrap/save/resume 参数里显式传 `session_id`；程序校验格式与归属，缺失/错误返回明确修复提示。 |
+| D1 | DSH 接入形态 | 官方 Claude hooks 桥 + 原生小插件：桥负责共用 hooks.json（SessionStart/UserPromptSubmit/Stop/PostToolUse），原生插件补 PreCompact、SessionEnd、上下文长度/换会话提醒、工具结果。 |
+| D2 | Codex hook 信任 | `doctor` 把“待用户信任”显示为黄色并给出宿主原生信任步骤；第 3 步验收口径改为“四宿主均指向固定入口且已连接，Codex 待信任除外”。不自动写 `trusted_hash`。 |
+| D3 | pi 接入形态 | pi 扩展直接调用 Tbrain CLI 的 JSON 接口（bootstrap/search/save/resume），不引入 MCP；目标产品为本机 `@earendil-works/pi-coding-agent 0.84.2`。 |
+| D4 | 换会话提醒范围 | 只在 DSH（原生插件）与 pi（扩展）显示；Claude/Codex 第一期不做（无 token 字段）。 |
+| D5 | pi 的 Stop 提醒 | 降级为只提醒：`agent_end` 后注入一条“请 save”提示，不强制模型再走一步。 |
+| D6 | 旧进程结束边界 | 新版本启动时通知旧版本进程自退，超时强制结束；doctor 与提示里说明旧宿主会话下一次工具调用会失败/自动重连。 |
+
+## 1. 第 1 步（调研）定下的细节
+
+1. **四宿主配置读取时机**：Claude/Codex/DSH 都是启动时读配置，运行中改文件不生效（DSH 的 MCP 配置编辑可 HMR 重连）；pi 扩展可 `/reload`。→ `connect` 之后提示用户新开会话。
+2. **固定入口方案可行**：宿主配置里只写固定入口（`...\Programs\Tbrain\bin\tbrain.cmd`），升级只切 `current`，不改宿主配置。
+3. **版本自检**：hook 与 MCP 工具返回都带版本号；hook 发现 MCP 版本与 `current` 不一致时注入“请重启 agent 加载新版本”。
+4. **Codex `commandWindows`**：Windows 上必须写 `commandWindows`；hook 被改动后 trust hash 失效，因此 hooks.json 内容必须保持稳定（固定入口）。
+5. **Claude hook 写法**：Windows 上用 `shell:"powershell"` + 全引号命令，避免 exec 形式退化。
+6. **Claude fork 坑**：`--fork-session` 时 SessionStart 先报旧 ID、随后事件是新 ID；需要在 UserPromptSubmit 后重绑。
+7. **DSH 桥版本对齐**：桥 `@deepseek-ai/dsh-hooks-claude-code` 必须与 DSH 引擎版本一致（当前桌面 0.2.1-rc.3），doctor 检查；configPath 在进程启动时读一次，hooks.json 内容保持稳定。
+8. **DSH 原生插件事件名**：0.2.1-rc.3 用 `agent/created`（payload 带 `source`），不是旧版 `agent/session-start`；`clear/compact` 暂无发出方。
+9. **DSH file 插件坑**：`D:\package.json` 带 BOM 会破坏 profile 插件兼容性预检；Tbrain 插件应作为包安装（或放在含合法 package.json 的目录）。
+10. **pi 无 Stop-block**：用扩展在 `agent_end` 后注入提示；session id 稳定可作主键，但 `-p` 下 `reason` 仍报 startup。
+11. **上下文长度能力**：DSH 原生插件（`ctx.tokenMeter`）与 pi（`getContextUsage`）可拿；Claude/Codex hook 拿不到。
+12. **0.5.2 升级根因**：宿主 MCP 子进程长驻 + 0.5.2 不结束宿主进程 + 90 秒等待超时 + 宿主缓存工具列表 + 无版本自检 + 配置写死绝对路径。Tbrain 第 3 步逐条解决。
+
+## 2. 第 2 步（建仓改名）定下的细节
+
+1. **复制范围**：按 `git ls-files` 复制 second-brain 跟踪的 54 个文件（工作区已跟踪的 README 改动一并复制）；不复制 `build/`、`dist/`、`.git/`、`.venv/`、`desktop/bin|obj/`、`__pycache__/`、`.pytest_cache/`、`egg-info`、旧仓库未跟踪的 `docs/`。
+2. **版本号单一来源**：`src/tbrain/__init__.py` 的 `__version__ = "0.6.0"`。`pyproject.toml` 用 `dynamic version = {attr = "tbrain.__version__"}`；`scripts/build.ps1` 解析该文件并 `-p:Version=$version` 注入桌面程序集；安装器/更新器/MCP/桌面显示都从 Python `__version__` 读。`.csproj` 不再写版本号。
+3. **命名映射**：`shared_brain`→`tbrain`、`shared-brain`→`tbrain`、`SharedBrain`→`Tbrain`、`Shared Brain`→`Tbrain`、`SHARED_BRAIN_HOME`→`TBRAIN_HOME`、`~/.shared-brain`→`~/.tbrain`；MCP server 名 `tbrain`，工具名 `mcp__tbrain__*`；包目录 `src/tbrain`，桌面程序集 `Tbrain.Desktop`，可执行文件 `tbrain.exe`。
+4. **历史文档保留旧名**：`docs/RESEARCH-hosts.md`（第 1 步调研证据）保留 Shared Brain/0.5.2 字样；`docs/ORIGIN.md` 记录来源。产品代码与界面不保留旧标识。
+5. **发布仓库占位**：`update.py` 的 `REPOSITORY` 改为 `Denis-Tang/tbrain`（第 3 步前如未建仓，检查更新会按失败降级处理；第 3 步确认最终发布位置）。
+6. **旧测试处理**：与第 4 步要重写的核心（`vault.py`/`service.py`/`model.py`/`maintenance.py` 及相关测试）在第 4~5 步整体重写；本阶段先原样保留并保证其余测试通过，第 4 步再替换。测试里出现的临时路径名 `shared brain.exe` 统一为 `tbrain.exe`。
+7. **README**：重写为 Tbrain 0.6.0 简介（目标、数据目录、开发命令、文档索引、与 0.5.2 的关系），不再保留 0.5.2 的功能长文。
+8. **git**：仅本地仓库，不设 remote、不 push；每个阶段一个中文 commit。
+
+## 3. 待定 / 后续
+
+- 发布仓库与资产命名（第 3 步确认）。
+- 附件卡片读取格式与目录（第 4 步）。
+- 项目登记文件格式（第 4 步）。
+- 时间工具 NTP/HTTPS Date 实现细节（第 4 步）。
+- 迁移映射与字段报告（第 6 步）。

@@ -1,445 +1,681 @@
-"""One application core shared by the desktop interface and MCP."""
+"""Tbrain service facade: settings, vault/index wiring, MCP tools, desktop API.
 
+The flow semantics live in ``session.py``; this module owns lifecycle wiring and
+the integration points used by the CLI, MCP server and desktop backend.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
 import json
 import os
-import sys
-import webbrowser
-from dataclasses import asdict
 from pathlib import Path
+import subprocess
+import threading
+from zoneinfo import ZoneInfo, available_timezones
 
-from . import __version__, installer, update
-from .model import ModelClient
-from .onboarding import build_prompt, build_unbind_prompt, build_update_prompt
+from . import __version__, clock, handoff, hooks, identity, session as flow, prompt as prompt_mod
+from . import paths
 from .settings import SettingsStore
-from .vault import Vault, now, fingerprint, detect_mode, estimate_tokens
-from .errors import ErrorReports
-from .maintenance import maintain, usage_status
 
 
-class BrainService:
-    def __init__(self, home: Path | None = None):
-        self.settings = SettingsStore(home)
+class TbrainService:
+    def __init__(self, home: Path | None = None, *, vault: Path | None = None):
+        self.home = paths.app_home(home)
+        self.home.mkdir(parents=True, exist_ok=True)
+        self._settings = SettingsStore(self.home)
+        self._vault_override = Path(vault) if vault else None
+        self._store = None
+        self._index = None
+        self._lock = threading.RLock()
 
-    def _vault(self) -> Vault:
-        settings = self.settings.load()
-        if not settings.vault_path:
-            raise ValueError("请先创建或连接一个 Obsidian 知识库")
-        vault = Vault(Path(settings.vault_path), self.settings.home)
-        for folder in ("项目/独立项目/独立知识", "会话总结", "知识", "技能", "草稿/独立项目"):
-            (vault.root / folder).mkdir(parents=True, exist_ok=True)
-        for project in vault.projects():
-            (vault.root / "草稿" / Path(project["path"]).parent.name).mkdir(parents=True, exist_ok=True)
+    # ------------------------------------------------------------------
+    # 基础访问器
+    # ------------------------------------------------------------------
+    def version(self) -> str:
+        return __version__
+
+    @property
+    def settings(self) -> SettingsStore:
+        return self._settings
+
+    def vault_root(self) -> Path:
+        if self._vault_override is not None:
+            return self._vault_override
+        configured = str(self.settings.load().vault_path or "").strip()
+        return Path(configured).expanduser() if configured else Path()
+
+    def require_vault(self) -> Path:
+        vault = self.vault_root()
+        if not str(vault) or not vault.name:
+            raise ValueError("请先在设置中选择知识库路径")
         return vault
 
-    def status(self) -> dict:
-        settings = self.settings.load()
-        values = asdict(settings)
-        configured = values.pop("key_configured")
-        values.pop("credential_account")
-        result = {"version": __version__, "settings": values, "key_configured": configured, "ready": False, "global_prompt": "",
-                  "counts": {"tasks": 0, "sessions": 0, "memories": 0, "sources": 0}, "pending": 0, "last_maintenance": None,
-                  "connections": []}
-        if settings.vault_path and all((Path(settings.vault_path) / folder).is_dir()
-                                       for folder in ("项目", "会话总结", "知识", "技能")):
-            vault = self._vault()
-            result["global_prompt"] = vault.global_prompt()
-            result["ready"] = True
-            result["pending"] = vault.pending_count() + len(ErrorReports(vault).pending())
-            with vault.connect() as con:
-                counts = {r[0]: r[1] for r in con.execute("SELECT kind,count(*) FROM notes GROUP BY kind")}
-                result["counts"] = {"tasks": counts.get("task", 0), "memories": counts.get("memory", 0) + counts.get("skill", 0) + counts.get("object", 0),
-                                    "sources": counts.get("source", 0), "sessions": counts.get("session", 0)}
-                row = con.execute("SELECT value FROM state WHERE key='last_maintenance'").fetchone()
-                result["last_maintenance"] = json.loads(row[0]) if row else None
-                result["connections"] = [json.loads(row[0]) for row in con.execute(
-                    "SELECT value FROM state WHERE key LIKE 'connection:%' ORDER BY json_extract(value,'$.last_seen') DESC")]
-        result["budget"] = usage_status(self.settings.home)
+    @property
+    def store(self):
+        with self._lock:
+            if self._store is None:
+                from .store import Store
+
+                self._store = Store(self.require_vault(), self.home)
+                self._store.ensure_layout()
+            return self._store
+
+    @property
+    def index(self):
+        with self._lock:
+            if self._index is None:
+                from .index import Index
+
+                self._index = Index(self.home)
+            return self._index
+
+    def now(self):
+        return clock.now(self.home, self.settings.load())
+
+    # ------------------------------------------------------------------
+    # 程序写入痕迹（用于检测用户手改）
+    # ------------------------------------------------------------------
+    def _writes_path(self) -> Path:
+        return self.home / "writes.json"
+
+    def _read_writes(self) -> dict:
+        try:
+            payload = json.loads(self._writes_path().read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def program_written_hash(self, path: Path) -> str:
+        try:
+            relative = Path(path).resolve().relative_to(self.require_vault().resolve()).as_posix()
+        except (ValueError, OSError):
+            relative = Path(path).as_posix()
+        return str(self._read_writes().get(relative) or "")
+
+    def remember_write(self, path: Path, text: str) -> None:
+        try:
+            relative = Path(path).resolve().relative_to(self.require_vault().resolve()).as_posix()
+        except (ValueError, OSError):
+            relative = Path(path).as_posix()
+        payload = self._read_writes()
+        payload[relative] = handoff.fingerprint(text)
+        import uuid
+
+        path = self._writes_path()
+        temporary = path.with_name(f"writes.json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        for attempt in range(3):
+            try:
+                temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                os.replace(temporary, path)
+                return
+            except OSError:
+                if attempt == 2:
+                    raise
+                import time
+
+                time.sleep(0.05 * (attempt + 1))
+                payload = self._read_writes()
+                payload[relative] = handoff.fingerprint(text)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def reset_vault(self) -> None:
+        with self._lock:
+            self._store = None
+            self._index = None
+
+    # ------------------------------------------------------------------
+    # 索引刷新
+    # ------------------------------------------------------------------
+    def refresh_index(self) -> None:
+        vault = self.vault_root()
+        if not str(vault) or not vault.is_dir():
+            return
+        store = self.store
+        store.ensure_layout()
+        index = self.index
+        session_root = (vault / "会话总结")
+        if session_root.is_dir():
+            for path in session_root.rglob("*.md"):
+                self._index_file(path, kind="session")
+        for kind in ("安装", "环境变量", "PATH", "代理", "配置", "工作区", "工具"):
+            folder = (vault / "公共池" / kind)
+            if not folder.is_dir():
+                continue
+            for path in folder.glob("*.md"):
+                self._index_file(path, kind="public")
+        for row in index.sessions():
+            path = (vault / row["path"]) if row.get("path") else None
+            if not path or not path.is_file():
+                index.remove_session(row["session_id"])
+
+    def _index_file(self, path: Path, kind: str) -> None:
+        index = self.index
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        try:
+            relative = path.resolve().relative_to(self.vault_root().resolve()).as_posix()
+        except ValueError:
+            return
+        state = index.file_state(relative)
+        if state and float(state.get("mtime") or 0) == stat.st_mtime and int(state.get("size") or 0) == stat.st_size:
+            return
+        text = self.store.read_text(path)
+        digest = handoff.fingerprint(text)
+        if kind == "session":
+            try:
+                summary = handoff.parse(text)
+            except Exception:
+                return
+            if not summary.session_id:
+                return
+            index.upsert_session(self._row_from_summary(summary, relative), text)
+        else:
+            front, body = _split_front(text)
+            identifier = _public_id(relative, front)
+            index.upsert_public({"id": identifier, "kind": str(front.get("kind") or path.parent.name),
+                                 "name": str(front.get("name") or path.stem),
+                                 "state": str(front.get("state") or "生效"),
+                                 "path": relative, "updated_at": str(front.get("updated_at") or "")}, body)
+        index.mark_scan(relative, stat.st_mtime, stat.st_size, digest)
+
+    def _row_from_summary(self, summary: handoff.Summary, relative: str) -> dict:
+        goals = summary.goals()
+        return {
+            "session_id": summary.session_id, "project": summary.project, "name": summary.name,
+            "path": relative, "status": summary.status, "agent": str(summary.header.get("agent") or ""),
+            "cwd": str(summary.header.get("cwd") or ""), "started_at": str(summary.header.get("started_at") or ""),
+            "updated_at": str(summary.header.get("updated_at") or ""),
+            "last_activity_at": str(summary.header.get("last_activity_at") or ""),
+            "next_step": summary.next_step, "open_goals": sum(1 for item in goals if not item.get("done")),
+            "git_branch": (summary.header.get("git") or {}).get("branch", ""),
+            "git_head": (summary.header.get("git") or {}).get("head", ""),
+            "git_dirty": int((summary.header.get("git") or {}).get("dirty") or 0),
+            "last_verify": json.dumps(summary.header.get("last_verify") or {}, ensure_ascii=False),
+            "file_hash": handoff.fingerprint(handoff.render(summary)),
+            "file_mtime": 0.0,
+        }
+
+    # ------------------------------------------------------------------
+    # 辅助
+    # ------------------------------------------------------------------
+    def child_projects(self, project: str) -> list[str]:
+        if not project:
+            return []
+        root = self.store.project(project)
+        if not root or not root.get("allow_child"):
+            return []
+        return [item["name"] for item in self.store.projects() if item.get("parent") == project]
+
+    def git_info(self, cwd: str) -> dict:
+        info = {"branch": "", "head": "", "dirty": 0}
+        if not cwd or not Path(cwd).is_dir():
+            return info
+        try:
+            branch = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                                    capture_output=True, text=True, timeout=2)
+            head = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, timeout=2)
+            status = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
+                                    capture_output=True, text=True, timeout=3)
+            if branch.returncode == 0:
+                info["branch"] = branch.stdout.strip()
+            if head.returncode == 0:
+                info["head"] = head.stdout.strip()[:7]
+            if status.returncode == 0:
+                info["dirty"] = len([line for line in status.stdout.splitlines() if line.strip()])
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return info
+
+    def version_warning(self) -> str:
+        warnings: list[str] = []
+        try:
+            current_file = paths.current_file(paths.install_root(self.home, self.settings.load()))
+            if current_file.is_file():
+                installed = current_file.read_text(encoding="utf-8").strip()
+                if installed and installed != __version__:
+                    warnings.append(f"当前运行版本 {__version__} 与安装的 current（{installed}）不一致，请重启 Tbrain。")
+        except OSError:
+            pass
+        try:
+            from . import proc
+
+            versions = proc.live_versions()
+            older = sorted({v for v in versions if v and v != __version__})
+            if older:
+                warnings.append(f"检测到旧版本 Tbrain 进程（{', '.join(older)}），请重启 agent / 宿主以加载新版本 {__version__}。")
+        except Exception:
+            pass
+        return "\n".join(warnings)
+
+    # ------------------------------------------------------------------
+    # hook
+    # ------------------------------------------------------------------
+    def hook(self, host: str, raw: dict) -> dict:
+        from . import hosts
+
+        raw = raw or {}
+        event = hosts.normalize(host, raw)
+        result = hooks.handle(event, self)
+        raw_event = str(raw.get("hook_event_name") or raw.get("event") or "")
+        return hosts.render(host, result, raw_event)
+
+    # ------------------------------------------------------------------
+    # 四个工具
+    # ------------------------------------------------------------------
+    def bootstrap(self, session_id: str, agent: str = "", cwd: str = "", host_record: str = "",
+                  project: str | None = None) -> dict:
+        agent = agent or (identity.split_session_id(session_id) or ("unknown", ""))[0]
+        cwd = cwd or os.getcwd()
+        return flow.bootstrap(self, session_id=session_id, agent=agent, cwd=cwd,
+                              host_record=host_record, project=project)
+
+    def search(self, query: str, session_id: str = "", limit: int = 5) -> dict:
+        return flow.search(self, query, session_id, limit)
+
+    def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
+        return flow.save(self, session_id, operations, last_test)
+
+    def resume(self, session_id: str, target: str) -> dict:
+        return flow.resume(self, session_id, target)
+
+    def tool(self, name: str, arguments: dict | None = None) -> dict:
+        arguments = arguments or {}
+        if name == "bootstrap":
+            return self.bootstrap(**{k: arguments[k] for k in arguments if k in
+                                     ("session_id", "agent", "cwd", "host_record", "project")})
+        if name == "search":
+            return self.search(arguments.get("query", ""), arguments.get("session_id", ""),
+                               arguments.get("limit", 5))
+        if name == "save":
+            return self.save(arguments.get("session_id", ""), arguments.get("operations") or [],
+                             arguments.get("last_test"))
+        if name == "resume":
+            return self.resume(arguments.get("session_id", ""), arguments.get("target", ""))
+        return {"ok": False, "error": f"未知工具：{name}"}
+
+    # ------------------------------------------------------------------
+    # 会话查询（桌面）
+    # ------------------------------------------------------------------
+    def sessions(self, status_filter: str = "all") -> list[dict]:
+        self.refresh_index()
+        rows = self.index.sessions()
+        if status_filter and status_filter != "all":
+            rows = [row for row in rows if row.get("status") == status_filter]
+        rows.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
+        rows.sort(key=lambda row: _priority(row.get("status")))
+        result = []
+        for row in rows:
+            result.append({
+                "session_id": row.get("session_id"), "name": row.get("name"),
+                "project": row.get("project") or "", "status": row.get("status"),
+                "agent": row.get("agent"), "updated": row.get("updated_at") or "",
+                "updated_at": row.get("updated_at"), "next_step": row.get("next_step") or "",
+                "open_goals": row.get("open_goals") or 0, "path": row.get("path"),
+            })
         return result
 
-    def initialize(self, vault_path: str) -> dict:
-        settings = self.settings.update({"vault_path": vault_path})
-        self._vault().refresh()
-        path = settings.vault_path
-        return {"message": "知识库已就绪，可配置项目并复制提示词接入 Agent", "path": str(path)}
+    def session_detail(self, path_or_id: str) -> dict:
+        self.refresh_index()
+        text = str(path_or_id or "")
+        row = None
+        if ":" in text:
+            row = self.index.session(text)
+        candidate = Path(text)
+        if not candidate.is_absolute() and str(self.vault_root()):
+            candidate = self.vault_root() / text
+        if row is None and candidate.is_file():
+            try:
+                relative = candidate.resolve().relative_to(self.vault_root().resolve()).as_posix()
+            except ValueError:
+                relative = text
+            for item in self.index.sessions():
+                if item.get("path") == relative:
+                    row = item
+                    break
+        if row is None:
+            return {"ok": False, "error": "会话不存在"}
+        path = self.vault_root() / row["path"]
+        if not path.is_file():
+            return {"ok": False, "error": "会话文件不存在"}
+        return {"ok": True, "session": row, "markdown": self.store.read_text(path),
+                "path": str(path), "name": row.get("name"), "updated": row.get("updated_at") or ""}
 
-    def configure(self, values: dict, api_key: str | None = None) -> dict:
-        self.settings.update(values, api_key)
-        if self.settings.load().vault_path:
-            self._vault().refresh()
-        return {"message": "设置已保存", **self.status()}
+    def rename_session(self, path_or_id: str, new_name: str) -> dict:
+        detail = self.session_detail(path_or_id)
+        if not detail.get("ok"):
+            return detail
+        path = Path(detail["path"])
+        summary = handoff.parse(self.store.read_text(path))
+        new_path = flow.rename_session(self, summary, path, str(new_name or "").strip())
+        return {"ok": True, "name": new_path.stem, "path": str(new_path)}
+
+    # ------------------------------------------------------------------
+    # 设置 / 时间 / 项目 / 提示词
+    # ------------------------------------------------------------------
+    def status(self) -> dict:
+        values = self.settings.load()
+        vault = self.vault_root()
+        ready = bool(str(vault)) and vault.is_dir()
+        try:
+            from .settings import available_timezones_list
+
+            timezones = available_timezones_list()
+        except Exception:
+            timezones = sorted(available_timezones())
+        try:
+            current_time = clock.display(self.now())
+        except Exception:
+            current_time = ""
+        result = {
+            "version": __version__,
+            "ready": ready,
+            "vault_path": str(vault) if str(vault) else "",
+            "settings": _settings_dict(values),
+            "timezones": timezones,
+            "current_time": current_time,
+            "install_root": str(paths.install_root(self.home, values)),
+            "current_version_on_disk": _installed_version(values),
+            "vaults": [{"path": str(vault), "exists": vault.is_dir()}] if str(vault) else [],
+        }
+        try:
+            from . import installer
+
+            notice = installer.pending_notice(self.home)
+            if notice:
+                result["pending_update"] = notice
+        except Exception:
+            pass
+        return result
+
+    def save_settings(self, values: dict) -> dict:
+        if not isinstance(values, dict):
+            raise ValueError("settings 必须是对象")
+        self.settings.update(values)
+        self.reset_vault()
+        vault = self.vault_root()
+        if str(vault) and vault.is_dir():
+            self.store.ensure_layout()
+        return {"ok": True, "settings": _settings_dict(self.settings.load())}
+
+    def time_now(self) -> dict:
+        now = self.now()
+        return {
+            "utc": now.utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "local": now.local.strftime("%Y-%m-%d %H:%M:%S"),
+            "display": clock.display(now),
+            "timezone": now.timezone,
+            "calibrated": now.calibrated,
+            "source": now.source,
+            "offset_seconds": now.offset_seconds,
+        }
+
+    def projects(self) -> list[dict]:
+        if not str(self.vault_root()):
+            return []
+        self.refresh_index()
+        counts: dict[str, int] = {}
+        for row in self.index.sessions():
+            counts[row.get("project") or ""] = counts.get(row.get("project") or "", 0) + 1
+        result = []
+        for project in self.store.projects():
+            result.append({**project, "sessions": counts.get(project["name"], 0),
+                           "allow_child": bool(project.get("allow_child"))})
+        return result
+
+    def configure_project(self, name: str, paths_list: list[str], parent: str = "",
+                          allow_child: bool = False, rename_from: str = "") -> dict:
+        result = self.store.save_project(name, paths_list, parent=parent,
+                                           allow_child=allow_child, rename_from=rename_from)
+        self.refresh_index()
+        return result
+
+    def delete_project(self, name: str) -> dict:
+        result = self.store.delete_project(name)
+        self.refresh_index()
+        return result
+
+    def global_prompt(self) -> dict:
+        return {"ok": True, "markdown": self.store.global_prompt()}
 
     def save_global_prompt(self, text: str) -> dict:
-        if not isinstance(text, str):
-            raise ValueError("全局提示词须为文本")
-        vault = self._vault()
-        vault.global_prompt()
-        vault.save_global_prompt(text)
-        return {"message": "全局提示词已保存", "global_prompt": text}
+        return self.store.save_global_prompt(str(text or ""))
 
-    def projects(self) -> dict:
-        return {"projects": self._vault().configured_projects()}
+    def project_prompt(self, project: str) -> dict:
+        data = self.store.project_prompt(str(project or ""))
+        return {"ok": True, "project": project, "user": data.get("user") or "",
+                "sections": data.get("sections") or prompt_mod.empty_sections()}
 
-    def configure_project(self, name: str, paths: list[str], project_id: str = "", parent_project_id: str = "") -> dict:
-        return {"project": self._vault().configure_project(name, paths, project_id, parent_project_id), "message": "项目配置已保存"}
+    def save_project_prompt(self, project: str, sections: dict) -> dict:
+        result = self.store.save_project_prompt(str(project or ""), sections if isinstance(sections, dict) else {})
+        result["ok"] = not result.get("rejected")
+        return result
 
-    def project_changes(self, project_id: str) -> dict:
-        return self._vault().project_changes(project_id)
+    def open_document(self, path: str) -> dict:
+        candidate = Path(str(path or ""))
+        if not candidate.is_file():
+            candidate = self.vault_root() / str(path or "")
+        if not candidate.is_file():
+            return {"ok": False, "error": "文件不存在"}
+        try:
+            if os.name == "nt":
+                os.startfile(str(candidate))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(candidate)])
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True}
 
-    def create_commit(self, project_id: str, item_ids: list[str], message: str = "") -> dict:
-        return {"commit": self._vault().create_commit(project_id, item_ids, message), "message": "成果已提交"}
+    # ------------------------------------------------------------------
+    # 宿主与版本（委托给 hosts / installer / update）
+    # ------------------------------------------------------------------
+    def connect(self, host: str) -> dict:
+        from . import hosts
 
-    def project_commits(self, project_id: str) -> dict:
-        return {"commits": self._vault().project_commits(project_id)}
+        return hosts.connect(host, self.home, paths.install_root(self.home, self.settings.load()),
+                             self.settings.load())
 
-    def project_commit(self, project_id: str, commit_id: str) -> dict:
-        return self._vault().project_commit(project_id, commit_id)
+    def disconnect(self, host: str) -> dict:
+        from . import hosts
 
-    def merge_commit(self, project_id: str, commit_id: str, resolutions: dict | None = None) -> dict:
-        return self._vault().merge_commit(project_id, commit_id, resolutions)
+        return hosts.disconnect(host, self.home, paths.install_root(self.home, self.settings.load()),
+                                self.settings.load())
 
-    def documents(self, project: str = "", query: str = "") -> dict:
-        vault = self._vault()
-        vault.refresh()
-        scope, params = ("", []) if project in {"", "all"} else (" AND project=?", ["" if project == "independent" else project])
-        if query.strip():
-            scope += " AND instr(lower(title || ' ' || body),lower(?))>0"
-            params.append(query.strip())
-        with vault.connect() as con:
-            rows = con.execute("SELECT path,title,kind,project,json_extract(metadata,'$.updated') AS updated FROM notes "
-                                "WHERE kind IN ('session','memory','skill','task','decision','source','object') "
-                                "AND coalesce(json_extract(metadata,'$.merged_into'),'')='' "
-                                "AND coalesce(json_extract(metadata,'$.feedback_pending'),0)!=1" + scope +
-                               " ORDER BY updated DESC,path LIMIT 200", params).fetchall()
-        return {"documents": [dict(row) for row in rows]}
+    def doctor(self) -> dict:
+        from . import hosts
 
-    def document(self, relative: str) -> dict:
-        vault = self._vault()
-        path = self._document_path(vault, relative)
-        relative = path.relative_to(vault.root).as_posix()
-        metadata, body = vault.read(path)
-        vault.refresh()
-        with vault.connect() as con:
-            sources = [dict(row) for row in con.execute(
-                "SELECT path,title,kind FROM notes WHERE path IN (SELECT value FROM json_each(?)) ORDER BY title",
-                (json.dumps(metadata.get("sources", [])),))]
-            backlinks = [dict(row) for row in con.execute(
-                "SELECT DISTINCT n.path,n.title,n.kind FROM notes n,json_each(n.metadata,'$.sources') s "
-                "WHERE s.value=? AND coalesce(json_extract(n.metadata,'$.merged_into'),'')='' "
-                "AND coalesce(json_extract(n.metadata,'$.feedback_pending'),0)!=1 ORDER BY n.title", (relative,))]
-        return {"path": relative, "title": metadata.get("title", path.stem), "kind": metadata.get("kind", "source"),
-                "body": body, "sources": sources, "backlinks": backlinks}
-
-    @staticmethod
-    def _document_path(vault, relative):
-        path = (vault.root / relative).resolve()
-        if not path.is_relative_to(vault.root) or path.suffix.lower() != ".md" or "草稿" in path.relative_to(vault.root).parts:
-            raise ValueError("请选择知识库中的正文文档")
-        return path
-
-    def open_document(self, relative: str) -> dict:
-        path = self._document_path(self._vault(), relative)
-        if not path.is_file():
-            raise ValueError("原文已不存在")
-        os.startfile(path)
-        return {"opened": True}
-
-    def delete_project(self, project_id: str) -> dict:
-        self._vault().delete_project(project_id)
-        return {"message": "项目立项已删除，历史资料已保留"}
-
-    def agent_prompt(self) -> dict:
-        path = self.settings.load().vault_path
-        if not path:
-            raise ValueError("请先选择并保存仓库路径")
-        return {"text": build_prompt(Path(path), self.mcp_config())}
-
-    def unbind_prompt(self) -> dict:
-        vault = self._vault()
-        return {"text": build_unbind_prompt(vault.path, self.settings.home.resolve(),
-                                           self.mcp_config(), vault.configured_projects())}
-
-    def installation_directory(self) -> Path | None:
-        """Directory holding the running program; None when it runs from source."""
-        command = self.mcp_config()["mcpServers"]["tbrain"]
-        return None if "-m" in command["args"] else Path(command["command"]).parent
+        report = hosts.doctor_all_hosts(self.home, paths.install_root(self.home, self.settings.load()),
+                                        self.settings.load())
+        report["version"] = __version__
+        return report
 
     def check_update(self, force: bool = True) -> dict:
-        """Ask GitHub for the newest release; only reads, never downloads or installs."""
-        result = update.check_latest(self.settings.home, force=force)
-        install = self.installation_directory()
-        result["install_directory"] = str(install) if install else ""
-        result["prompt"] = ""
-        result["local_archive"] = ""
-        result["local_verified_at"] = ""
-        if result["newer"]:
-            staged = update.verified_archive(self.settings.home, result["latest"])
-            digest = str((result["asset"] or {}).get("sha256") or "").lower()
-            if staged and digest and str(staged.get("sha256") or "").lower() == digest:
-                result["local_archive"] = str(staged.get("path") or "")
-                result["local_verified_at"] = str(staged.get("verified_at") or "")
-            release = {"version": result["latest"], "asset": result["asset"], "page": result["page"]}
-            result["prompt"] = build_update_prompt(install, self.settings.home.resolve(), self.mcp_config(),
-                                                   result["current"], release, local_archive=result["local_archive"])
-        return result
+        from . import update
 
-    def open_release_page(self) -> dict:
-        """Open the public release page in the default browser."""
-        url = update.release_page()
-        try:
-            opened = webbrowser.open(url)
-        except Exception:  # noqa: BLE001 - a missing browser must not break the window
-            opened = False
-        return {"opened": bool(opened), "url": url}
+        return update.check_latest(self.home, force=force)
 
-    def apply_update(self) -> dict:
-        """Stage the verified release; a detached script swaps it once this program exits."""
-        install = self.installation_directory()
-        if install is None:
-            return {"started": False, "message": "源码运行时不支持自动替换，请把更新提示词交给 Agent 处理。"}
-        release = self.check_update()
-        if not release.get("newer"):
-            return {"started": False, "message": release.get("message") or "没有可更新的版本。"}
-        staged = update.verified_archive(self.settings.home, release["latest"])
-        digest = str((release.get("asset") or {}).get("sha256") or "")
-        if not staged or not digest or str(staged.get("sha256") or "").lower() != digest.lower():
-            return {"started": False, "message": "请先下载并校验新版本，再执行替换。"}
-        return installer.apply(self.settings.home, install, release["latest"], release["current"],
-                               Path(str(staged["path"])), digest)
+    def apply_upgrade(self) -> dict:
+        from . import hosts, update
 
-    def overview(self, period: str = "24h") -> dict:
-        if period not in {"24h", "7d", "30d"}:
-            raise ValueError("时间范围须为 24h、7d 或 30d")
-        if not self.status()["ready"]:
-            return {"period": period, "activity": {"since": None, "days": []}, "metrics": [
-                {"key": key, "label": label, "unit": unit, "current": 0, "points": []}
-                for key, label, unit in (("sessions", "会话总结", "条"), ("memories", "知识与技能", "条"),
-                                         ("estimated_tokens", "正文估算 token", "tokens"))
-            ]}
-        return self._vault().overview(period)
+        return update.upgrade(home=self.home,
+                              install_root=paths.install_root(self.home, self.settings.load()),
+                              force=True,
+                              doctor=lambda: hosts.doctor_all_hosts(self.home, None, self.settings.load()))
 
-    def _model(self) -> ModelClient:
-        settings = self.settings.load()
-        if not settings.model.strip():
-            raise ValueError("请先设置模型名称；基础保存和搜索不需要模型")
-        return ModelClient(settings.base_url, settings.model, self.settings.api_key())
+    # ------------------------------------------------------------------
+    # 迁移（第 6 步准备）
+    # ------------------------------------------------------------------
+    def migrate_dry_run(self, old_home: str) -> dict:
+        old = Path(str(old_home or "")).expanduser()
+        report = {
+            "mode": "dry-run",
+            "old_home": str(old),
+            "old_home_exists": old.is_dir(),
+            "old_vault": "",
+            "old_vault_exists": False,
+            "new_vault": str(self.vault_root()) if str(self.vault_root()) else "",
+            "vault_files": {},
+            "old_index": {},
+            "note_kinds": {},
+            "import_plan": [],
+            "unmapped": [],
+            "errors": [],
+            "writes": "无（dry-run 只读）",
+        }
+        if not old.is_dir():
+            report["errors"].append("旧数据目录不存在")
+            return report
+        settings_path = old / "settings.json"
+        if settings_path.is_file():
+            try:
+                values = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+                report["old_vault"] = str(values.get("vault_path") or "")
+            except (OSError, ValueError) as exc:
+                report["errors"].append(f"settings.json 读取失败：{exc}")
+        vault = Path(report["old_vault"]) if report["old_vault"] else None
+        report["old_vault_exists"] = bool(vault and vault.is_dir())
+        if vault and vault.is_dir():
+            patterns = {
+                "会话总结": "会话总结/**/*.md",
+                "项目卡": "项目/*/项目.md",
+                "知识": "知识/*.md",
+                "技能": "技能/**/SKILL.md",
+                "资料": "资料/**/*",
+                "草稿": "草稿/**/*",
+            }
+            for label, pattern in patterns.items():
+                try:
+                    report["vault_files"][label] = sum(1 for _ in vault.glob(pattern))
+                except OSError:
+                    report["vault_files"][label] = 0
+            report["vault_files"]["全局提示词"] = int((vault / "知识" / "全局提示词.md").is_file())
+        for db in old.glob("index-*.sqlite3"):
+            report["old_index"]["file"] = db.name
+            try:
+                import sqlite3
 
-    def test_connection(self) -> dict:
-        return self._model().test_connection()
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                tables = [row[0] for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")]
+                report["old_index"]["tables"] = tables
+                counts = {}
+                for table in tables:
+                    try:
+                        counts[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    except Exception:
+                        continue
+                report["old_index"]["counts"] = counts
+                if "notes" in tables:
+                    try:
+                        report["note_kinds"] = {kind: count for kind, count in con.execute(
+                            "SELECT kind, COUNT(*) FROM notes GROUP BY kind ORDER BY COUNT(*) DESC")}
+                    except Exception:
+                        pass
+                con.close()
+            except Exception as exc:
+                report["errors"].append(f"读取旧索引 {db.name} 失败：{exc}")
 
-    def search(self, query: str, project: str = "", limit: int = 5, target: str = "", method: str = "",
-               environment: dict | None = None, mode: str = "auto") -> dict:
-        if not isinstance(query, str) or not query.strip() or len(query) > 500:
-            raise ValueError("请输入 1 到 500 字符的检索词")
-        if mode not in {"auto", "text", "code"}:
-            raise ValueError("检索模式须为 auto、text 或 code")
-        vault = self._vault()
-        errors = ErrorReports(vault).search(query, project, target, method, environment)
-        # Omit a whole reminder if its applicability conditions do not fit the context budget.
-        reminders, used = [], 0
-        for item in errors:
-            size = estimate_tokens(json.dumps(item, ensure_ascii=False))
-            if used + size <= 300 and len(reminders) < 3:
-                reminders.append(item)
-                used += size
-        results = vault.search(query, project, max(1, min(5, limit)), mode=mode)
-        return {"vault_path": str(vault.path), "results": results, "errors": reminders, "mode": detect_mode(query, mode),
-                "guidance": "匹配结果需核对全部条件；未知条件不代表匹配。conflict=true 时，仅当前任务需要选择才询问用户。历史成功不等于永久可靠。"}
+        kinds = report.get("note_kinds") or {}
+        report["import_plan"] = [
+            {"source": "索引 notes(kind=session) / vault 会话总结", "count": kinds.get("session", 0),
+             "target": "会话总结/<项目或独立>/YYYY/MM/<名称>.md",
+             "action": "正文与 Markdown 结构保留；YAML 头按 handoff/v1 重建；旧 goal/progress/next_actions 映射到 目标/下一步；编号 D#/K#/E# 重建",
+             "fields_mapped": ["原命令", "目标", "进度→已完成 D#", "下一步", "项目归属", "agent", "时间", "文件链接"]},
+            {"source": "索引 notes(kind=project) / vault 项目/*/项目.md", "count": kinds.get("project", 0),
+             "target": "项目/<名>/项目卡.md + 会话索引.md",
+             "action": "名称、工作目录、父子关系、创建时间迁移；会话索引由程序重新生成",
+             "fields_mapped": ["项目名", "路径列表", "父项目", "创建时间", "状态"]},
+            {"source": "索引 notes(kind=object)", "count": kinds.get("object", 0),
+             "target": "公共池/<类型>/<名称>.md",
+             "action": "按旧对象的类型/名称重建公共池卡片；具体位置、当前状态、验证结果与简短历史保留",
+             "fields_mapped": ["object", "action", "location", "state", "evidence", "conditions"]},
+        ]
+        report["unmapped"] = [
+            {"source": "索引 notes(kind=memory)", "count": kinds.get("memory", 0),
+             "reason": "旧“知识”属于维护轮产物；第一期不做维护轮，保留旧 vault 原样，不导入"},
+            {"source": "索引 notes(kind=skill)", "count": kinds.get("skill", 0),
+             "reason": "技能为维护轮产物；第一期不生成、不导入"},
+            {"source": "索引 notes(kind=decision)", "count": kinds.get("decision", 0),
+             "reason": "旧决策没有 handoff/v1 的来源与证据字段；需人工整理进项目提示词或会话总结"},
+            {"source": "索引 notes(kind=task)", "count": kinds.get("task", 0),
+             "reason": "旧任务卡模型已废弃；可人工转成会话总结的未完成目标 G#"},
+            {"source": "索引 notes(kind=index) / processed / observations / daily_writes / state", "count": 0,
+             "reason": "程序生成的索引、维护进度、访问统计与项目映射由新程序重建，不迁移"},
+            {"source": "旧 error JSON / 费用账本 / 图表历史 / 附件注册记录", "count": 0,
+             "reason": "第一期不做错误库与费用模块，保留在旧应用数据目录"},
+        ]
+        report["summary"] = {
+            "会话总结": kinds.get("session", 0),
+            "项目卡": kinds.get("project", 0),
+            "公共池对象": kinds.get("object", 0),
+            "不迁移（知识/技能/决策/任务等）": sum(kinds.get(key, 0) for key in ("memory", "skill", "decision", "task", "index")),
+        }
+        report["next_steps"] = [
+            "确认后执行正式迁移：把计划中的会话总结、项目卡、公共池对象写入新 vault（旧 vault 只读、不移动）",
+            "迁移前备份新 vault（若已存在）并生成逐文件报告与失败清单",
+            "旧版解绑（改宿主全局配置）需另行确认后执行",
+        ]
+        return report
 
-    def bootstrap(self, cwd: str, session_id: str, agent: str, workspace_root: str = "", task_id: str = "", task: str = "", project: str | None = None) -> dict:
-        if not session_id.strip() or not agent.strip():
-            raise ValueError("需要宿主的稳定 session_id 和 Agent 名称")
-        if not isinstance(task, str) or len(task) > 500:
-            raise ValueError("当前任务须为不超过 500 字符的文本")
-        vault = self._vault()
-        key = "session:" + fingerprint(session_id)
-        session = vault.state(key)
-        workspace = session["workspace"] if session else vault.workspace(cwd, workspace_root)
-        session = session or {}
-        if project is not None:
-            if project:
-                session["target_project"] = project
-            else:
-                session.pop("target_project", None)
-        workspace_project = vault.match_project(workspace)
-        project = self._session_project(vault, {**session, "workspace": workspace})
-        if session.get("project") != project:
-            session["saved"] = False
-        session = vault.state(key, {"saved": False, **session, "workspace": workspace,
-                                   "project": project, "agent": agent})
-        info = vault.project(session["project"]) if session["project"] else None
-        result = {"workspace": workspace, "workspace_project": workspace_project, "project": session["project"], "independent": not session["project"],
-                  "project_directory": str(vault.root / Path(info["path"]).parent) if info else "",
-                  "project_context": None, "task": None, "relevant": [],
-                  "guidance": "全局提示词全文遵循。所有会话保存完整总结；项目会话另存进度，独立会话不创建项目、任务或决策。安装卸载、工具配置、skills、模型和电脑环境变更由所有会话通过 changes 保存对象、实际位置、当前状态及验证；普通源码修改留在项目。真实失败用 errors；无事项不建记录。search 默认空 project 查全部，项目 ID 查本项目，independent 查公共池，all 查全部。草稿只存放，由用户手动提供，不搜索、不注入、不维护。子代理仅回传。"}
-        if info:
-            result["project_context"] = {k: info.get(k) for k in ("path", "title", "status", "goal", "next_actions")}
-            parent_id = info.get("parent_project_id", "")
-            if parent_id:
-                parent = vault.project(parent_id)
-                result["project_context"]["parent"] = {"project_id": parent_id, "title": parent["title"]}
-                result["guidance"] += " 子项目检索会实时继承主项目知识；保存仍归当前子项目。成果提交与合并由用户在桌面选择执行。"
-            result["project_context"]["progress"] = info.get("progress", "")[:1600]
-            result["project_context"]["notes"] = info["body"][:1600]
-            if task_id:
-                path = vault.root / Path(info["path"]).parent / "任务" / (task_id + ".md")
-                if not path.resolve().is_relative_to(vault.root):
-                    raise ValueError("无效任务路径")
-                if path.exists():
-                    meta, body = vault.read(path)
-                    result["task"] = {"path": str(path), "goal": meta.get("goal"), "progress": body[:1600], "next_actions": meta.get("next_actions", [])}
-            candidates = ErrorReports(vault).search(info.get("goal", "") + " " + info["body"][:400], session["project"], high_only=True)
-            result["pitfalls"] = []
-            used = 0
-            for item in candidates:
-                size = estimate_tokens(json.dumps(item, ensure_ascii=False))
-                if used + size <= 120 and len(result["pitfalls"]) < 2:
-                    result["pitfalls"].append(item)
-                    used += size
-        result["guidance"] += ' 初次按工作区匹配；明确任务属于另一已有项目时 bootstrap(project=项目ID) 切换会话保存目标，省略 project 保持选择，project="" 恢复工作区匹配。workspace_project 是路径匹配，project 是实际保存目标。保留真实工作区和宿主身份，不因检索命中自动切换；不明确则询问用户。summary 只包含当前项目完整历史，同一聊天按项目分别保存，历史错存另处理。'
-        prompt = vault.global_prompt()
-        if prompt.strip():
-            result["global_prompt"] = prompt
-        if task.strip():
-            result["relevant"] = vault.search(task, project, 3, kinds=("memory", "skill", "object"))
-        vault.state("connection:" + fingerprint(agent.casefold())[:20], {"agent": agent, "last_seen": now()})
-        return result
 
-    def _session_project(self, vault, session):
-        if session.get("target_project"):
-            if not vault.project(session["target_project"]):
-                raise ValueError("目标项目不存在，请重新 bootstrap 指定已有项目或 project=\"\" 恢复工作区匹配")
-            return session["target_project"]
-        return vault.match_project(session["workspace"])
+# ---------------------------------------------------------------------------
+def _settings_dict(values) -> dict:
+    try:
+        from dataclasses import asdict
 
-    def _session(self, vault, context):
-        if not isinstance(context, dict) or context.get("role") != "root" or not context.get("session_id") or context.get("root_session_id") != context["session_id"]:
-            raise ValueError("共享保存仅限宿主标识的根代理；子代理向根代理回传")
-        key = "session:" + fingerprint(context["session_id"])
-        session = vault.state(key)
-        if not session:
-            raise ValueError("请先 bootstrap 获取工作区归属")
-        session["project"] = self._session_project(vault, session)
-        return key, session
+        return asdict(values)
+    except TypeError:
+        return {key: getattr(values, key, None) for key in
+                ("vault_path", "timezone", "ntp_enabled", "timeout_hours",
+                 "reminder_context_switch", "install_root")}
 
-    def save(self, context: dict, summary: str = "", goal: str = "", progress: str = "", next_actions: list[str] | None = None,
-             task_id: str = "", memory: dict | None = None, errors: list[dict] | None = None, errors_reviewed: bool = False,
-             project_status: str = "", decision: dict | None = None, changes: list[dict] | None = None) -> dict:
-        vault = self._vault()
-        key, session = self._session(vault, context)
-        if any(not isinstance(v, str) or len(v) > 12000 for v in (summary, goal, progress)):
-            raise ValueError("总结、目标和进度须为不超过 12,000 字符的文本")
-        actions = next_actions or []
-        if not isinstance(actions, list) or len(actions) > 20 or any(not isinstance(v, str) or len(v) > 1000 for v in actions):
-            raise ValueError("下一步最多 20 条，每条不超过 1000 字符")
-        if project_status and project_status not in {"active", "paused", "completed"}:
-            raise ValueError("项目状态须为 active、paused 或 completed")
-        if task_id and not session["project"]:
-            raise ValueError("独立会话不创建任务卡")
-        if memory and not session["project"]:
-            raise ValueError("独立会话通过 changes 保存实际电脑与工具变更，不保存普通会话经验")
-        if changes is not None:
-            if not isinstance(changes, list):
-                raise ValueError("changes 须为对象变更列表")
-            for change in changes:
-                if not isinstance(change, dict) or set(change) - {"object", "action", "location", "state", "evidence", "conditions"}:
-                    raise ValueError("对象变更字段不正确")
-                if any(not isinstance(change.get(k), str) or not change[k].strip() for k in ("object", "action", "location", "state")):
-                    raise ValueError("对象变更需要 object、action、location、state 文本")
-                if not isinstance(change.get("evidence", ""), str) or not isinstance(change.get("conditions", {}), dict):
-                    raise ValueError("验证依据须为文本，适用条件须为键值表")
-                if any(not isinstance(k, str) or not isinstance(v, str) for k, v in change.get("conditions", {}).items()):
-                    raise ValueError("适用条件须为文本键值表")
-        project = session["project"]
-        result = {"message": "阶段已保存", "project": project}
-        if summary.strip():
-            result["summary"] = vault.save_session(context["session_id"], session["agent"], project, summary, goal)
-        if project and any((goal, progress, next_actions is not None, project_status)):
-            info = vault.project(project)
-            metadata, old_body = vault.read(vault.root / info["path"])
-            metadata.update(goal=goal or metadata.get("goal", ""), next_actions=actions if next_actions is not None else metadata.get("next_actions", []))
-            if project_status:
-                metadata["status"] = project_status
-            if progress:
-                metadata["progress"] = progress
-            result["project_note"] = vault.write(info["path"], metadata, old_body)
-        if task_id:
-            result["task"] = vault.save_task(task_id, project, goal, progress, actions)
-        if decision:
-            if not project or not isinstance(decision.get("title"), str) or not isinstance(decision.get("body"), str):
-                raise ValueError("决策需已关联项目及 title/body")
-            info = vault.project(project)
-            path = Path(info["path"]).parent / "决策" / (fingerprint(decision["title"])[:20] + ".md")
-            result["decision"] = vault.write(path.as_posix(), {"kind": "decision", "title": decision["title"], "project": project}, decision["body"])
-        if errors:
-            result["error_report"] = ErrorReports(vault).save(context["session_id"], session["agent"], project, errors)
-        if memory:
-            if set(memory) - {"title", "body", "verified", "evidence", "conditions"}:
-                raise ValueError("经验字段不正确")
-            result["memory"] = vault.save_memory(project=project, sources=[result["summary"]["path"]] if "summary" in result else [], **memory)
-        if changes:
-            result["changes"] = [vault.save_change(change, session["agent"], context["session_id"]) for change in changes]
-        session["saved"] = errors_reviewed and bool(summary.strip())
-        vault.state(key, session)
-        vault.refresh()
-        return result
 
-    def feedback(self, context: dict, error_session_id: str, error_id: str, observation: dict):
-        vault = self._vault()
-        self._session(vault, context)
-        return ErrorReports(vault).feedback(error_session_id, error_id, observation)
+def _installed_version(settings) -> str:
+    try:
+        pointer = paths.current_file(paths.install_root(None, settings))
+        if pointer.is_file():
+            return pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    return ""
 
-    def hook(self, event: dict):
-        # The host adapter supplies root identity and a stable user-turn ID, never transcript contents.
-        if event.get("role") != "root" or event.get("root_session_id") != event.get("session_id"):
-            return {}
-        kind = event.get("event")
-        if kind == "start":
-            return {"additionalContext": "调用 Tbrain bootstrap，传入宿主 session_id、agent、cwd/workspace_root；任务明确时带 task。全局提示词非空则全文加载；初次按应用配置匹配项目，未匹配直接独立。明确任务属于另一已有项目时 bootstrap(project=项目ID) 切换会话保存目标，省略保持，project=\"\" 恢复工作区匹配；保留真实工作区与宿主ID。按项目分别保存完整总结，独立会话也保存完整总结；实际电脑与工具变更用 changes 保存，真实失败用 errors。草稿仅用户手动提供。"}
-        vault = self._vault()
-        key = "session:" + fingerprint(event.get("session_id", ""))
-        session = vault.state(key)
-        if not session:
-            reminder_key = "unbound-hook:" + fingerprint(event.get("session_id", ""))
-            if kind == "turn":
-                vault.state(reminder_key, {"reminded": False})
-            elif kind == "closeout" and not (vault.state(reminder_key) or {}).get("reminded"):
-                vault.state(reminder_key, {"reminded": True})
-                return {"decision": "block", "reason": "请先 bootstrap 加载全局提示词并获取归属。项目和独立会话均保存完整总结；实际变更和错误按需记录。本轮只提醒一次。"}
-            return {}
-        session["project"] = vault.match_project(session["workspace"])
-        if kind == "turn":
-            session.update(saved=False, reminded=False)
-            vault.state(key, session)
-        elif kind == "failure" and event.get("actual_failure") is True and not event.get("expected_probe"):
-            item = event.get("error", {})
-            session["project"] = self._session_project(vault, session)
-            ErrorReports(vault).save(event["session_id"], session["agent"], session["project"], [item])
-            session["saved"] = False
-            vault.state(key, session)
-        elif kind == "closeout":
-            turn_id = event.get("turn_id", "")
-            if turn_id and session.get("turn_id") != turn_id:
-                session.update(turn_id=turn_id, reminded=False)
-            if not session.get("saved") and not session.get("reminded"):
-                session["reminded"] = True
-                vault.state(key, session)
-                instruction = "保存完整总结及项目进度" if session["project"] else "保存完整会话总结，并用 changes 补充实际电脑与工具变更"
-                return {"decision": "block", "reason": f"请根代理检查实际失败并补全错误记录，{instruction}，再 save(errors_reviewed=true)。无错误不建空报告。本轮只提醒一次。"}
-        return {}
 
-    def import_document(self, path: str) -> dict:
-        vault = self._vault()
-        saved = vault.import_document(Path(path).expanduser())
-        vault.refresh()
-        return {"message": "文档副本已导入，原文件保持不变" if not saved.get("unchanged") else "相同内容已经导入", **saved}
+def _priority(status) -> int:
+    return {"已中断": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}.get(str(status), 5)
 
-    def maintain(self) -> dict:
-        return maintain(self)
 
-    def mcp_config(self) -> dict:
-        args = [] if getattr(sys, "frozen", False) else ["-m", "tbrain"]
-        args += ["--home", str(self.settings.home.resolve()), "mcp"]
-        executable = Path(sys.executable)
-        if executable.name.lower() == "pythonw.exe":
-            executable = executable.with_name("python.exe")
-        return {"mcpServers": {"tbrain": {"command": str(executable), "args": args}}}
+def _display(service, iso_text) -> str:
+    try:
+        moment = datetime.strptime(str(iso_text), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        zone = ZoneInfo(service.settings.load().timezone)
+        return moment.astimezone(zone).strftime("%m-%d %H:%M")
+    except Exception:
+        return str(iso_text or "")
+
+
+def _split_front(text: str) -> tuple[dict, str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return {}, text
+    import yaml
+
+    try:
+        front = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        front = {}
+    return (front if isinstance(front, dict) else {}), text[end + 4:]
+
+
+def _public_id(relative: str, front: dict) -> str:
+    kind = str(front.get("kind") or Path(relative).parent.name)
+    name = str(front.get("name") or Path(relative).stem)
+    return f"{kind}-{name}"

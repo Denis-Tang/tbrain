@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from . import __version__
+from . import __version__, installer, paths, proc
 
 REPOSITORY = "Denis-Tang/tbrain"
 RELEASE_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
@@ -380,3 +380,192 @@ def download_release(home: Path, release: dict, progress=None, cancelled=None, s
               "verified_at": _now().isoformat(), "entries": layout["entries"]}
     _write_record(target.parent, record)
     return {**record, "path": str(target), "reused": False}
+
+
+# ---------------------------------------------------------------------------
+# local packages and the full upgrade flow
+# ---------------------------------------------------------------------------
+
+VERSION_PATTERN = re.compile(r"__version__\s*=\s*[\"']([^\"']+)[\"']")
+PACKAGE_INIT_CANDIDATES = (
+    "tbrain/__init__.py",
+    "_internal/tbrain/__init__.py",
+    "tbrain/_internal/tbrain/__init__.py",
+)
+# scripts/build.ps1 writes this next to tbrain.exe because PyInstaller onedir
+# does not keep readable .py sources in the package.
+PACKAGE_VERSION_FILES = ("VERSION", "version.txt", "tbrain_version.txt")
+
+
+def infer_package_version(package: Path) -> str:
+    """Read ``tbrain.__version__`` from a package directory or release ZIP."""
+    package = Path(package)
+    try:
+        if package.is_dir():
+            for relative in PACKAGE_INIT_CANDIDATES:
+                candidate = package / relative
+                if candidate.is_file():
+                    match = VERSION_PATTERN.search(candidate.read_text(encoding="utf-8-sig"))
+                    if match:
+                        return match.group(1).strip()
+            for name in PACKAGE_VERSION_FILES:
+                candidate = package / name
+                if candidate.is_file():
+                    text = candidate.read_text(encoding="utf-8-sig").strip().splitlines()
+                    if text and text[0].strip():
+                        return text[0].strip()
+            return ""
+        with zipfile.ZipFile(package) as archive:
+            names = archive.namelist()
+            for name in names:
+                if not name.endswith("tbrain/__init__.py"):
+                    continue
+                match = VERSION_PATTERN.search(archive.read(name).decode("utf-8-sig", "replace"))
+                if match:
+                    return match.group(1).strip()
+            for candidate in PACKAGE_VERSION_FILES:
+                for name in (f"tbrain/{candidate}", candidate):
+                    if name in names:
+                        text = archive.read(name).decode("utf-8-sig", "replace").strip().splitlines()
+                        if text and text[0].strip():
+                            return text[0].strip()
+            return ""
+    except (OSError, zipfile.BadZipFile, UnicodeError):
+        return ""
+    return ""
+
+
+def download_package(url: str, home: Path, stream=None, timeout: float = 60.0,
+                     name: str = "") -> dict:
+    """Stream an arbitrary package URL into ``updates/manual`` and hash it."""
+    folder = updates_directory(home) / "manual"
+    folder.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(name or url.split("?", 1)[0]).name or f"tbrain-package-{_now():%Y%m%d%H%M%S}.zip"
+    target = folder / safe_name
+    part = target.with_name(target.name + ".part")
+    part.unlink(missing_ok=True)
+    hasher = hashlib.sha256()
+    received = 0
+    try:
+        with (stream or _open_download)(url, timeout) as response:
+            response.raise_for_status()
+            with part.open("wb") as handle:
+                for chunk in response.iter_bytes(CHUNK_BYTES):
+                    handle.write(chunk)
+                    hasher.update(chunk)
+                    received += len(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except httpx.HTTPStatusError as exc:
+        part.unlink(missing_ok=True)
+        raise UpdateError(f"下载失败：HTTP {exc.response.status_code}。") from None
+    except (httpx.HTTPError, httpx.InvalidURL, OSError):
+        part.unlink(missing_ok=True)
+        raise UpdateError("下载失败，请检查网络后重试。") from None
+    os.replace(part, target)
+    return {"path": str(target), "sha256": hasher.hexdigest(), "size": received, "name": target.name}
+
+
+def upgrade_from_package(source, version: str = "", home: Path | None = None,
+                         install_root: Path | None = None, timeout: float = 5.0,
+                         doctor=None, prune_keep: int = 2, stream=None,
+                         sha256: str = "", progress=None) -> dict:
+    """Install a local/ZIP/URL package, evict old processes, switch, doctor, prune."""
+    home = paths.app_home(home)
+    root = Path(install_root) if install_root is not None else paths.install_root(home)
+    from_version = installer.current_version(root)
+    text = str(source)
+    downloaded: dict = {}
+    if text.lower().startswith(("http://", "https://")):
+        downloaded = download_package(text, home, stream=stream)
+        package = Path(downloaded["path"])
+        expected = (sha256 or "").lower()
+        if expected and downloaded["sha256"] != expected:
+            raise UpdateError("校验失败：下载内容与给定的 SHA256 不一致，已删除。")
+    else:
+        package = Path(source).expanduser()
+        if not package.exists():
+            raise UpdateError(f"找不到升级包：{package}")
+        if sha256 and package.is_file():
+            if file_sha256(package) != sha256.lower():
+                raise UpdateError("校验失败：升级包与给定的 SHA256 不一致。")
+    target_version = str(version or "").strip() or infer_package_version(package)
+    if not target_version:
+        raise UpdateError("无法从升级包确定版本号，请用 --version 指定。")
+    if package.is_file():
+        installer.verify_archive(package)
+    else:
+        installer.verify_source(package)
+    installer.write_state(home, stage="replacing", version=target_version,
+                          from_version=from_version, install_root=str(root))
+    switched = False
+    try:
+        installed = installer.install_from_package(package, target_version, root=root, make_current=False)
+        if not installed.get("ok"):
+            raise UpdateError("新版本文件校验失败：" + "、".join(installed.get("missing") or []))
+        evicted = proc.evict_old_versions(target_version, timeout=timeout, home=home)
+        switched = installer.switch_current(target_version, root)
+        if not switched.get("ok"):
+            raise UpdateError("切换当前版本失败：" + "、".join(switched.get("missing") or []))
+        doctor_result = None
+        doctor_error = ""
+        if doctor is not None:
+            try:
+                doctor_result = doctor()
+            except Exception as exc:  # doctor failure must not undo a good upgrade
+                doctor_error = str(exc)
+        pruned = installer.prune_versions(prune_keep, root)
+        installer.write_state(home, stage="done", version=target_version,
+                              from_version=from_version, install_root=str(root))
+        return {
+            "ok": True,
+            "upgraded": True,
+            "from": from_version,
+            "to": target_version,
+            "install_root": str(root),
+            "entry": installer.entry_command(root),
+            "package": str(package),
+            "downloaded": downloaded,
+            "installed": installed,
+            "evicted": evicted,
+            "switched": switched,
+            "doctor": doctor_result,
+            "doctor_error": doctor_error,
+            "pruned": pruned,
+        }
+    except Exception as exc:
+        if switched and from_version:
+            try:  # best-effort rollback to the version that was running
+                installer.switch_current(from_version, root)
+            except Exception:
+                pass
+        installer.write_state(home, stage="failed", version=target_version,
+                              from_version=from_version, install_root=str(root),
+                              message=str(exc))
+        if isinstance(exc, UpdateError):
+            raise
+        raise UpdateError(str(exc) or "升级失败") from None
+
+
+def upgrade(home: Path | None = None, install_root: Path | None = None,
+            force: bool = True, doctor=None, fetcher=None, stream=None,
+            timeout: float = 5.0, prune_keep: int = 2, progress=None) -> dict:
+    """Check GitHub, download and verify the newest release, then upgrade."""
+    home = paths.app_home(home)
+    check = check_latest(home, force=force, fetcher=fetcher)
+    if not check.get("newer"):
+        return {"ok": True, "upgraded": False, "check": check,
+                "message": check.get("message") or "已是最新版本"}
+    version = str(check.get("latest") or "")
+    asset = check.get("asset") or {}
+    cached = verified_archive(home, version)
+    if not cached:
+        if not asset.get("url"):
+            raise UpdateError("发布信息里没有可下载的安装包。")
+        cached = download_release(home, {"version": version, "asset": asset},
+                                  stream=stream, progress=progress)
+    result = upgrade_from_package(cached["path"], version, home=home,
+                                  install_root=install_root, timeout=timeout,
+                                  doctor=doctor, prune_keep=prune_keep)
+    result["check"] = check
+    return result

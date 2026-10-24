@@ -1,73 +1,131 @@
-"""MCP exposes the local application workflow without model or shell execution."""
+"""Tbrain MCP server: four deterministic tools for coding agents.
+
+The tools never call a model.  The model submits incremental operations; the
+program validates, numbers, indexes and writes them.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
-from typing_extensions import TypedDict, NotRequired
+
 from mcp.server.fastmcp import FastMCP
-from .service import BrainService
+
+from . import __version__
+from .service import TbrainService
+
+WRITING_SPEC = """\
+写作规范（写进每一条记忆前先读一遍，一次写对）：
+- 一条只说一件事，句式：对象 + 动作 + 结果。对象写全称（文件名、函数名、路径、命令、工具名），
+  不写“它、这个、上面那个、该模块、最近、刚才、现在、昨天”。
+- 时间由程序写入，不要自己写时间；需要先后关系时引用编号，例如“D3 之后”。
+- 指代其他条目用编号（D#、K#、E#、G#），不要复述内容。
+- 证据 E# 只允许三种：文件:行号、命令+输出（≤3 行）、commit 号；没有证据的推断不要写成已排除。
+- 已完成 D# 写成“动作 → 结果 [证据:E#]”；决策 K# 写成“决策 | 理由”；
+  未走通的路 X# 写成“尝试 | 原因类别 | 当时条件 | 结论强度”，原因类别只允许
+  环境/权限限制、时间不够、证据不足、已证实不可行；结论强度只允许 已排除（必须附证据）或 暂缓。
+- 下一步只能 1 条（≤150 字），写成“动作 + 怎么验证”；目标 ≤200 字。
+- 单条 ≤200 字；D#/K# 各超过 30 条会自动移入归档。
+"""
+
+SAVE_TEMPLATE = """\
+save 操作示例（operations 是对象数组，一次可提交多个操作）：
+1. 完成项：{"op":"append","section":"done","items":[{"text":"给 index.py 增加中文两字切分影子列 [证据:E1]"}]}
+2. 决策：  {"op":"append","section":"decision","items":[{"text":"SQLite 只做索引 | Markdown 是唯一事实源"}]}
+3. 走不通：{"op":"append","section":"dead_end","items":[{"attempt":"用 trigram 分词","reason_kind":"已证实不可行",
+   "conditions":"SQLite 3.45 / FTS5","strength":"已排除","evidence":"E2"}]}
+4. 证据：  {"op":"append","section":"evidence","items":[{"kind":"file","text":"src/tbrain/index.py:88"}]}
+5. 未完成目标：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
+6. 目标：  {"op":"replace","section":"target","text":"……（≤200 字）"}
+7. 下一步：{"op":"replace","section":"next_step","text":"跑 pytest -q，确认中文检索用例全绿"}
+8. 状态：  {"op":"set_status","status":"已完成","complete_goals":["G1"]}
+9. 环境变更：{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv",
+   "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
+10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
+   "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
+"""
+
+PROJECT_PROMPT_SPEC = """\
+项目提示词规范（project_prompt 操作，程序按此检查，不合格的节退回并说明原因）：
+- 只允许四节且顺序固定：最终目标（≤3 行，每行 ≤80 字）、硬规则（≤12 条，每条 ≤80 字）、
+  当前阶段（≤5 行，每行 ≤80 字）、关键路径和命令（≤10 条，每条 ≤100 字）；全文 ≤4000 字。
+- 硬规则每条必须带来源：（来源：[[会话名]]#U3 或 U3 / E4）。没有来源的不收。
+- 只写长期有效内容（3 个会话后仍成立），不写过程/尝试经过/某次会话做了什么；
+  不写时间词与评价语气词；主语写全称。
+- 关键时刻只说“阶段名：完成标准”；关键路径写成“用途：路径或命令”，程序会检查路径是否存在。
+- 整节替换；被替换的旧内容由程序写入变更日志。用户补充区（用户手写）不可改。
+"""
 
 
-class Context(TypedDict):
-    role: str
-    session_id: str
-    root_session_id: str
+def _with_meta(service: TbrainService, result: dict) -> dict:
+    if isinstance(result, dict):
+        result.setdefault("tbrain_version", __version__)
+        if "current_time" not in result:
+            try:
+                result["current_time"] = service.time_now().get("display", "")
+            except Exception:
+                result["current_time"] = ""
+    return result
 
 
-class MemoryInput(TypedDict):
-    title: str
-    body: str
-    verified: NotRequired[bool]
-    evidence: NotRequired[str]
-    conditions: NotRequired[dict[str, str]]
-
-
-class ChangeInput(TypedDict):
-    object: str
-    action: str
-    location: str
-    state: str
-    evidence: NotRequired[str]
-    conditions: NotRequired[dict[str, str]]
-
-
-class ErrorInput(TypedDict):
-    target: str
-    method: str
-    symptom: str
-    id: NotRequired[str]
-    environment: NotRequired[dict[str, str]]
-    attempts: NotRequired[str]
-    workaround: NotRequired[str]
-    impact: NotRequired[str]
-    global_scope: NotRequired[bool]
-
-
-def create_server(home: Path | None = None) -> FastMCP:
-    service = BrainService(home)
+def create_server(home: Path | None = None, *, service=None) -> FastMCP:
+    service = service or TbrainService(home)
     server = FastMCP("Tbrain")
 
-    @server.tool(description="Start each root session and refresh after project configuration changes. Reuse host session_id; workspace_root overrides startup cwd. Configured paths match the most specific project; unmatched paths are independent. Provide a brief current task (up to 500 characters) when known to select a few relevant knowledge/skill records. When the task clearly belongs to another existing project, pass its ID as project to persist the session save target without changing workspace. Omit project to retain the target; project=\"\" restores workspace matching. Search hits alone do not switch projects. workspace_project is the path match; project is the actual save target. Always follow the full nonempty global_prompt, edited only by the user. Drafts are excluded; the user supplies them when needed.")
-    def bootstrap(cwd: str, session_id: str, agent: str, workspace_root: str = "", task_id: str = "", task: str = "", project: str | None = None) -> dict:
-        return service.bootstrap(cwd, session_id, agent, workspace_root, task_id, task=task, project=project)
+    @server.tool(description=(
+        "启动/恢复本会话并返回启动包（全局提示词、项目提示词、公共池索引、附件卡片、接续视图前 5 条、当前时间）。"
+        "有 hook 的宿主由 hook 自动完成，本工具用于无 hook 的宿主或需要手动刷新时。"
+        "session_id 必须是宿主提供的稳定会话 ID，格式 <宿主名>:<宿主会话ID>（例如 claude-code:3f2a…）；"
+        "agent 为 claude-code/codex/dsh/pi。project 仅用于明确切换保存目标，省略表示按 cwd 匹配。"
+        "返回 session_id 后，search/save/resume 必须原样传入。"
+    ))
+    def bootstrap(session_id: str, agent: str, cwd: str, host_record: str = "", project: str = "") -> dict:
+        result = service.bootstrap(session_id=session_id, agent=agent, cwd=cwd,
+                                   host_record=host_record, project=(project or None))
+        return _with_meta(service, result)
 
-    @server.tool(description="Search knowledge, skills and applicable errors locally. project=ID searches that project and, for a child project, its parent knowledge; project='independent' searches the public object pool; empty project or 'all' searches all projects and the public pool. Independent sessions default to all; project sessions pass the bootstrap project ID. mode=auto detects Chinese prose versus code-shaped queries (identifiers, paths, file names); pass mode='text' or mode='code' to override and the response reports the mode used. Check source project, conditions and evidence. Drafts are excluded. Pass target/method/environment for failures; unknown conditions need checking.")
-    def search(query: str, project: str = "", limit: int = 5, target: str = "", method: str = "",
-               environment: dict[str, str] | None = None, mode: str = "auto") -> dict:
-        return service.search(query, project, limit, target, method, environment, mode)
+    @server.tool(description=(
+        "按需检索：本项目 → 公共池 → 独立会话池，每次最多 5 条并附来源路径与更新时间。"
+        "session_id 用于确定本项目范围（省略时只搜公共池与独立会话池）。"
+        "检索命中不会切换保存目标。涉及已知失败对象时可把对象/方法写进 query。"
+    ))
+    def search(query: str, session_id: str = "", limit: int = 5) -> dict:
+        return _with_meta(service, service.search(query=query, session_id=session_id, limit=limit))
 
-    @server.tool(description="Root-only stage save to the project selected by bootstrap. Summaries are separate per session and project; include only the current project history. Project sessions save a full current summary and progress, with optional tasks, decisions and verified memory. Independent sessions also save a full summary, without creating a project, task, decision or standalone memory. All sessions record actual installation/removal, tool/skill/model configuration and computer environment changes in changes: object, action, exact location, current state, optional evidence/conditions; ordinary source edits stay in project records. Changes update public object files and history. Record real errors separately. At closeout review changes and errors and set errors_reviewed=true together with the full summary, including independent sessions. Never edit the user's global prompt or drafts automatically. Generated skills are records, not installed or executed.")
-    def save(context: Context, summary: str = "", goal: str = "", progress: str = "", next_actions: list[str] | None = None,
-             task_id: str = "", memory: MemoryInput | None = None, errors: list[ErrorInput] | None = None, errors_reviewed: bool = False,
-             project_status: str = "", decision: dict[str, str] | None = None, changes: list[ChangeInput] | None = None) -> dict:
-        return service.save(context, summary, goal, progress, next_actions, task_id, memory, errors, errors_reviewed, project_status, decision, changes=changes)
+    @server.tool(description=("把本轮增量写入当前会话总结。只提交变化的部分，不要重写整篇。\n\n"
+                              + WRITING_SPEC + "\n" + SAVE_TEMPLATE + "\n" + PROJECT_PROMPT_SPEC))
+    def save(session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
+        return _with_meta(service, service.save(session_id=session_id, operations=operations, last_test=last_test))
 
-    @server.tool(description="After checking a real successful outcome, link it to an earlier error. observation needs target, method, environment, evidence. Comparable conditions retire current warning; different methods add a workaround; unknown conditions retain both observations.")
-    def feedback(context: Context, error_session_id: str, error_id: str, observation: dict) -> dict:
-        return service.feedback(context, error_session_id, error_id, observation)
+    @server.tool(description=(
+        "返回旧会话的交接包（原始命令、目标、未完成目标、下一步、最近 3 条用户指令、已完成与证据清单），"
+        "并在当前会话总结写入“接续自”。target 是会话名或 session_id；旧会话文件不会被修改。"
+    ))
+    def resume(session_id: str, target: str) -> dict:
+        return _with_meta(service, service.resume(session_id=session_id, target=target))
 
-    @server.tool(description="Read readiness, pending maintenance and monthly budget usage. Does not invoke a model.")
-    def status() -> dict:
-        return service.status()
     return server
 
 
-def run(home: Path | None = None):
-    create_server(home).run(transport="stdio")
+def run(home: Path | None = None) -> None:
+    import os
+
+    service = TbrainService(home)
+    watcher = None
+    try:
+        from . import proc
+
+        proc.register("mcp", service.version(), home=service.home)
+        watcher = proc.start_watcher(on_exit=lambda: os._exit(0), home=service.home)
+    except Exception:
+        watcher = None
+    try:
+        create_server(home, service=service).run(transport="stdio")
+    finally:
+        try:
+            if watcher is not None:
+                watcher.stop()
+            from . import proc
+
+            proc.unregister(home=service.home)
+        except Exception:
+            pass

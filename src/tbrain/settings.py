@@ -1,80 +1,208 @@
-"""Machine-local settings; model secrets belong to the OS credential store."""
+"""Machine-local settings stored in ``app_home/settings.json``.
 
-import hashlib
+The file is plain JSON so users can inspect/edit it.  Reading is tolerant: unknown
+keys (including fields from older versions) are preserved on disk but ignored when
+building the :class:`Settings` object.  Writing is atomic (temporary sibling plus
+``os.replace``).
+
+Settings carry no secrets: model credentials belong to the OS credential store, a
+different concern than this module.
+"""
+
+from __future__ import annotations
+
 import json
 import os
-import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
-import keyring
+try:  # tzlocal is a declared dependency; degrade gracefully if it is absent.
+    import tzlocal
+except ImportError:  # pragma: no cover - defensive
+    tzlocal = None  # type: ignore[assignment]
+
+
+FALLBACK_TIMEZONE = "Asia/Shanghai"
 
 
 def default_home() -> Path:
-    if os.environ.get("TBRAIN_HOME"):
-        return Path(os.environ["TBRAIN_HOME"]).expanduser()
-    return Path.home() / ".tbrain"
+    """The application data directory (kept for backwards-compatible imports)."""
+    from .paths import app_home
+
+    return app_home()
+
+
+def default_vault_path() -> Path:
+    """Default knowledge-base location; the user can change it in settings."""
+    configured = os.environ.get("TBRAIN_VAULT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "TbrainVault"
+
+
+def available_timezones_list() -> list[str]:
+    """Sorted IANA names for the settings page drop-down."""
+    return sorted(available_timezones())
+
+
+def system_timezone() -> str:
+    """Best-effort name of the operating system time zone."""
+    if tzlocal is not None:
+        try:
+            name = tzlocal.get_localzone_name()
+        except Exception:  # pragma: no cover - platform dependent
+            name = ""
+        if name and valid_timezone(name):
+            return name
+    return FALLBACK_TIMEZONE
+
+
+def default_timezone() -> str:
+    return system_timezone()
+
+
+def valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(str(name))
+        return True
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+
+
+def validate_timezone(name: str) -> str:
+    """Return the IANA name unchanged or raise a user-facing ValueError."""
+    text = str(name or "").strip()
+    if not text:
+        raise ValueError("请选择时区")
+    try:
+        ZoneInfo(text)
+    except ZoneInfoNotFoundError:
+        raise ValueError(f"无效的时区名称：{text}") from None
+    except (ValueError, OSError):
+        raise ValueError(f"无效的时区名称：{text}") from None
+    return text
 
 
 @dataclass
 class Settings:
+    """The six fixed settings keys; an empty string means "not configured"."""
+
     vault_path: str = ""
-    base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-flash"
-    maintenance_enabled: bool = False
-    maintenance_time: str = "02:00"
-    key_configured: bool = False
-    credential_account: str = ""
+    timezone: str = ""
+    ntp_enabled: bool = True
+    timeout_hours: float = 6.0
+    reminder_context_switch: bool = True
+    install_root: str = ""
+
+    @property
+    def resolved_timezone(self) -> str:
+        return self.timezone or system_timezone()
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+KNOWN_KEYS = tuple(field.name for field in fields(Settings))
+_BOOL_KEYS = {"ntp_enabled", "reminder_context_switch"}
+_EXPAND_KEYS = {"vault_path", "install_root"}
+
+
+def _coerce(key: str, value):
+    """Validate one settings value and return the normalized form."""
+    if key in _BOOL_KEYS:
+        if not isinstance(value, bool):
+            raise ValueError("设置项必须是布尔值")
+        return value
+    if key == "timeout_hours":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("超时小时数必须是数字")
+        number = float(value)
+        if number < 0 or number > 24 * 30:
+            raise ValueError("超时小时数须在 0 到 720 之间")
+        return number
+    if key == "timezone":
+        text = str(value or "").strip()
+        return validate_timezone(text) if text else ""
+    if key in _EXPAND_KEYS:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser()
+        if key == "vault_path" and path.exists() and not path.is_dir():
+            raise ValueError("请选择文件夹路径")
+        return str(path)
+    text = str(value or "")
+    return text
+
+
+def normalize(values: dict, base: dict | None = None) -> dict:
+    """Merge ``values`` over ``base`` (a dict), validating only known keys."""
+    merged = {key: (base or {}).get(key, getattr(Settings(), key)) for key in KNOWN_KEYS}
+    unknown = [key for key in values if key not in KNOWN_KEYS]
+    if unknown:
+        raise ValueError("包含不支持的设置项：" + "、".join(sorted(unknown)))
+    for key, value in values.items():
+        merged[key] = _coerce(key, value)
+    return merged
+
+
+def settings_from(values: dict) -> Settings:
+    """Build Settings from a raw JSON dict, ignoring unknown/legacy keys."""
+    merged = normalize({key: values[key] for key in KNOWN_KEYS if key in values})
+    return Settings(**merged)
+
+
+def load_settings(home: Path | None = None) -> Settings:
+    return SettingsStore(home).load()
+
+
+def save_settings(home: Path | None, values: dict) -> Settings:
+    return SettingsStore(home).save(values)
 
 
 class SettingsStore:
+    """Read/write ``<home>/settings.json``; the store keeps the raw dict for compat."""
+
     def __init__(self, home: Path | None = None):
-        self.home = Path(home) if home else default_home()
+        from .paths import app_home
+
+        self.home = Path(home) if home is not None else app_home()
         self.path = self.home / "settings.json"
-        self.account = self.load().credential_account or hashlib.sha256(str(self.home.resolve()).encode()).hexdigest()[:20]
+
+    # -- reading -----------------------------------------------------------
+    def read_raw(self) -> dict:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def load(self) -> Settings:
-        if not self.path.exists():
-            return Settings()
-        values = json.loads(self.path.read_text(encoding="utf-8"))
-        known = {f.name for f in fields(Settings)}
-        return Settings(**{k: v for k, v in values.items() if k in known})
+        return settings_from(self.read_raw())
 
+    def as_dict(self, settings: Settings | None = None) -> dict:
+        return (settings or self.load()).as_dict()
+
+    # -- writing -----------------------------------------------------------
+    def save(self, values: dict) -> Settings:
+        raw = self.read_raw()
+        merged = normalize(values, raw)
+        record = dict(raw)  # preserve unknown/legacy keys on disk untouched
+        record.update(merged)
+        self._write(record)
+        return Settings(**merged)
+
+    # Older services called this ``update``; keep the name working.
     def update(self, values: dict, api_key: str | None = None) -> Settings:
-        current = asdict(self.load())
-        allowed = set(current) - {"key_configured", "credential_account"}
-        if set(values) - allowed:
-            raise ValueError("包含不支持的设置项")
-        current.update(values)
-        parsed = urlparse(current["base_url"])
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("Base URL 必须是有效的 HTTP(S) 地址，不应包含凭据")
-        if not isinstance(current["maintenance_time"], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", current["maintenance_time"]):
-            raise ValueError("维护时间须为 24 小时制 HH:MM")
-        if not isinstance(current["maintenance_enabled"], bool):
-            raise ValueError("维护开关须为布尔值")
-        if not isinstance(current["model"], str) or len(current["model"]) > 200:
-            raise ValueError("模型名称须为不超过 200 字符的文本")
-        if "vault_path" in values:
-            if not isinstance(values["vault_path"], str) or not values["vault_path"].strip():
-                raise ValueError("请选择知识库目录")
-            path = Path(values["vault_path"]).expanduser().resolve()
-            if path.exists() and not path.is_dir():
-                raise ValueError("请选择文件夹路径")
-            current["vault_path"] = str(path)
         if api_key is not None:
-            if api_key.strip():
-                keyring.set_password("tbrain", self.account, api_key.strip())
-                current["key_configured"] = True
-            elif current["key_configured"]:
-                keyring.delete_password("tbrain", self.account)
-                current["key_configured"] = False
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return Settings(**current)
+            raise ValueError("此版本不再保存模型密钥，请使用系统凭据存储")
+        return self.save(values)
 
-    def api_key(self) -> str:
-        if not self.load().key_configured:
-            return ""
-        return keyring.get_password("tbrain", self.account) or ""
+    def _write(self, record: dict) -> None:
+        path = self.path
+        temporary = path.with_name(path.name + ".tmp")
+        text = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)

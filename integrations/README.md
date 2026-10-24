@@ -1,79 +1,87 @@
-# 宿主接入
+# Tbrain 宿主接入文件
 
-所有宿主连接同一 `tbrain.exe --home <应用数据目录> mcp`，服务名统一为 `tbrain`。知识库路径由程序设置管理，适配器不包含个人路径或凭据。宿主规则只保留启动、按需检索、有用阶段保存、实际错误与成功反馈；模型、权限提示和其他插件独立保留。
-
-任务明确后，根代理在 `bootstrap` 中传入不超过 500 字符的简短 `task`；非空 `global_prompt` 全文加载，只由用户编辑。`relevant` 按当前任务返回少量知识和技能。项目会话检索默认传项目 ID；子项目另实时继承主项目的知识、技能和资料，任务、会话和错误不继承，保存仍归当前子项目。成果提交与合并由用户在桌面选择执行。独立会话留空搜索公共独立池与全部项目。按需传 `project="independent"` 仅搜公共池，或 `project="all"` 搜全部，并核对结果的来源、适用条件与验证依据。`草稿/` 仅由程序建立项目及独立项目目录，用户在 Obsidian 编辑，需要时手动提供；不自动加载、搜索或夜间整理。
-
-桌面设置页的“Agent 已接入”及最近加载时间来自成功的 `bootstrap`，不代表实时在线、仅配置文件存在或 Hook 已验证。当前仍通过接入提示词配置各宿主，尚未提供自动宿主配置器。
-
-会话总结保留在原目录；同次保存的知识通过来源引用总结，桌面“资料与会话”可查看来源和反向链接。子项目合并成果保留来源，不迁移原总结或工作目录。
-
-项目会话继续保存完整总结和项目进度；独立会话也保存完整总结，仍不创建项目卡、任务卡、决策或单独经验。所有会话发生安装、卸载、工具配置、skills、模型及电脑环境变更后，通过 `save(changes=[...])` 更新公共对象文件，保留当前状态和简短变更历史。每项包含 `object`、`action`、`location`、`state`，`evidence` 写实际验证结果，未验证可空；`conditions` 可注明适用条件。具体位置应说明实际文件、目录或用户级/系统级设置范围，凭据值不写入。普通源码修改留在项目记录。Hook 不观察工具输出或电脑变更，记录由执行 Agent 主动保存。
-
-实际错误仍单独保留并可成功反馈。收尾核对变更和错误后传 `errors_reviewed=true`；独立会话同样调用 `save(context,summary=完整总结,errors_reviewed=true)`；没有变更或错误时不生成空对象或错误报告。独立总结不进入维护队列。维护只按材料归属生成知识或技能，公共对象材料的技能归 `技能/独立项目/`；全局提示词和草稿不参加维护，技能仅作记录，不自动安装或执行。
-
-## Codex / Claude Code
-
-0.4.4 分发包内置 Node.js，无需另装。将 MCP 以 `tbrain` 注册到 Codex 的用户级 `config.toml` 或 Claude 的用户级 MCP 配置。配置必须显式带 `--home`，不要依赖 MCP 子进程继承环境变量。
-
-命令 Hook 调用：
+本目录是 Tbrain 与四个宿主（Claude Code、Codex、DeepSeek Harness、pi coding agent）对接时用到的全部文件。正常使用不需要手工复制：安装后运行
 
 ```text
-"<安装目录>/runtime/node.exe" "<安装目录>/integrations/native-hooks.mjs" Codex "<安装目录>/tbrain.exe" "<应用数据目录>"
+tbrain install                     # 在解压后的发布包目录运行；装到 %LOCALAPPDATA%\Programs\Tbrain（版本化目录）
+tbrain connect claude-code         # 或 codex / dsh / pi
+tbrain doctor                      # 逐项检查安装、进程与四宿主状态
 ```
 
-Claude Code 把 `Codex` 改为 `Claude`。为 `SessionStart`、`UserPromptSubmit`、`Stop`、`SubagentStart` 四个事件配置同一命令；建议超时 5 秒。Codex Windows Hook 使用其 `commandWindows` 字段，Claude 使用当前版本支持的 `command` 格式。
+程序会备份被修改的宿主配置（同目录 `<原文件名>.tbrain-<YYYYmmdd-HHMMSS>.bak`），并且只增删 Tbrain 自己的 hook / MCP / 插件条目，保留用户的其他内容。
 
-启动 Hook 注入真实会话 ID、工作区和根身份。新用户输入重置收尾状态；漏保存时提醒一次。`stop_hook_active` 为真时不再阻止结束，避免 Codex 将 Hook 续答变为新提示时循环。子代理仅接收回传要求，不调用共享保存。适配器不读取会话文件、工具结果或密钥。
+## 固定入口（升级不改宿主配置）
 
-Codex 的新 Hook 必须通过宿主原生信任机制；只配置命令不代表已启用。不要使用跳过信任的运行参数。
+所有宿主的命令都指向同一个稳定入口：
 
-## PI-Desktop：原生 MCP 接入与退出
+```text
+<安装目录>\bin\tbrain.cmd
+```
 
-已在 PI-Desktop 0.15.10 验证原生 MCP 接入，无需安装适配器或修改全局 `AGENTS.md`。
+它读取同目录的 `current.txt`，执行 `versions\<版本>\tbrain.exe %*`。升级只切换 `current.txt`（并更新 `current` junction），因此**任何宿主的配置在升级后都不需要改**。
 
-在 PI-Desktop 的“设置 → MCP → 新增”中选择全局级、本地程序（stdio），填写：
+Hook 命令形如：
 
-- 标识符：`tbrain`；名称：`Tbrain 0.4.4`。
-- 可执行文件：`<Tbrain 安装目录>/tbrain.exe`。
-- 参数：`--home "<应用数据目录>" mcp`，与 Tbrain 桌面使用同一个 home。
-- 环境变量留空，不填写模型密钥；知识库路径继续由 Tbrain 设置管理。
+```text
+"<安装目录>\bin\tbrain.cmd" hook --host <claude-code|codex|dsh|pi>
+```
 
-保存并启用，点击“测试连接”，应显示 5 个工具。随后新建任务，询问已有项目经验；PI-Desktop 可通过原生 `ToolSearch` 按需发现 `mcp_tbrain_search`。本方式已验证 Agent 主动检索，不安装启动、失败或收尾 Hook，也不保证每次会话自动 bootstrap 或保存。需要保存时明确要求 Agent 按工具说明执行。
+MCP 命令形如：
 
-**当前项目临时脱离：**
+```text
+"<安装目录>\bin\tbrain.cmd" --home "<应用数据目录>" mcp
+```
 
-1. 等当前回合结束。
-2. 打开“设置 → MCP”，在“选择项目”中选中要停用的项目，关闭 `Tbrain 0.4.4` 右侧开关。
-3. 在该项目中新建任务继续使用 PI-Desktop。旧聊天里已经读入的知识仍在聊天历史中。
+`hooks.json` 是本目录的**模板**（占位符 `__TBRAIN_ENTRY__`）。`tbrain connect dsh` 会把具体内容写到 `<应用数据目录>\hooks.json`，供 DSH 的官方 Claude hooks 桥读取；Claude Code 与 Codex 的 hook 由同一个生成器内联写入各自配置文件。
 
-PI-Desktop 0.15.10 的开关按选中的项目生效；连接旁的“全局”标签表示配置的保存位置，不代表此开关会停用所有项目。恢复时选中同一项目，打开开关并新建任务。仅关闭 Tbrain 桌面窗口不能代替停用连接。
+## 四宿主对照
 
-**所有项目彻底脱离：**等当前回合结束，在“设置 → MCP”中打开该全局服务器的“操作 → 移除”，再点“再点一次删除”，随后新建任务。本接入已实测：移除后全局及项目查询均无该连接，它启动的 Tbrain 后台进程退出。普通模型对话仍可用；要重新接入，按上面的字段新增连接即可。
+| 宿主 | 写入的配置 | 生效时机 | 备注 |
+|---|---|---|---|
+| Claude Code | `~/.claude/settings.json` 的 `hooks`（SessionStart / UserPromptSubmit / Stop / PreCompact / SessionEnd，`shell: powershell`）；`~/.claude.json` 顶层 `mcpServers.tbrain` | 新开会话 | Windows 上必须用全引号 PowerShell 形式，exec 形式会退化 |
+| Codex | `~/.codex/hooks.json`（`command` + `commandWindows`，同样 5 个事件）；`~/.codex/config.toml` 的 `[mcp_servers.tbrain]` | 新进程；hook 还需用户信任 | **hook 未信任不会执行**：在 Codex 中执行 `/hooks` 审核并信任，`doctor` 会显示黄色“待信任” |
+| DeepSeek Harness | profile patch `~/.dsh/profiles/<profile>/cordis.patch.yml` 插入三项：`tbrain-mcp`（`@deepseek-ai/dsh-mcp-client`）、`tbrain-cc-hooks`（`@deepseek-ai/dsh-hooks-claude-code`，`configPath` 指向 `<应用数据目录>/hooks.json`）、`tbrain-native`（本目录 `tbrain-dsh.mjs` 的 file URL） | MCP 可热重连；桥与原生插件需重开 DSH | 桥/插件依赖不自动联网安装：`dsh plugin add @deepseek-ai/dsh-hooks-claude-code@0.2.1-rc.3`；缺失时 `doctor` 显示黄色并给出手动步骤 |
+| pi coding agent | `~/.pi/agent/extensions/tbrain.ts` | 新 pi 会话或 `/reload` | pi 无内置 MCP；扩展通过固定入口调用 `hook` 与 `tool` |
 
-永久退出时可再按需退出或卸载 Tbrain 程序。知识库 Markdown、Obsidian 资料及 PI-Desktop 聊天保留，不需要迁移，也不要删除整个 `.agents` 或 `.pi` 目录。全局连接项由 PI-Desktop 保存在 `~/.agents/servers/tbrain.json`；本接入没有额外写入全局指令或 Hook，因此无需清理其他入口。
+### DSH 说明
 
-## 旧 Oh-DSH Desktop
+- `tbrain-cc-hooks` 让 DSH 复用与 Claude/Codex 相同的 `hooks.json` 事件（SessionStart / UserPromptSubmit / Stop；桥不支持 PreCompact/SessionEnd）。
+- `tbrain-native`（`tbrain-dsh.mjs`）补齐桥没有的能力：`compaction/start` 的 PreCompact 提醒、`agent/disposed`/`session/disposed` 的 SessionEnd 状态、`agent/pre-step` 读 `ctx.tokenMeter` 后的换会话提醒。
+- `tbrain connect dsh` 会把 `tbrain-dsh.mjs` 复制到 `<应用数据目录>\integrations\`（含合法 `package.json`），profile patch 用该稳定路径，DSH 升级/切换版本都不会失效。可用 `--profile <名字>` 指定非 `desktop` 的 profile。
+- 真实 profile 里可能残留旧 Shared Brain 条目（`shared-brain-mcp`、`shared-brain-lifecycle`）：`doctor` 会把“旧 shared-brain 残留”标红，`tbrain disconnect dsh` 只删除 Tbrain 标记块，旧条目需要按迁移流程处理或手动删除。
 
-安装目录中的 Harness 0.1.2 已带 `@deepseek-ai/dsh-mcp-client`，复用它，无需新增工具桥。在当前 profile 的 `cordis.patch.yml` 中添加两项 `insert`：
+### Codex 信任
 
-- `tbrain-mcp`：`name: '@deepseek-ai/dsh-mcp-client'`，config 中设置 `serverName: tbrain`、`transport: stdio`、command 和 args。
-- `tbrain-lifecycle`：name 指向 `oh-dsh.mjs` 的 file URL，config 包含同一 command 和 home。
+Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定入口，内容在升级时保持不变，所以**只需信任一次**。程序不写 `trusted_hash`、不使用 `--dangerously-bypass-hook-trust`；`doctor` 在信任前显示黄色，并提示在 Codex 中执行 `/hooks`。
 
-生命周期使用旧宿主实际的 `agent/session-start`、`agent/pre-step`、`agent/turn-stopping`，身份来自 `agents.roots()` 与 `session.id`。只有 `source.kind=user` 的输入重置收尾状态，插件补写不重置。保留原 profile 的其他项及 `!!js` 表达式，不把整份 YAML 用普通 JSON/YAML 序列化覆盖。
+### pi 扩展
 
-DeepSeek Harness 0.1.7 继续使用 `deepseek-harness.mjs`，其启动事件和会话字段不同。
+`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`；pi 没有 Stop-block 等价事件，因此“请保存”提醒降级为下一轮提示（不强制续跑）。
 
-## 切换与验证
+## 升级后旧进程
 
-宿主配置修改前保存同目录 `.bak`。替换旧 DSH 的自动启动、保存 Hook 和 MCP 入口，保留其他 Hook。用户级薄入口和工作区入口需一致；旧 DSH 文档留作历史，不能继续覆盖新会话的启动规则。
+宿主自己缓存 MCP 子进程与 hook 命令：升级后**新会话**使用新版本；旧会话里的旧进程由新版本启动时的进程登记/退出请求处理（`~/.tbrain/processes/<pid>.json`，超时 `taskkill`）。升级后重开宿主或新开会话是最稳妥的做法。
 
-重开宿主或新会话后确认五工具及新的 `task`/`changes` 参数可见、启动身份正确、全局提示词完整、知识范围正确、项目保存可读回、独立会话总结可读回且归属为空、电脑变更更新公共对象、收尾只提醒一次。新知识库默认不继承旧库项目；未匹配路径不创建项目卡。已有项目在项目配置页补充路径；更新适配文件及薄入口后重启 MCP 连接，移除旧的归属询问和独立会话不写总结规则。
+## 手工检查
 
-关闭接入时移除 `tbrain` MCP 和上述适配器 Hook/profile 项；若要恢复旧 DSH，只从本机 `.bak` 恢复对应配置，知识库资料保留。
+```text
+tbrain doctor                      # 安装、进程、四宿主逐项红黄绿
+tbrain connect <host>              # 重新写入并备份
+tbrain disconnect <host>           # 只移除 Tbrain 条目
+```
 
-程序更新只需覆盖到原安装目录：MCP 与 Hook 配置写的是该目录的绝对路径，路径不变就无需修改任何配置。桌面左下角版本号可检查更新并复制「更新提示词」交给 Agent 执行替换；更新后重启宿主或新开会话，新的工具定义才会生效。
+| 状态 | 含义 |
+|---|---|
+| 绿色 | 无需操作 |
+| 黄色 | 待用户操作（未连接、Codex hook 待信任、DSH 桥/pi 扩展未安装、旧版本进程仍在运行） |
+| 红色 | 需要修复（固定入口缺失、安装不完整、旧 Shared Brain 残留、DSH 原生插件缺失） |
 
-本地测试覆盖两种原生命令 Hook 和两种 Harness 适配器，使用真实 EXE 与隔离数据目录。Codex 桌面内核可列出五工具，Claude CLI 可建立 MCP 连接，旧 Oh-DSH 已安装的客户端可注册五工具。模型实际遵循与用户真实跨宿主任务接力需要在新会话确认，测试不会代替用户发起付费请求。
+## 文件清单
 
-包内 Node.js 只执行命令 Hook；Oh-DSH 和 DeepSeek Harness 插件继续由宿主自己的运行时加载。Node.js 及其依赖的许可声明随包保存在 `runtime/NODE-LICENSE.txt`。
+| 文件 | 用途 |
+|---|---|
+| `hooks.json` | DSH 桥使用的 Claude 风格 hook 模板（`__TBRAIN_ENTRY__` 占位） |
+| `tbrain-dsh.mjs` | DSH 原生 cordis 插件（PreCompact / SessionEnd / 上下文提醒） |
+| `pi/tbrain.ts` | pi 扩展（生命周期 hook + 四个工具） |
+
+所有适配只保存“作为模型可读的会话记忆”所需的信息：不读取宿主完整会话记录、不收集工具原始输出、不写入任何凭据。

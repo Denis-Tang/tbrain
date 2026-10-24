@@ -4,166 +4,158 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tbrain</title>
-  <script>const preference=localStorage.getItem('appearance')||'system';document.documentElement.dataset.theme=preference==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):preference;</script>
+  <script>const appearance=localStorage.getItem('appearance')||'system';document.documentElement.dataset.theme=appearance==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):appearance;</script>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<div class="titlebar"><span>Tbrain</span><div class="window-actions"><button data-window="minimize" aria-label="最小化">−</button><button data-window="maximize" aria-label="最大化或还原">□</button><button data-window="close" aria-label="关闭到托盘">×</button></div></div>
-<div class="shell"><aside><div class="brand"><img src="icon.svg" alt="Tbrain"></div><nav><button class="nav-item active" data-page="overview" aria-label="总观" title="总观"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2.5"/><rect x="14" y="3" width="7" height="7" rx="2.5"/><rect x="3" y="14" width="7" height="7" rx="2.5"/><rect x="14" y="14" width="7" height="7" rx="2.5"/></svg></span><span class="nav-label">总观</span></button><button class="nav-item" data-page="projects" aria-label="项目配置" title="项目配置"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a3 3 0 0 1 3-3h3l3 3h6a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3Z"/><path d="M8 12h8M8 16h5"/></svg></span><span class="nav-label">项目配置</span></button><button class="nav-item" data-page="settings" aria-label="设置" title="设置"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4m6 0h8M3 17h8m6 0h4"/><circle cx="10" cy="7" r="3"/><circle cx="14" cy="17" r="3"/></svg></span><span class="nav-label">设置</span></button></nav><div class="foot"><button class="foot-version" id="app-version" type="button" title="检查更新">v—</button><span class="status-dot" id="ready-dot">●</span> <span id="ready-label">正在连接</span></div></aside><main tabindex="0" aria-label="页面内容">
+<div class="titlebar"><span class="titlebar-name">Tbrain</span><div class="window-actions"><button type="button" data-window="minimize" aria-label="最小化">−</button><button type="button" data-window="maximize" aria-label="最大化或还原">□</button><button type="button" data-window="close" aria-label="关闭到托盘">×</button></div></div>
 
-    <header><h1 id="page-title">总观</h1><button type="button" id="new-project" class="button primary" hidden>新增项目</button><button id="open-setup-guide" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="setup-guide" hidden>配置引导</button></header>
+<div class="shell">
+  <aside>
+    <div class="brand"><img src="icon.svg" alt="Tbrain"></div>
+    <nav aria-label="主导航">
+      <button type="button" class="nav-item active" data-page="overview" aria-label="总观" title="总观"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2.5"/><rect x="14" y="3" width="7" height="7" rx="2.5"/><rect x="3" y="14" width="7" height="7" rx="2.5"/><rect x="14" y="14" width="7" height="7" rx="2.5"/></svg></span><span class="nav-label">总观</span></button>
+      <button type="button" class="nav-item" data-page="projects" aria-label="项目配置" title="项目配置"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a3 3 0 0 1 3-3h3l3 3h6a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3Z"/><path d="M8 12h8M8 16h5"/></svg></span><span class="nav-label">项目配置</span></button>
+      <button type="button" class="nav-item" data-page="settings" aria-label="设置" title="设置"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4m6 0h8M3 17h8m6 0h4"/><circle cx="10" cy="7" r="3"/><circle cx="14" cy="17" r="3"/></svg></span><span class="nav-label">设置</span></button>
+    </nav>
+    <div class="foot">
+      <button type="button" class="foot-version" id="app-version" title="设置">v—</button>
+      <div class="foot-status"><span class="status-dot" id="ready-dot" aria-hidden="true"></span><span id="ready-label">未连接</span></div>
+    </div>
+  </aside>
+
+  <main tabindex="0" aria-label="页面内容">
+    <header><h1 id="page-title">总观</h1></header>
 
     <section id="overview" class="page active" aria-label="总观">
-      <div class="toolbar"><h2>知识积累</h2><div class="tabs" aria-label="历史时间范围">
-        <button data-period="24h" aria-pressed="true">24 小时</button><button data-period="7d" aria-pressed="false">7 天</button><button data-period="30d" aria-pressed="false">30 天</button>
-      </div></div>
-      <div class="stats" id="growth-cards" aria-live="polite">
-        <div class="empty-state">正在读取历史记录…</div>
+      <section class="card prompt-card" id="prompt-card" aria-label="全局提示词">
+        <button type="button" class="prompt-toggle" id="toggle-prompt" aria-expanded="false" aria-controls="prompt-body">
+          <h2>全局提示词</h2>
+          <span class="chevron" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg></span>
+        </button>
+        <div class="prompt-body" id="prompt-body" inert>
+          <div class="prompt-inner"><div class="prompt-content">
+            <textarea id="global-prompt" rows="4" aria-label="全局提示词" spellcheck="false"></textarea>
+            <div class="prompt-actions"><span class="save-hint" id="prompt-saved" aria-live="polite"></span><button type="button" class="button primary" id="save-prompt">保存</button></div>
+          </div></div>
+        </div>
+      </section>
+
+      <div class="toolbar">
+        <div class="chips" id="status-filters" role="group" aria-label="状态筛选">
+          <button type="button" class="chip active" data-filter="全部" aria-pressed="true">全部</button>
+          <button type="button" class="chip" data-filter="进行中" aria-pressed="false">进行中</button>
+          <button type="button" class="chip" data-filter="受阻" aria-pressed="false">受阻</button>
+          <button type="button" class="chip" data-filter="待验证" aria-pressed="false">待验证</button>
+          <button type="button" class="chip" data-filter="已完成" aria-pressed="false">已完成</button>
+          <button type="button" class="chip" data-filter="已放弃" aria-pressed="false">已放弃</button>
+          <button type="button" class="chip" data-filter="已中断" aria-pressed="false">已中断</button>
+        </div>
+        <div class="toolbar-side"><span class="count" id="session-count"></span><button type="button" class="button secondary" id="refresh-sessions">刷新</button></div>
       </div>
-<div class="charts"><div class="card"><div class="toolbar"><div><h2 id="chart-title">会话总结</h2><p class="muted">累计变化</p></div></div><div class="chart" id="chart"></div><div class="axis"><span id="axis-start">9 月 25 日</span><span id="axis-end"></span></div></div>
-<div class="card"><div class="toolbar"><div><h2>每日知识积累</h2><p class="muted">新增内容 · 估算 token</p></div><div class="tabs"><button id="view-2d" class="active">2D</button><button id="view-3d">3D</button></div></div><div id="heat2d" class="heat-scroll"><div id="heat-grid" class="heat-grid"></div></div><div id="heat3d" class="heat3d" hidden><canvas id="terrain" class="terrain" role="img" aria-label="每日新增知识三维柱图"></canvas></div><div class="rotate-controls" id="rotate-controls" hidden><span class="legend-text">拖动旋转，滚轮缩放</span><div><button id="rotate" class="secondary">自动旋转</button><button id="reset" class="secondary">复位</button></div></div><div class="heat-footer"><span id="heat-period"></span><span class="legend">少 <i style="background:var(--heat-0)"></i><i style="background:var(--heat-1)"></i><i style="background:var(--heat-2)"></i><i style="background:var(--heat-3)"></i><i style="background:var(--heat-4)"></i> 多</span></div></div>
-</div>
-      <p class="hint" id="growth-note">新增 token 从本机开始记录后累计。</p>
-      <form id="global-prompt-form" class="card">
-        <div class="card-heading"><h2>全局提示词</h2></div>
-        <p id="prompt-vault" class="hint"></p>
-        <textarea id="global-prompt" rows="4" aria-label="全局提示词" placeholder="例如：代码保持简洁，不做提前抽象。" disabled></textarea>
-        <div class="action-row form-actions"><button id="save-global-prompt" class="button primary" type="submit" disabled>保存</button></div>
-      </form>
+
+      <div id="session-list" class="session-list" aria-live="polite"><div class="empty-state">正在读取</div></div>
     </section>
 
     <section id="projects" class="page" aria-label="项目配置">
       <div class="toolbar">
-        <h2 id="project-count">全部项目</h2>
-        <div class="project-toolbar-actions"><button id="browse-documents" class="button secondary" type="button">会话与关联</button><button id="all-view-toggle" class="button secondary" type="button">简洁</button></div>
+        <span class="count" id="project-count"></span>
+        <button type="button" class="button primary" id="new-project">新增项目</button>
       </div>
-      <div id="project-list" class="root-list" aria-label="项目"></div>
-      <dialog id="project-editor" aria-labelledby="project-form-title">
-      <form id="project-form">
-        <h2 id="project-form-title">新增项目</h2>
-        <p id="project-parent-label" class="hint" hidden></p>
-        <label for="project-name">项目名称</label>
-        <input id="project-name" required maxlength="100" placeholder="例如：网站开发">
-        <label>关联工作目录</label>
-        <div id="project-paths"></div>
-        <button type="button" id="add-project-path" class="button secondary">添加文件夹</button>
-        <div class="action-row form-actions">
-          <button type="button" id="cancel-project" class="button secondary">取消</button>
-          <button type="submit" id="save-project" class="button primary">创建项目</button>
-        </div>
-      </form>
-      </dialog>
-      <dialog id="delete-project-dialog" aria-labelledby="delete-project-title" aria-describedby="delete-project-question">
-        <h2 id="delete-project-title">删除项目</h2>
-        <p id="delete-project-question"></p>
-        <p class="muted">项目资料会归档，历史记录和工作文件都会保留。</p>
-        <div class="action-row form-actions">
-          <button type="button" id="cancel-delete-project" class="button secondary" autofocus>取消</button>
-          <button type="button" id="confirm-delete-project" class="button danger">删除项目</button>
-        </div>
-      </dialog>
-      <dialog id="project-results" aria-labelledby="project-results-title" class="wide-dialog">
-        <div class="card-heading"><h2 id="project-results-title">提交与合并</h2><button data-close="project-results" class="button secondary" type="button">关闭</button></div>
-        <p class="hint" id="project-results-parent"></p>
-        <form id="commit-form">
-          <div id="commit-items" class="result-list"></div>
-          <label for="commit-message">提交说明</label><input id="commit-message" maxlength="200" placeholder="例如：完成检索路径优化">
-          <div class="form-actions"><button class="button primary" type="submit">提交所选成果</button></div>
-        </form>
-        <h3>提交记录</h3><div id="commit-history" class="result-list"></div>
-      </dialog>
-      <dialog id="merge-dialog" aria-labelledby="merge-title" class="wide-dialog">
-        <h2 id="merge-title">合并到主项目</h2><p id="merge-description" class="hint"></p>
-        <div id="merge-items" class="result-list"></div>
-        <form id="merge-form"><div id="merge-conflicts" class="result-list"></div><div class="form-actions"><button data-close="merge-dialog" class="button secondary" type="button">取消</button><button id="merge-submit" class="button primary" type="submit">合并成果</button></div></form>
-      </dialog>
+      <div id="project-list" class="project-list" aria-live="polite"><div class="empty-state">正在读取</div></div>
     </section>
 
     <section id="settings" class="page" aria-label="设置">
-      <dialog id="setup-guide" aria-labelledby="setup-guide-title">
-        <h2 id="setup-guide-title">初次配置步骤</h2>
-        <ol>
-          <li><strong>选择知识库</strong><p>选择保存记忆的文件夹，然后保存设置。已有知识库可以直接使用。</p></li>
-          <li><strong>接入 Agent</strong><p>复制内置提示词，交给你使用的 Agent。后续 Agent 复用同一知识库。</p></li>
-          <li><strong>按需添加项目</strong><p>在“项目配置”关联工作文件夹，记录项目进度。</p></li>
-        </ol>
-        <h3>可选设置</h3>
-        <p>在“总观”填写全局提示词，让 Agent 记住你的习惯。</p>
-        <p>在“设置”填写模型密钥并开启夜间维护，自动整理知识。</p>
-        <div class="action-row"><button id="close-setup-guide" class="button primary" type="button" autofocus>知道了</button></div>
-      </dialog>
-      <form id="settings-form">
-        <article class="card"><div class="theme-row"><label id="appearance-label">外观</label><button id="theme-preference" class="button secondary appearance-button" type="button" value="system" aria-haspopup="menu" aria-expanded="false" aria-labelledby="appearance-label appearance-value"><span id="appearance-value">跟随系统</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button></div></article>
-        <article class="card"><div class="card-heading"><h2>Agent 接入</h2></div><p class="hint">显示最近一次成功加载记忆的记录。</p><div id="agent-connections"></div></article>
+      <article class="card">
+        <div class="card-heading"><h2>外观</h2></div>
+        <div class="segmented" id="appearance" role="group" aria-label="外观">
+          <button type="button" data-appearance="system" aria-pressed="true">跟随系统</button>
+          <button type="button" data-appearance="light" aria-pressed="false">浅色</button>
+          <button type="button" data-appearance="dark" aria-pressed="false">深色</button>
+        </div>
+      </article>
+
+      <form class="settings-form" id="settings-form">
         <article class="card">
           <div class="card-heading"><h2>知识库</h2></div>
-          <label for="vault-path">知识库文件夹</label>
-          <div class="input-row"><input id="vault-path" required placeholder="选择用于保存共享记忆的文件夹"><button type="button" id="choose-vault" class="button secondary">选择文件夹</button></div>
-            <div class="action-row"><button class="button secondary" type="button" data-copy-vault disabled>复制知识库地址</button><button class="button secondary" type="button" data-copy-agent disabled>复制内置提示词</button></div>
+          <label for="vault-path">路径</label>
+          <div class="input-row"><input id="vault-path" autocomplete="off" spellcheck="false"><button type="button" class="button secondary" id="choose-vault">选择</button></div>
+          <div class="form-actions"><button type="submit" class="button primary" id="save-settings">保存</button></div>
         </article>
+
         <article class="card">
-          <div class="card-heading"><h2>模型连接</h2><span class="tag" id="key-status">密钥未配置</span></div>
-          <label for="base-url">API 地址</label><input id="base-url" type="url" required placeholder="兼容 OpenAI 的 API 地址">
-          <label for="model">模型名称</label><input id="model" required placeholder="模型 ID">
-          <label for="api-key">API 密钥</label><input id="api-key" type="password" autocomplete="new-password" placeholder="留空保留已有密钥">
-          <label class="checkbox-row"><input id="clear-key" type="checkbox"><span>清除已保存的密钥</span></label>
-          <div class="action-row"><button class="button secondary" type="button" id="test-button">测试已保存的连接</button></div>
+          <div class="card-heading"><h2>时间与提醒</h2></div>
+          <div class="field-grid">
+            <div class="field"><label for="timezone">时区</label><select id="timezone"></select></div>
+            <div class="field"><label for="timeout-hours">超时兜底</label><div class="number-row"><input id="timeout-hours" type="number" min="1" max="720" step="1"><span class="unit">小时</span></div></div>
+          </div>
+          <div class="switch-row"><div class="switch-text"><h3>联网校时</h3></div><label class="switch"><input type="checkbox" id="ntp-enabled" aria-label="联网校时"><span></span></label></div>
+          <div class="switch-row"><div class="switch-text"><h3>换会话提醒</h3></div><label class="switch"><input type="checkbox" id="reminder-context-switch" aria-label="换会话提醒"><span></span></label></div>
+          <div class="form-actions"><button type="submit" class="button primary">保存</button></div>
         </article>
-        <article class="card">
-          <div class="card-heading"><h2>夜间自动维护</h2><label class="switch"><input id="maintenance-enabled" type="checkbox" aria-label="启用自动维护"><span></span></label></div>
-          <div class="time-row"><label for="maintenance-time">每天执行时间</label><input id="maintenance-time" type="time" required><span class="muted">本机时间</span></div>
-          <p id="budget-status" class="hint"></p>
-          <p class="hint">DeepSeek V4.1 Flash · 每月最多 ¥10 · 每天最多 3 批</p>
-        </article>
-        <div class="action-row form-actions"><button class="button primary" type="submit">保存设置</button></div>
       </form>
-      <div class="settings-footer"><button class="button quiet" type="button" data-copy-unbind disabled>复制解绑提示词</button></div>
+
+      <article class="card">
+        <div class="card-heading"><h2>版本</h2><span class="version-pill" id="version-value">v—</span></div>
+        <div class="update-row">
+          <p class="update-status" id="update-status"></p>
+          <div class="row-actions"><button type="button" class="button secondary" id="check-update">检查更新</button><button type="button" class="button secondary" id="apply-update">升级</button></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-heading"><h2>宿主接入</h2><button type="button" class="button secondary" id="refresh-doctor">刷新</button></div>
+        <div id="host-list" class="host-list" aria-live="polite"></div>
+      </article>
     </section>
+  </main>
+</div>
 
-    <dialog id="documents-dialog" aria-labelledby="documents-title" class="wide-dialog">
-      <div class="card-heading"><h2 id="documents-title">会话与关联</h2><button data-close="documents-dialog" class="button secondary" type="button">关闭</button></div>
-      <form id="document-search" class="input-row"><input id="document-query" type="search" aria-label="查找资料" placeholder="查找会话、知识或任务"><button class="button secondary" type="submit">查找</button></form>
-      <p class="hint" id="documents-scope"></p><div id="document-list" class="document-list"></div>
-    </dialog>
-    <dialog id="document-dialog" aria-labelledby="document-title" class="wide-dialog">
-      <div class="card-heading"><h2 id="document-title"></h2><button data-close="document-dialog" class="button secondary" type="button">关闭</button></div>
-      <button id="open-document" class="button secondary" type="button">打开原文</button>
-      <div id="document-links" class="document-links"></div><pre id="document-body" class="document-body"></pre>
-    </dialog>
+<div class="drawer-scrim" id="drawer-scrim"></div>
+<aside class="drawer" id="session-drawer" aria-label="会话详情" aria-hidden="true" inert>
+  <div class="drawer-head">
+    <div class="drawer-title"><span class="status-chip" id="detail-status"></span><h2 id="detail-name"></h2></div>
+    <button type="button" class="icon-button" id="close-drawer" aria-label="关闭">×</button>
+  </div>
+  <p class="drawer-meta" id="detail-meta"></p>
+  <div class="drawer-actions">
+    <button type="button" class="button secondary" id="rename-session">重命名</button>
+    <button type="button" class="button secondary" id="open-session-file">打开文件</button>
+  </div>
+  <div class="rename-row" id="rename-row" hidden>
+    <input id="rename-input" maxlength="100" aria-label="新名称" autocomplete="off" spellcheck="false">
+    <button type="button" class="button primary" id="rename-save">保存</button>
+    <button type="button" class="button quiet" id="rename-cancel">取消</button>
+  </div>
+  <div class="markdown" id="detail-body"></div>
+</aside>
 
-    <dialog id="update-dialog" aria-labelledby="update-title">
-      <h2 id="update-title">检查更新</h2>
-      <p id="update-summary"></p>
-      <div id="update-notes" class="release-notes" hidden></div>
-      <p id="update-asset" class="hint"></p>
-      <p id="update-staged" class="hint" hidden></p>
-      <div id="update-progress" class="update-progress" hidden>
-        <div class="update-bar"><i id="update-bar-fill"></i></div>
-        <p id="update-progress-text" class="hint"></p>
-      </div>
-      <div class="action-row form-actions">
-        <button type="button" id="update-download" class="button primary" hidden>下载并校验</button>
-        <button type="button" id="update-apply" class="button primary" hidden>立即更新并重启</button>
-        <button type="button" id="update-folder" class="button secondary" hidden>打开所在文件夹</button>
-        <button type="button" id="update-copy" class="button secondary" hidden>复制更新提示词</button>
-        <button type="button" id="update-page" class="button secondary">打开 GitHub 发布页</button>
-        <button type="button" id="update-close" class="button secondary">关闭</button>
-      </div>
-    </dialog>
+<dialog id="project-dialog" aria-labelledby="project-dialog-title">
+  <form id="project-form">
+    <h2 id="project-dialog-title">新增项目</h2>
+    <label for="project-name">名称</label>
+    <input id="project-name" maxlength="100" autocomplete="off" spellcheck="false">
+    <label>工作目录</label>
+    <div id="project-paths" class="path-editor"></div>
+    <div class="path-actions"><button type="button" class="button quiet" id="add-project-path">添加路径</button><button type="button" class="button quiet" id="browse-project-path">选择文件夹</button></div>
+    <label for="project-parent">父项目</label>
+    <select id="project-parent"></select>
+    <div class="switch-row"><div class="switch-text"><h3>允许读取子项目</h3></div><label class="switch"><input type="checkbox" id="project-allow-child" aria-label="允许读取子项目"><span></span></label></div>
+    <div class="form-actions"><button type="button" class="button secondary" id="cancel-project">取消</button><button type="submit" class="button primary" id="save-project">创建</button></div>
+  </form>
+</dialog>
 
-  </main></div>
-  <div id="toast" role="status" aria-live="polite" hidden></div>
-  <div id="tooltip" class="tooltip" hidden></div>
-  <dialog id="tree-dialog" aria-labelledby="tree-title">
-    <div class="tree-dialog-heading"><h2 id="tree-title"></h2><button type="button" id="close-tree" class="button quiet close-button" aria-label="关闭项目关系">×</button></div>
-    <div class="toolbar tree-toolbar"><button type="button" id="new-child" class="button secondary">新建子项目</button><button id="tree-view-toggle" class="button secondary" type="button">详细</button></div>
-    <div id="tree-board" class="tree-board"></div>
-  </dialog>
-  <div id="app-menu" class="app-menu" role="menu" popover="manual" hidden></div>
-  <dialog id="directory-dialog" aria-labelledby="directory-title"><h2 id="directory-title"></h2><p id="directory-path" class="directory-path"></p><div class="action-row form-actions"><button type="button" class="button secondary" data-close="directory-dialog">关闭</button></div></dialog>
-  <script src="bridge.js"></script>
-  <script src="app.js"></script>
+<dialog id="delete-dialog" aria-labelledby="delete-title">
+  <h2 id="delete-title">删除项目</h2>
+  <p id="delete-question"></p>
+  <div class="form-actions"><button type="button" class="button secondary" id="cancel-delete">取消</button><button type="button" class="button danger" id="confirm-delete">删除</button></div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="bridge.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

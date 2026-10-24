@@ -56,3 +56,89 @@
 - 项目登记文件格式（第 4 步）。
 - 时间工具 NTP/HTTPS Date 实现细节（第 4 步）。
 - 迁移映射与字段报告（第 6 步）。
+
+## 4. 第 3~5 步实现决定（2026-10-24，用户授权“一直做到底、问题可暂放后确认”）
+
+### 4.1 用户新增指示
+- 一直做到能做完为止；不清楚的问题可先按最简单方式定下、记在此文件，等用户之后确认。
+- 前端规范：`本地前端设计基本要求`（延续旧版设计语言/圆角/配色；所有动画非线性缓动；不擅自添加解释性语句）。
+- 构建完新程序后必须做软件工程测试。
+- 可以开 subagent 并行开发，避免 Lead 注意力分散。
+- 真实宿主测试先测 Claude Code / Codex / pi（允许少量真实模型花费），DSH 之后单独验证。
+- 第 6 步的不可逆操作（真实迁移、解绑旧版、改用户全局配置、停旧进程）仍等用户确认。
+
+### 4.2 并行分工与写入范围
+- A `core-store`：`clock.py`、`naming.py`、`store.py`、`index.py` + 各自测试（task-2）。
+- B `hosts-versioning`：`paths.py`、`settings.py`、`proc.py`、`installer.py`、`update.py`、`hosts/`、`cli.py`、`integrations/`、`scripts/build.ps1`、宿主/安装测试、`docs/UPGRADE.md`（task-3）。
+- C `frontend`：`web/index.html`、`app.js`、`bridge.js`、`style.css`（task-4）。
+- Lead：`handoff.py`、`identity.py`、`hooks.py`、`session.py`、`service.py`、`prompt.py`、`mcp_server.py`、`desktop.py`、验收/集成测试、构建与真实宿主测试。
+- 接口契约固定为 `docs/ARCHITECTURE.md`；跨人接口变更先发消息。
+
+### 4.3 会话身份与 hook 注入
+- 会话 ID 形如 `<宿主名>:<宿主会话ID>`（宿主名 claude-code/codex/dsh/pi；别名做归一化）。
+- 启动注入包与每次 bootstrap 返回都带 `## 当前会话 session_id: …`，模型之后调用 search/save/resume 必须原样传；缺失/未知时返回明确修复提示。
+- 还原会话拿到新 ID 时：同一 cwd 下“原始命令 == 首条用户消息”完全相同（sha256 规范化比对）视为同一会话，写 session_links 记录新旧映射。
+
+### 4.4 hook 生成方式
+- `app_home/hooks.json` 只给 DSH 桥（`configPath` 指向它，命令 `tbrain hook --host dsh`）。
+- Claude `~/.claude/settings.json` 与 Codex `~/.codex/hooks.json` 用同一生成器内联，各自 `--host`；事件 SessionStart/UserPromptSubmit/Stop/PreCompact/SessionEnd。
+- 所有命令指向固定入口 `...\Programs\Tbrain\bin\tbrain.cmd`；Windows 上加引号/`shell:"powershell"`（Claude）与 `commandWindows`（Codex）。
+- 共用是“同一份事件/命令生成逻辑”，不要求物理同一文件（宿主格式限制）。
+
+### 4.5 保存语义
+- 操作：append（done/decision/dead_end/evidence/goal）、replace（target/next_step）、set_status、env、project_prompt；逐条校验、部分接受、退回附示例。
+- 单条 ≤200 字；target ≤200；next_step ≤150 且只能 1 条；D#/K# 各 30 条后移入归档。
+- 去重：规范化空白后相同或相似度 ≥0.92 视为同一条，返回已有编号。
+- 重试：同一不合格操作按会话累计 2 次后，原文写入“待整理”并标“未校验”，不再打回。
+- 自动补齐：时间、git 分支/HEAD/改动文件数；最近验证只在宿主/调用方提供 `last_test` 时写入（Claude/Codex hook 拿不到工具结果，DSH 原生插件可抓）。
+- 用户手改保护：用索引里的文件哈希与当前文件比较；发现用户改过时，replace 类（target/next_step/项目提示词/全局提示词/公共池卡片）不覆盖，生成“待用户确认”；append 类只追加不改已有内容。
+- 独立会话 project 用空字符串，文件落 `会话总结/独立/YYYY/MM/`。
+
+### 4.6 时间 / 命名 / 上下文提醒
+- 时间：UTC 存储；显示时区取设置（默认系统时区，回退 Asia/Shanghai）；SNTP 1.5s（多服务器轮询）+ HTTPS Date 3s 兜底；缓存 6 小时；关闭或失败标“未校准”。
+- 命名：`<提炼名> YYYY-MM-DD-N`；低信息首条消息用 `未命名 YYYY-MM-DD-N`；resume 未接续时用第二条消息定名，接续后改 `<旧名> 续 YYYY-MM-DD-N`；用户可手动改名并同步 wikilink。
+- 宿主注入预算：claude-code 9000、codex 8000、dsh 12000、pi 12000 字符；超限裁剪并提示可调用 bootstrap/search。
+- 换会话提醒：仅 DSH（原生 tokenMeter）与 pi（getContextUsage），阈值 65% 上下文占用，估算节省 10%~50%，可在设置关闭。
+
+### 4.7 版本与发布占位
+- 固定入口 `bin\tbrain.cmd` + `current.txt`（+ current junction 尽力而为）；`versions/<ver>/` 保留最近 2 个。
+- 版本自检：hook/MCP 返回带版本；发现登记进程版本≠`__version__` 或 current≠运行版本时注入重启提醒。
+- GitHub Releases 仓库暂定 `Denis-Tang/tbrain`（第 6 步前如未建仓则检查更新失败降级，不影响本地功能）。
+- 升级模拟：从同一源码复制到临时目录、只改 `__init__.__version__` 与安装包名生成 0.6.1 测试包，仅用于 `tests/test_installer.py` 的临时目录验收。
+
+### 4.8 真实宿主端到端测试（第 5 步后）
+- 隔离配置：Claude `CLAUDE_CONFIG_DIR`+`--settings/--mcp-config`；Codex `CODEX_HOME`（测试时允许 `--dangerously-bypass-hook-trust`，仅测试）；pi `PI_CODING_AGENT_DIR`；均用临时 HOME，不碰真实配置。
+- 真实模型调用控制在小 prompt（ping/简单任务），单宿主 ≤ 数轮；DSH 用桌面/隔离 profile 单独验证。
+- 真实花费仅用于验证 hook→bootstrap→save→resume 链路，不做长对话。
+
+## 5. 第 3~5 步验收结果（2026-10-24）
+
+### 5.1 自动化测试
+- `pytest -q`：**223 passed**（含 8 条验收场景、存储/索引/时间/命名/流程/save/宿主/安装/更新/桌面 API/迁移 dry-run）。
+- 8 条验收场景在 `tests/acceptance/`，用伪造宿主 hook 输入驱动，不调用模型；scenario4 连续多次运行稳定（多进程并发写同一项目）。
+- 构建分发包后：`dist/tbrain` 与 zip + `.sha256` 生成成功；`tbrain.exe --version` = 0.6.0。
+
+### 5.2 真实分发包升级模拟（通过）
+`scripts/verify/upgrade_sim.py`：临时目录安装 0.6.0 → 启动 0.6.0 的 MCP 长驻进程 → 从 0.6.0 固定入口升级到 0.6.1（真实构建的两个包）。结果：
+- current 从 0.6.0 → 0.6.1，`versions/` 保留 0.6.0、0.6.1；
+- 旧 0.6.0 MCP 进程被通知退出（进程表只剩新版本）；
+- 四个伪造宿主的配置文件升级前后 SHA256 完全一致；
+- 新入口 `doctor`：install/processes/claude-code/pi 绿，codex 黄（待用户 /hooks 信任），dsh 黄（桥依赖未安装），无红色项。
+
+### 5.3 真实宿主端到端（Claude Code / Codex 通过，pi 待 provider）
+- Claude Code 2.1.132：临时 `CLAUDE_CONFIG_DIR` + `--settings`/`--mcp-config`（不改真实配置），真实模型一轮。结果：UserPromptSubmit hook 立项并注入启动包，模型调用 MCP `save`，会话总结含 D#「E2E Claude 真实链路验证通过」与下一步；约 $0.19。
+- Codex CLI 0.148.0：临时 `CODEX_HOME`（机械复制 auth.json 用于登录，测后删除），`--dangerously-bypass-hook-trust` 仅测试。结果：SessionStart/UserPromptSubmit/Stop hook 全部执行，MCP `tbrain/save` 调用成功，记录 D#「E2E Codex 真实链路验证通过」；约 41.6k tokens。**Codex 能直接 spawn 固定入口 `.cmd` 的 MCP**（B 之前担心的风险已排除）。
+- pi 0.84.2：hook/tool IPC 链路通过（`hook --host pi`、`tool save`、`tool search` 用固定入口 stdin JSON 实测）。真实模型一轮被本机 provider 阻断：默认 provider `magpie` 指向本机 `127.0.0.1:3425` 未运行，`deepseek` provider 无 API key；待 provider 可用后执行 `scripts/verify/real_hosts.py pi` 复验。
+- DSH：真实桌面未改配置（按用户要求之后单独验证）；用临时 `DSH_HOME` + 伪造 profile 验证 `connect dsh`（写入 3 项 patch + 原生插件 + hooks.json，保留用户内容）、`disconnect dsh`（完全移除、用户内容保留）、`doctor` 输出（桥依赖缺失为黄色）。DSH 桥的 hooks.json 命令执行 shell 形式仍需真机确认。
+
+### 5.4 真实配置影响核查
+- Claude Code：真实 `~/.claude/settings.json`（15 个事件）与 `~/.claude.json`（mcpServers 空）核查无 Tbrain 残留。
+- Codex / DSH / pi：真实配置中 `tbrain` 引用计数均为 0；旧 Shared Brain 条目仍在（按计划第 6 步解绑前保持只读）。
+- 事故与恢复：并行开发者 B 在集成冒烟时一次未隔离 `CLAUDE_CONFIG_DIR`，曾写入真实 Claude 配置；其用 connect 前的 `.bak` 恢复，Lead 独立核查（TBRAIN 引用 0、hooks 15 事件、JSON 合法、mcpServers 空）确认已恢复。
+
+### 5.5 遗留 / 待用户决定
+- 第 6 步 6.2 正式迁移（到 `%USERPROFILE%\Documents\TbrainVault`）尚未执行，dry-run 报告见 `docs/MIGRATION-REPORT.md`。
+- 6.3 解绑旧版与四宿主真实接入（改用户全局配置、停旧进程）需用户确认后执行。
+- DSH 真实桌面验证（需安装桥依赖或在真实 profile 上操作）待用户安排。
+- pi 真实模型链路待本机 provider 可用。
+- 发布仓库 `Denis-Tang/tbrain` 尚未创建，`check_latest` 目前按失败降级；创建 Release 时资产需带 SHA256（update 校验）。

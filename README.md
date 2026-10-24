@@ -2,7 +2,7 @@
 
 给 coding agent 用的本地外挂大脑：记录会话、跨会话和跨 agent 接续任务。数据存成本地 Markdown，Obsidian 可以直接读。
 
-> **当前版本：0.6.0（施工中）。** 本仓库处于从 Shared Brain 0.5.2 重构为 Tbrain 的第 2 步：已完成建仓与全量改名，核心（Markdown 会话总结、handoff/v1、SQLite 索引、bootstrap/search/save/resume 四工具、四宿主 hook 与版本管理）按 `docs/` 里的设计稿在后续步骤重写。
+> **当前版本：0.6.0（第一期最小闭环已完成）。** Markdown 唯一事实源 + SQLite 索引、handoff/v1 会话总结、`bootstrap`/`search`/`save`/`resume` 四个 MCP 工具、四类 hook、版本化安装与固定入口、四宿主适配（`connect`/`disconnect`/`doctor`）、桌面三页均已实现；8 条验收场景与单元测试全部通过（`pytest -q` 223 passed），真实 Claude Code / Codex 端到端链路已验证。DSH 桥依赖需手动安装；pi 的扩展与 IPC 已就绪，真实模型链路待本机 provider 可用后验证。
 
 ## 目标（0.6.0 第一期）
 
@@ -45,12 +45,27 @@ pwsh scripts/build.ps1
 
 版本号只在 `src/tbrain/__init__.py` 的 `__version__` 写一处；`pyproject.toml` 动态读取，桌面构建由 `scripts/build.ps1` 注入。
 
+构建产物：`dist/tbrain/`（可直接运行/分发）、`dist/tbrain-<版本>-windows-x64.zip` 与同名 `.sha256`。安装与四宿主接入见 `docs/UPGRADE.md`：
+
+```powershell
+dist\tbrain\tbrain.exe install                 # 安装到 %LOCALAPPDATA%\Programs\Tbrain
+%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd connect claude-code
+%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd connect codex
+%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd connect dsh
+%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd connect pi
+%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd doctor
+```
+
+开发期验证脚本（不会自动跑、真实宿主脚本会产生少量模型费用）：`scripts/verify/upgrade_sim.py`、`scripts/verify/real_hosts.py`。
+
 ## 文档
 
 - `docs/ORIGIN.md`：来源与重构起点（second-brain 提交 `3af5036`）。
 - `docs/RESEARCH-hosts.md`：四宿主插件机制调研（第 1 步，含实测与源码证据）。
-- `docs/DECISIONS.md`：设计稿未写到的细节与本项目自定的决定（持续更新）。
-- `docs/UPGRADE.md`：版本管理与升级流程（第 3 步产出）。
+- `docs/ARCHITECTURE.md`：实现架构与模块接口契约。
+- `docs/DECISIONS.md`：设计稿未写到的细节与本项目自定的决定（含真实宿主验证结果）。
+- `docs/UPGRADE.md`：版本管理、升级/回退、四宿主接入与 doctor 说明。
+- `docs/MIGRATION-REPORT.md`：旧版数据迁移 dry-run 报告（迁移尚未执行）。
 
 ## 与 Shared Brain 0.5.2 的关系
 

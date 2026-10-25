@@ -1,10 +1,10 @@
-/* Tbrain desktop UI: overview / projects / settings. */
+/* Tbrain desktop UI: overview / projects / agents / settings. */
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
 
-  const PAGES = { overview: "总观", projects: "项目配置", settings: "设置", setup: "首次设置" };
+  const PAGES = { overview: "总观", projects: "项目配置", agents: "Agent 管理", settings: "设置", setup: "首次设置" };
   const PROMPT_SECTIONS = ["最终目标", "硬规则", "当前阶段", "关键路径和命令"];
   const STATUS_CLASS = { 进行中: "run", 受阻: "block", 待验证: "verify", 已完成: "done", 已放弃: "abandon", 已中断: "interrupt" };
   const AGENTS = { "claude-code": "Claude Code", codex: "Codex", dsh: "DSH", pi: "pi", "dsh-native": "DSH" };
@@ -210,6 +210,7 @@
     if (page === "overview") loadOverview();
     else if (page === "projects") loadProjects();
     else if (page === "settings") loadSettings();
+    else if (page === "agents") loadDoctor();
   }
 
   async function loadSetup() {
@@ -867,46 +868,60 @@
   function renderHosts(result) {
     const container = $("host-list");
     container.replaceChildren();
-    if (!hasBridge()) {
-      container.append(emptyState(OFFLINE));
-      return;
-    }
-    if (!result) {
-      container.append(emptyState("未读取"));
+    if (!hasBridge() || !result) {
+      container.append(emptyState(hasBridge() ? "未读取" : OFFLINE));
       return;
     }
     const items = Array.isArray(result.items) ? result.items : [];
-    if (!items.length) {
-      container.append(emptyState("暂无宿主"));
-      return;
-    }
-    for (const item of items) {
-      const host = typeof item.host === "string" ? item.host : "";
-      const row = el("div", "host-row");
-      const main = el("div", "host-main");
-      const dot = el("span", `host-dot ${hostStatusClass(item.status)}`.trim());
-      dot.setAttribute("aria-hidden", "true");
-      const info = el("div", "host-info");
-      info.append(el("span", "host-name", HOSTS[host] || host || "未知"));
-      if (item.detail) info.append(el("span", "host-detail", String(item.detail)));
-      main.append(dot, info);
-      const actions = el("div", "host-actions");
-      if (CONNECTABLE.includes(host)) {
-        for (const [action, label] of [["connect", "连接"], ["disconnect", "断开"]]) {
-          const button = el("button", "button secondary small", label);
-          button.type = "button";
-          button.dataset.host = host;
-          button.dataset.hostAction = action;
-          if (action === "connect" && state.setup && !state.setup.hosts[host]) {
-            button.disabled = true;
-            button.title = "未检测到 Agent，请安装后刷新";
-          }
-          actions.append(button);
-        }
-      }
-      row.append(main, actions);
+    for (const host of CONNECTABLE) {
+      const item = items.find(item => item.host === host) || {};
+      const row = el("article", "agent-item");
+      const header = el("div", "agent-row");
+      const summary = el("button", "agent-summary");
+      summary.type = "button";
+      summary.setAttribute("aria-expanded", "false");
+      summary.setAttribute("aria-controls", `agent-detail-${host}`);
+      const icon = el("span", `agent-icon agent-icon-${host}`);
+      icon.textContent = { "claude-code": "✳", codex: ">_", dsh: "D", pi: "π" }[host];
+      icon.setAttribute("aria-hidden", "true");
+      const info = el("span", "agent-info");
+      info.append(el("span", "agent-name", HOSTS[host]), el("span", "agent-path", (item.paths || [])[0] || "尚未读取配置位置"));
+      summary.append(icon, info);
+      const enabled = !!item.enabled;
+      const complete = host === "pi" ? item.tools && item.hooks : item.mcp && item.hooks;
+      const badge = el("span", `agent-badge ${enabled ? hostStatusClass(item.status) : ""}`, enabled ? complete ? "已配置" : "部分接入" : "未接入");
+      const label = el("label", "switch agent-switch");
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = enabled;
+      toggle.indeterminate = enabled && !complete;
+      toggle.dataset.host = host;
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-label", `${HOSTS[host]} 接入`);
+      toggle.disabled = !enabled && state.setup && !state.setup.hosts[host];
+      label.append(toggle, el("span"));
+      const chevron = el("span", "chevron agent-chevron");
+      chevron.innerHTML = ICONS.chevron;
+      summary.append(chevron);
+      header.append(summary, badge, label);
+      const detail = el("div", "agent-details");
+      detail.id = `agent-detail-${host}`;
+      detail.hidden = true;
+      const components = host === "pi" ? [["扩展工具", item.tools], ["生命周期事件", item.hooks]] : [["MCP 工具", item.mcp], ["Hook", item.hooks]];
+      const chips = el("div", "agent-components");
+      for (const [name, configured] of components) chips.append(el("span", configured ? "component-on" : "", `${name} · ${configured ? "已配置" : "未配置"}`));
+      detail.append(chips, el("p", "agent-detail-status", item.detail || "未读取状态"));
+      for (const path of item.paths || []) detail.append(el("code", "agent-config-path", path));
+      detail.append(el("p", "agent-reload", item.reload || "重开 Agent 后加载配置。"));
+      summary.addEventListener("click", () => {
+        detail.hidden = !detail.hidden;
+        summary.setAttribute("aria-expanded", String(!detail.hidden));
+        row.classList.toggle("expanded", !detail.hidden);
+      });
+      row.append(header, detail);
       container.append(row);
     }
+    $("agent-runtime").textContent = items.filter(item => !CONNECTABLE.includes(item.host)).map(item => item.detail).join(" · ");
   }
 
   function updateMessage(result) {
@@ -1215,23 +1230,27 @@
     }));
     $("apply-update").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
       const version = state.update && (state.update.latest || state.update.version) ? String(state.update.latest || state.update.version) : "";
-      const result = await call("update_apply", version);
-      const message = result.message ? String(result.message) : result.started === false ? "无法升级" : "正在升级";
+      const result = await call("update_apply");
+      const message = result.error || result.message || (result.restarting ? "升级完成，正在重启 Tbrain" : result.upgraded === false ? "已是最新版本" : "正在升级");
       $("update-status").textContent = message;
       toast(message, result.started === false);
     }));
     $("refresh-doctor").addEventListener("click", (event) => withBusy(event.currentTarget, loadDoctor));
-    $("host-list").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-host-action]");
-      if (!button) return;
-      const host = button.dataset.host;
-      const action = button.dataset.hostAction;
-      withBusy(button, async () => {
-        const result = action === "connect" ? await call("connect", host) : await call("disconnect", host);
-        if (result && result.ok === false) toast(result.detail || "操作失败", true);
-        else toast(action === "connect" ? "已连接" : "已断开");
+    $("host-list").addEventListener("change", async (event) => {
+      const toggle = event.target.closest("input[data-host]");
+      if (!toggle) return;
+      const enabled = toggle.checked;
+      toggle.disabled = true;
+      try {
+        const result = await call(enabled ? "connect" : "disconnect", toggle.dataset.host);
+        if (result.ok === false) throw new Error(result.error || result.detail || "操作失败");
+        toast(enabled ? "接入配置已写入，请展开查看生效步骤" : "已关闭 Tbrain 接入，重开 Agent 可移除缓存工具列表");
+      } catch (error) {
+        toggle.checked = !enabled;
+        toast(errorText(error), true);
+      } finally {
         await loadDoctor();
-      });
+      }
     });
 
     document.addEventListener("keydown", (event) => {

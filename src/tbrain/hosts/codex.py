@@ -34,7 +34,7 @@ def _mcp_block(app_home: Path, entry: str) -> str:
     lines = ["[mcp_servers.tbrain]",
              f"command = {config.toml_string(entry)}",
              "args = [" + ", ".join(config.toml_string(item)
-                                    for item in base.mcp_args(app_home)) + "]",
+                                    for item in base.mcp_args(app_home, HOST)) + "]",
              "startup_timeout_sec = 20.0",
              "tool_timeout_sec = 120.0"]
     return "\n".join(lines)
@@ -203,8 +203,11 @@ def doctor(host: str = HOST, app_home: Path | None = None,
                    for handler in (group.get("hooks") or [])):
                 configured += 1
     text = config.read_text(config_path)
-    mcp_configured = "[mcp_servers.tbrain]" in text
-    item = {"id": HOST, "host": HOST}
+    mcp_entry = (_parse_config(text).get('mcp_servers') or {}).get('tbrain')
+    mcp_configured = bool(mcp_entry) and mcp_entry.get('enabled', True)
+    item = {"id": HOST, "host": HOST, 'mcp': bool(mcp_configured), 'hooks': configured == len(config.HOOK_EVENTS),
+            'enabled': bool(mcp_entry or configured), 'paths': [str(config_path), str(hooks_path)],
+            'reload': '重开 Codex；在 /hooks 审核并信任 Tbrain Hooks。关闭配置后也需重开。'}
     if not configured and not mcp_configured:
         item.update(status="yellow", detail="未接入 Codex；运行 tbrain connect codex。")
         return item
@@ -214,11 +217,14 @@ def doctor(host: str = HOST, app_home: Path | None = None,
     if not mcp_configured:
         item.update(status="yellow", detail="hooks.json 已写入，但 config.toml 缺少 [mcp_servers.tbrain]。")
         return item
+    if mcp_entry.get('command') != entry or mcp_entry.get('args') != base.mcp_args(home, HOST) or not item['hooks']:
+        item.update(status='yellow', detail='MCP 固定入口或 Hook 配置不完整，重新开启可修复。')
+        return item
     trust = _trust_summary(text, hooks_path)
     state = config.read_connect_state(home).get(HOST) or {}
     if not trust["trusted"]:
         item.update(status="yellow",
-                    detail="Codex hook 待用户信任：在 Codex 中执行 /hooks 审核并信任 Tbrain hooks（不会自动写 trusted_hash）。")
+                    detail="Codex hook 待用户信任：在 Codex 中执行 /hooks 审核并信任 Tbrain hooks（需由你在 Codex 内确认）。")
         return item
     hooks_now = config.read_text(hooks_path)
     current_sha = hashlib.sha256(hooks_now.encode("utf-8")).hexdigest() if hooks_now else ""

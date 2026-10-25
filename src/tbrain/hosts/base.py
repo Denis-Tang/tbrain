@@ -37,6 +37,8 @@ EVENT_KINDS = {
     "session_end": "session-end",
     "Context": "context",
     "context": "context",
+    "PostToolUse": "tool-result",
+    "ToolResult": "tool-result",
 }
 
 PI_SOURCE_MAP = {"startup": "startup", "reload": "startup", "new": "startup",
@@ -109,12 +111,12 @@ def powershell_command(host: str, entry: str, app_home: Path) -> str:
     return "& " + hook_command(host, entry, app_home)
 
 
-def mcp_args(app_home: Path) -> list[str]:
-    return ["--home", str(Path(app_home)), "mcp"]
+def mcp_args(app_home: Path, host: str = "") -> list[str]:
+    return ["--home", str(Path(app_home)), "mcp"] + (["--agent", host] if host else [])
 
 
-def mcp_server_entry(app_home: Path, entry: str) -> dict:
-    return {"type": "stdio", "command": entry, "args": mcp_args(app_home)}
+def mcp_server_entry(app_home: Path, entry: str, host: str = "") -> dict:
+    return {"type": "stdio", "command": entry, "args": mcp_args(app_home, host)}
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +252,12 @@ def normalize(host: str, raw: dict) -> HookEvent:
         turn_id=str(payload.get("turn_id") or ""),
         context_tokens=_as_int(payload.get("context_tokens")),
         context_window=_as_int(payload.get("context_window")),
-        extra={"raw_event": event_name, "missing": missing},
+        extra={"raw_event": event_name, "missing": missing,
+               "host_record": str(payload.get("transcript_path") or payload.get("host_record") or ""),
+               "last_test": payload.get("last_test"),
+               "parent_session_id": str(payload.get("parent_session_id") or ""),
+               "fork_user_count": payload.get("fork_user_count"),
+               "fork_revision": str(payload.get("fork_revision") or "")},
     )
 
 

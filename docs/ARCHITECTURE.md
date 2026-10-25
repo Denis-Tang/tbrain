@@ -15,7 +15,7 @@
 - Python 3.11+，UTF-8 文本（文件读写统一 `utf-8`，写出用 `utf-8` 无 BOM）。Windows 行尾用 `\r\n` 或 `\n` 均可，但同一文件保持一致（新建文件用 `\n`）。
 - 版本只从 `tbrain.__version__` 读。
 - 时间只由程序写：`clock.py` 提供统一入口。
-- 所有面向用户的写操作必须原子：同目录临时文件 + `os.replace`。
+- 所有面向用户的写操作必须原子：同目录临时文件；新会话用 `os.link` 创建最终文件（已存在则递增序号），已有文件用 `os.replace` 更新。
 - 程序只写自己的区块；用户手改检测用指纹（A 的 `store.py` 提供）。
 
 ## 2. 路径与设置
@@ -111,7 +111,8 @@ class Store:
     def session_dir(self, project_name: str, when: datetime) -> Path
     def session_path(self, project_name: str, when: datetime, name: str) -> Path
     # 原子写
-    def write_text(self, path: Path, text: str) -> None        # tmp + os.replace
+    def write_text(self, path: Path, text: str, *, fsync: bool = True, create: bool = False) -> None
+        # tmp + os.link（create=True，撞名失败）或 os.replace（更新已有文件）
     def read_text(self, path: Path) -> str
     # 区块所有权
     def block_fingerprint(self, text: str) -> str
@@ -362,11 +363,15 @@ class Identity:
     host: str
     host_session_id: str
 def make(host: str, host_session_id: str) -> Identity
-def resolve_free(index, identity, cwd: str, first_message: str) -> str
-    # 宿主给新 ID 时：同 cwd 且“原始命令 == 首条用户消息”完全相同 → 视为同一会话并记录映射
 def ensure_summary(store, index, identity, cwd, host_record, first_message, settings) -> tuple[Summary, bool]
-    # 已有 → 复用；没有 → 新建薄总结（命名、原始命令、时间、agent、cwd、状态、项目链接）
+    # 只按宿主会话 ID 复用；新 ID（含 fork）新建薄总结，相同目录与首条消息不决定身份。
 ```
+
+会话内容变化时在 `.tbrain/会话版本/<会话ID指纹>/U<轮次>-<版本>.md` 保留 Markdown 保存点；心跳复用同一语义版本。`resume` 的 `fork_revision` 精确选点，`fork_user_count` 选择该用户轮次后的最新版本；无分叉参数为普通接续。分支只继承选定保存点，新会话原始命令和父会话文件不被覆盖。
+
+公共池整卡、项目提示词按节持久化用户所有权与写入指纹。来源校验读取真实总结的 U#/E#，局部引用通过当前 Summary 解析；不存在的引用退回。冲突内容保存到项目或公共池的 `待用户确认.md`，启动时显示。会话写入与外部刷新都同步生成 Markdown 索引；生成过程使用 SQLite 写事务避免过期视图后写覆盖。
+
+`resume_feedback` 保存展示时的候选与实际接续选择，离线回放 τ=3/7/14 的 MRR、前5命中率。50 条样本后允许评估；状态优先、同状态按新近的规则下 τ 不改变名次，不作无效切换。上下文提醒不推测缺少价格依据的费用百分比。
 
 ## 9. hooks.py（Lead）
 

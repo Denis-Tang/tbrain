@@ -74,19 +74,12 @@ GLOBAL_PROMPT_TEMPLATE = {
     "model": "（第一期不启用模型区）",
 }
 
-_SECTION_LIMITS = {
-    "最终目标": (3, 600),
-    "硬规则": (12, 2400),
-    "当前阶段": (5, 800),
-    "关键路径和命令": (10, 1600),
-}
 _SECTION_EXAMPLES = {
     "最终目标": "最终目标（≤3 行）：\n完成 Tbrain 0.6.0 最小闭环，四宿主可接入。",
     "硬规则": "硬规则（≤12 条，每条带来源，如 `#U3`）：\n- 写入只允许原子写 [[会话名]]#U3",
     "当前阶段": "当前阶段（≤5 行）：\n第 4 步：存储/索引层实现中。",
     "关键路径和命令": "关键路径和命令（≤10 条）：\n- `pytest tests/ -q` — 全量测试",
 }
-_RULE_SOURCE_RE = re.compile(r"#(?:U|E|D|K|X|G)\d+|\[\[[^\]]+\]\]")
 
 _BLOCK_RE = re.compile(
     r"<!--\s*owner:\s*(?P<owner>[A-Za-z0-9_-]+)\s*-->"
@@ -308,8 +301,10 @@ class Store:
 
     # -- 原子读写 -----------------------------------------------------------
 
-    def write_text(self, path: Path, text: str, *, fsync: bool = True) -> None:
-        """同目录临时文件 + ``os.replace`` 原子写（UTF-8 无 BOM，``\\n``）。
+    def write_text(self, path: Path, text: str, *, fsync: bool = True, create: bool = False) -> None:
+        """同目录临时文件原子发布（UTF-8 无 BOM，``\\n``）。
+
+        ``create=True`` 用硬链接创建新文件，撞名抛 FileExistsError；默认替换已有文件。
 
         Windows 上两个进程同时替换同一目标文件会短暂返回 ``PermissionError``
         （目标正被另一进程打开/替换），这里做有限重试；若目标内容已等于本次要写的
@@ -325,6 +320,10 @@ class Store:
                 handle.flush()
                 if fsync:
                     os.fsync(handle.fileno())
+            if create:
+                # 链接原子发布完整内容；目标已存在时失败，不能覆盖另一个会话。
+                os.link(tmp, target)
+                return
             last_error: OSError | None = None
             for attempt in range(6):
                 try:
@@ -547,6 +546,13 @@ class Store:
             raise ValueError("父项目不能是项目自身")
         if parent_name and self.project(parent_name) is None:
             raise ValueError(f"父项目不存在：{parent_name}")
+        ancestors = {target_name}
+        ancestor = parent_name
+        while ancestor:
+            if ancestor in ancestors:
+                raise ValueError('父项目关系不能形成循环')
+            ancestors.add(ancestor)
+            ancestor = (self.project(ancestor) or {}).get('parent', '')
         card = self.project_card_path(target_name)
         existing_data, existing_body = split_front_matter(self.read_text(card))
         created_at = str(existing_data.get("created_at") or "") or self._stamp()
@@ -713,154 +719,77 @@ class Store:
         user = re.sub(r"^##\s*用户补充\s*", "", user).strip()
         return {"sections": sections, "user": user}
 
-    def save_project_prompt(self, name: str, sections: dict) -> dict:
-        value = str(name or "").strip()
+    def save_project_prompt(self, name: str, sections: dict, *, summary=None) -> dict:
+        value = str(name or '').strip()
         if self.project(value) is None:
-            raise ValueError(f"项目不存在：{value}")
-        incoming = dict(sections or {})
-        accepted, rejected, warnings = self._validate_prompt_sections(value, incoming)
-        if not accepted:
-            return {"written": {}, "rejected": rejected, "warnings": warnings}
+            raise ValueError(f'项目不存在：{value}')
+        accepted, rejected, warnings = self._validate_prompt_sections(value, sections, summary)
         path = self.project_prompt_path(value)
+        original = self.read_text(path)
+        front, _ = split_front_matter(original)
+        blocks = parse_blocks(original)
         current = self.project_prompt(value)
-        state = self.block_state(path, "model")
-        if str(state.get("owner") or "") == "user":
-            return {
-                "written": {},
-                "rejected": [
-                    {
-                        "section": section,
-                        "reason": "模型区已被用户手动修改，程序不再自动改写",
-                        "example": _SECTION_EXAMPLES.get(section, ""),
-                    }
-                    for section in accepted
-                ],
-                "warnings": warnings,
-                "pending_confirm": "项目提示词模型区已被用户手动修改，本次修改未写入。",
-            }
-        merged = dict(current.get("sections") or {})
-        merged.update(accepted)
-        old_model_body = str(parse_blocks(self.read_text(path)).get("model", {}).get("body") or "")
-        old_sections = current.get("sections") or {}
-        ok = self.set_block(path, "model", "model", _render_sections(merged))
-        if not ok:
-            self.append_changelog(
-                self.project_changelog_path(value),
-                "检测到用户手改模型区，程序未覆盖",
-                old_model_body,
-            )
-            return {
-                "written": {},
-                "rejected": [
-                    {
-                        "section": section,
-                        "reason": "模型区已被用户手动修改，程序不再自动改写",
-                        "example": _SECTION_EXAMPLES.get(section, ""),
-                    }
-                    for section in accepted
-                ],
-                "warnings": warnings,
-                "pending_confirm": "项目提示词模型区已被用户手动修改，本次修改未写入。",
-            }
-        changed = [section for section in accepted if accepted[section] != str(old_sections.get(section) or "")]
+        old_sections = current['sections']
+        fingerprints = front.get('model_fingerprints') or {}
+        protected = set(front.get('user_owned_sections') or [])
+        model = blocks.get('model', {})
+        state = self.index.block_state(self._rel(path), 'model') or {}
+        for section, content in old_sections.items():
+            if section in fingerprints and fingerprints[section] != block_fingerprint(content):
+                protected.add(section)
+            elif not fingerprints and content and (model.get('owner') == 'user' or
+                    state.get('fingerprint') != block_fingerprint(model.get('body', ''))):
+                protected.add(section)
+        pending = ''
+        for section in list(accepted):
+            if section in protected:
+                proposed = accepted.pop(section)
+                pending = self.record_conflict(value, f'{value} 项目提示词「{section}」已被用户修改，待用户确认', proposed)
+                rejected.append({'section': section, 'reason': pending, 'example': _SECTION_EXAMPLES[section]})
+        merged = {**old_sections, **accepted}
+        front['user_owned_sections'] = sorted(protected)
+        front['model_fingerprints'] = {section: fingerprints.get(section, block_fingerprint(old_sections[section]))
+                                      if section in protected else block_fingerprint(content)
+                                      for section, content in merged.items()}
+        blocks['model'] = {'owner': 'model', 'body': _render_sections(merged)}
+        if accepted or protected:
+            self.write_text(path, render_note(front, render_blocks(blocks)))
+            self.index.set_block_state(self._rel(path), 'model', 'user' if protected else 'model',
+                                       block_fingerprint(blocks['model']['body']))
+        changed = [section for section in accepted if accepted[section] != old_sections[section]]
         if changed:
-            old_text = "\n\n".join(
-                f"## {section}\n{str(old_sections.get(section) or '')}" for section in changed
-            )
-            self.append_changelog(
-                self.project_changelog_path(value),
-                "替换项目提示词：" + "、".join(changed),
-                old_text,
-            )
-        return {"written": dict(accepted), "rejected": rejected, "warnings": warnings}
+            self.append_changelog(self.project_changelog_path(value), '替换项目提示词：' + '、'.join(changed),
+                                  '\n\n'.join(f'## {section}\n{old_sections[section]}' for section in changed))
+        return {'written': accepted, 'rejected': rejected, 'warnings': warnings, 'pending_confirm': pending}
 
-    def _validate_prompt_sections(
-        self, project_name: str, sections: dict
-    ) -> tuple[dict[str, str], list[dict], list[str]]:
-        """先按写作规范做本地校验；若 ``prompt.validate`` 可用则以它为准。"""
-        local_accepted: dict[str, str] = {}
-        local_rejected: list[dict] = []
-        for section, text in sections.items():
-            if section not in PROMPT_SECTIONS:
-                local_rejected.append(
-                    {
-                        "section": section,
-                        "reason": "只能写这四节：" + "、".join(PROMPT_SECTIONS),
-                        "example": _SECTION_EXAMPLES[PROMPT_SECTIONS[0]],
-                    }
-                )
-                continue
-            value = str(text if text is not None else "").strip()
-            reason = _validate_section(section, value)
-            if reason:
-                local_rejected.append(
-                    {"section": section, "reason": reason, "example": _SECTION_EXAMPLES.get(section, "")}
-                )
-            else:
-                local_accepted[section] = value
-        external = self._external_prompt_validate(project_name, sections)
-        if external is not None:
-            accepted, rejected, warnings = external
-            return accepted, rejected, warnings
-        return local_accepted, local_rejected, []
+    def _validate_prompt_sections(self, project_name: str, sections: dict, summary=None):
+        from . import prompt
+        result = prompt.validate(sections, resolve_source=self._prompt_resolver(project_name, summary),
+                                 path_exists=_path_exists)
+        return result['written'], result['rejected'], result['warnings']
 
-    def _external_prompt_validate(self, project_name: str, sections: dict):
-        """可选桥接 Lead 的 prompt.validate；不存在或形状不认识时返回 None。"""
-        try:
-            from . import prompt as prompt_module
-        except Exception:
-            return None
-        validate = getattr(prompt_module, "validate", None)
-        if validate is None:
-            return None
-        import inspect
-
-        kwargs: dict[str, Any] = {}
-        try:
-            params = inspect.signature(validate).parameters
-        except (TypeError, ValueError):
-            return None
-        if "project" in params:
-            kwargs["project"] = project_name
-        elif "project_name" in params:
-            kwargs["project_name"] = project_name
-        elif "name" in params:
-            kwargs["name"] = project_name
-        if "sections" in params:
-            kwargs["sections"] = sections
-        elif "values" in params:
-            kwargs["values"] = sections
-        elif "data" in params:
-            kwargs["data"] = sections
-        resolver = self._prompt_resolver(project_name)
-        if "resolver" in params:
-            kwargs["resolver"] = resolver
-        if "resolve_source" in params:
-            kwargs["resolve_source"] = resolver
-        if "path_exists" in params:
-            kwargs["path_exists"] = _path_exists
-        try:
-            result = validate(**kwargs)
-        except Exception:
-            return None
-        return _normalize_prompt_result(result)
-
-    def _prompt_resolver(self, project_name: str):
-        names = {str(row.get("name") or "") for row in self._index_rows(self.project_index_path(project_name))}
-        try:
-            names.update(str(row.get("name") or "") for row in self.index.sessions())
-        except Exception:
-            pass
-        names.discard("")
-
-        def resolve(session_name: str = "", reference: str = "") -> bool:
-            name = str(session_name or "").strip("[]")
-            if not name:
-                # 本地编号（#U3/#E1）无法逐条核实，按格式接受。
-                return bool(str(reference or "").strip())
-            return name in names
-
+    def _prompt_resolver(self, project_name: str, summary=None):
+        from . import handoff
+        def resolve(session_name: str, reference: str) -> bool:
+            if not session_name or (summary is not None and session_name == summary.name):
+                return summary is not None and summary.has_reference(reference)
+            matches = [row for row in self.index.sessions() if row['name'] == session_name]
+            if len(matches) != 1:
+                return False
+            return handoff.parse(self.read_text(self.vault / matches[0]['path'])).has_reference(reference)
         return resolve
+
+    def record_conflict(self, project: str, title: str, proposed: str) -> str:
+        path = (self.project_dir(project) if project else self.vault / PUBLIC_DIR) / '待用户确认.md'
+        self.append_changelog(path, title, proposed)
+        return title
+
+    def pending_confirmations(self, project: str) -> str:
+        files = [self.vault / PUBLIC_DIR / '待用户确认.md']
+        if project:
+            files.append(self.project_dir(project) / '待用户确认.md')
+        contents = [self._read_optional(path).strip() for path in files]
+        return '\n\n'.join(['## 待用户确认'] + [text for text in contents if text]) if any(contents) else ''
 
     # -- 公共池 ------------------------------------------------------------
 
@@ -926,6 +855,11 @@ class Store:
             old = existing[0]
             old_path = Path(str(old["path"]))
             old_data, old_body = split_front_matter(self.read_text(old_path))
+            fingerprint = old_data.pop("model_fingerprint", "")
+            if old_data.get("owner") == "user" or fingerprint != block_fingerprint(render_note(old_data, old_body)):
+                message = self.record_conflict("", f"公共池 {kind_value}/{name_value} 已被用户修改或缺少原写入指纹，待用户确认",
+                                               render_note(meta, str(meta.get("body") or "")))
+                raise ValueError(message)
             old_data["state"] = "已被取代"
             old_data["updated_at"] = stamp
             history = old_data.get("history") or []
@@ -998,6 +932,9 @@ class Store:
                 continue
             data[key] = value
         body = str(meta.get("body") or "")
+        data["owner"] = "model"
+        data.pop("model_fingerprint", None)
+        data["model_fingerprint"] = block_fingerprint(render_note(data, body))
         self.write_text(card_path, render_note(data, body))
         self.index.upsert_public(
             {
@@ -1252,54 +1189,6 @@ def _render_sections(sections: dict[str, str]) -> str:
         value = str(sections.get(section) or "").strip()
         parts.append(f"## {section}\n{value}".rstrip())
     return "\n\n".join(parts)
-
-
-def _validate_section(section: str, text: str) -> str:
-    max_lines, max_chars = _SECTION_LIMITS[section]
-    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
-    if len(lines) > max_lines:
-        return f"{section} 最多 {max_lines} 行，当前 {len(lines)} 行"
-    if len(str(text or "")) > max_chars:
-        return f"{section} 内容过长（上限 {max_chars} 字符）"
-    if section == "硬规则":
-        for line in lines:
-            if not _RULE_SOURCE_RE.search(line):
-                return "硬规则每条必须带来源，例如 [[会话名]]#U3 或 #E1"
-            if len(line) > 200:
-                return "硬规则单条不超过 200 字"
-    return ""
-
-
-def _normalize_prompt_result(result) -> tuple[dict, list[dict], list[str]] | None:
-    accepted: dict | None = None
-    rejected: list | None = None
-    warnings: list[str] = []
-    if isinstance(result, dict):
-        for key in ("sections", "accepted", "written"):
-            value = result.get(key)
-            if isinstance(value, dict):
-                accepted = value
-                break
-        for key in ("rejected", "errors"):
-            value = result.get(key)
-            if isinstance(value, list):
-                rejected = value
-                break
-        warnings = [str(item) for item in (result.get("warnings") or [])]
-    elif isinstance(result, (tuple, list)) and len(result) == 2:
-        if isinstance(result[0], dict):
-            accepted = result[0]
-        if isinstance(result[1], list):
-            rejected = result[1]
-    if accepted is None and rejected is None:
-        return None
-    normalized_rejected: list[dict] = []
-    for item in rejected or []:
-        if isinstance(item, dict):
-            normalized_rejected.append(dict(item))
-        else:
-            normalized_rejected.append({"section": "", "reason": str(item), "example": ""})
-    return dict(accepted or {}), normalized_rejected, warnings
 
 
 def _render_index_table(rows: Sequence[dict]) -> str:

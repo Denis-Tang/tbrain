@@ -275,25 +275,36 @@ def test_timeout_fallback_marks_interrupted(env):
     assert _load(service, row)[0].status == "已中断"
 
 
-def test_multi_host_same_records(env):
+@pytest.mark.parametrize("other_host", ["codex", "pi"])
+def test_new_session_and_fork_keep_separate_records(env, other_host):
     service, vault, work = env
     session = "88888888-0000-0000-0000-000000000001"
     prompt(service, "codex", session, work, "记录一套跨宿主的经验")
     service.save(sid("codex", session), [
         {"op": "append", "section": "done", "items": [{"text": "写完了跨宿主测试"}]}])
-    # 另一个宿主用同一 cwd + 原命令（新 ID）应复用同一总结
+    source_row = service.index.session(sid("codex", session))
+    _, source_path = _load(service, source_row)
+    original = source_path.read_bytes()
     other = "88888888-0000-0000-0000-000000000009"
-    prompt(service, "pi", other, work, "记录一套跨宿主的经验")
-    reused = service.index.session(sid("codex", session))
-    assert reused is not None
-    links = service.index.links_for_session(reused["session_id"])
-    assert any(link["host"] == "pi" for link in links)
-    result = service.search("跨宿主", sid("pi", other))
+    # 旧版本曾猜出的别名也不能把新会话导回父总结。
+    service.index.register_link(other_host, other, sid("codex", session), str(work))
+    service.hook(other_host, {"hook_event_name": "SessionStart", "source": "fork",
+                              "session_id": other, "cwd": str(work)})
+    prompt(service, other_host, other, work, "记录一套跨宿主的经验")
+    current = service.index.session(sid(other_host, other))
+    assert current is not None
+    assert current["path"] != source_row["path"]
+    result = service.search("跨宿主", sid(other_host, other))
     assert result["results"]
-    result = service.save(sid("pi", other), [
-        {"op": "append", "section": "done", "items": [{"text": "恢复后的新宿主 ID 仍可保存"}]}])
+    result = service.save(sid(other_host, other), [
+        {"op": "append", "section": "done", "items": [{"text": "新会话或分支只保存自己的进度"}]}])
     assert result["ok"]
-    assert result["session"]["session_id"] == sid("codex", session)
+    assert result["session"]["session_id"] == sid(other_host, other)
+    assert source_path.read_bytes() == original
+    resumed = service.resume(sid(other_host, other), sid("codex", session))
+    assert resumed["session_id"] == sid(other_host, other)
+    assert "写完了跨宿主测试" in resumed["handoff"]
+    assert source_path.read_bytes() == original
 
 
 def test_long_startup_prompt_keeps_identity_and_time(env):
@@ -353,3 +364,125 @@ def test_session_start_after_compact_replays_recent_user_instructions(env):
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "最近 5 条用户指令" in context
     assert "另外保留压缩前的用户指令" in context
+
+
+def test_restore_keeps_repeated_instructions_transcript_and_indexes(env):
+    service, vault, work = env
+    service.configure_project('项目', [str(work)])
+    service.hook('codex', {'hook_event_name': 'UserPromptSubmit', 'session_id': 'trace',
+                          'cwd': str(work), 'prompt': '实现恢复要求', 'transcript_path': 'C:/sessions/source.jsonl'})
+    for _ in range(2):
+        prompt(service, 'codex', 'trace', work, '只读检查，不改源码')
+    service.save('codex:trace', [{'op': 'replace', 'section': 'next_step', 'text': '检查接口返回值'}])
+    summary, path = _load(service, service.index.session('codex:trace'))
+    assert len(summary.users) == 3 and summary.header['host_record'] == 'C:/sessions/source.jsonl'
+    context = service.bootstrap('codex:trace', 'codex', str(work))['package']
+    assert '只读检查，不改源码' in context and '检查接口返回值' in context
+    index = service.store.project_index_path('项目').read_text(encoding='utf-8')
+    assert summary.name in index and '检查接口返回值' in index
+    path.write_text(path.read_text(encoding='utf-8').replace('检查接口返回值', '用户改写的下一步'), encoding='utf-8')
+    service.refresh_index()
+    assert '用户改写的下一步' in service.store.project_index_path('项目').read_text(encoding='utf-8')
+
+
+def test_parent_rules_prompt_conflicts_and_source_numbers(env):
+    service, _, work = env
+    service.configure_project('父项目', [str(work)])
+    service.configure_project('子项目', [str(work / 'child')], parent='父项目')
+    prompt(service, 'codex', 'rules', work, '所有测试用临时目录')
+    source = service.index.session('codex:rules')['name']
+    result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+        '最终目标': '程序目标', '硬规则': f'- 所有测试用临时目录（来源：[[{source}]]#U1）'}}])
+    assert not result['rejected']
+    child = service.bootstrap('codex:child-rules', 'codex', str(work / 'child'))
+    assert '所有测试用临时目录' in child['package']
+    result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+        '硬规则': f'- 无来源规则（来源：[[{source}]]#U999）'}}])
+    assert result['rejected'] and not result['written']['project_prompt']
+    path = service.store.project_prompt_path('父项目')
+    path.write_text(path.read_text(encoding='utf-8').replace('程序目标', '用户手改的目标'), encoding='utf-8')
+    for _ in range(2):
+        result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+            '最终目标': '模型想覆盖的目标', '当前阶段': '修复阶段：通过回归'}}])
+        assert result['written']['project_prompt']['当前阶段'] == '修复阶段：通过回归'
+        assert result['rejected']
+    restarted = TbrainService(service.home)
+    context = restarted.bootstrap('codex:rules-new', 'codex', str(work))['package']
+    assert '待用户确认' in context and '模型想覆盖的目标' in context
+    assert '用户手改的目标' in context
+
+
+def test_evidence_is_typed_exact_and_dead_end_requires_existing_reference(env):
+    service, _, work = env
+    prompt(service, 'codex', 'evidence', work, '记录证据')
+    file = work / 'sample.py'
+    file.write_text('a\nb\n', encoding='utf-8')
+    result = service.save('codex:evidence', [{'op': 'append', 'section': 'evidence', 'items': [
+        {'kind': 'file', 'text': 'sample.py:1'}, {'kind': 'file', 'text': 'sample.py:2'},
+        {'kind': 'file', 'text': 'sample.py:1'}, {'text': '任意文字'}]},
+        {'op': 'append', 'section': 'dead_end', 'items': [{'attempt': '运行测试', 'conditions': 'Python',
+         'reason_kind': '已证实不可行', 'strength': '已排除', 'evidence': 'E999'}]}])
+    assert result['written']['evidence'] == ['E1', 'E2', 'E1']
+    assert len(result['rejected']) == 2 and not result['written']['dead_ends']
+
+
+def test_timeout_on_search_bootstrap_and_independent_cwd_priority(env):
+    service, _, work = env
+    prompt(service, 'codex', 'local', work, '苹果项目调研')
+    prompt(service, 'codex', 'foreign', work / 'other', '香蕉接口检查')
+    from tbrain import session as flow
+    summary, path = flow.load_session(service, 'codex:foreign')
+    summary.header['last_activity_at'] = '2020-01-01T00:00:00Z'
+    flow.write_session(service, summary, path)
+    service.search('香蕉')
+    assert flow.load_session(service, 'codex:foreign')[0].status == '已中断'
+    service.bootstrap('codex:new-local', 'codex', str(work))
+    rows = flow._resume_rows(service, flow.load_session(service, 'codex:new-local')[0], '', 5)
+    assert rows[0]['session_id'] == 'codex:local'
+    service.bootstrap('codex:foreign', 'codex', str(work / 'other'))
+    assert flow.load_session(service, 'codex:foreign')[0].status == '进行中'
+
+
+def test_historical_fork_inherits_saved_point_and_keeps_parent_unchanged(env):
+    service, _, work = env
+    prompt(service, 'codex', 'parent', work, '实现方案')
+    saved = service.save('codex:parent', [{'op': 'append', 'section': 'done', 'items': [{'text': '第一轮完成'}]}])
+    first_revision = saved['revision']
+    prompt(service, 'codex', 'parent', work, '第二轮继续方案A')
+    service.save('codex:parent', [{'op': 'append', 'section': 'done', 'items': [{'text': '后来的方案A完成'}]}])
+    _, path = _load(service, service.index.session('codex:parent'))
+    original = path.read_bytes()
+    prompt(service, 'codex', 'fork', work, '从第一轮改做方案B')
+    result = service.resume('codex:fork', 'codex:parent', fork_revision=first_revision)
+    assert result['ok'] and '第一轮完成' in result['handoff'] and '后来的方案A完成' not in result['handoff']
+    summary, _ = _load(service, service.index.session('codex:fork'))
+    assert summary.header['branch_user_count'] == 1
+    assert summary.raw_command == '从第一轮改做方案B'
+    assert [user['text'] for user in summary.users] == ['实现方案', '从第一轮改做方案B']
+    assert path.read_bytes() == original
+    result = service.resume('codex:fork', 'codex:parent', fork_user_count=99)
+    assert not result['ok'] and path.read_bytes() == original
+    saved_branch, saved_path = _load(service, service.index.session('codex:fork'))
+    branch_bytes = saved_path.read_bytes()
+    assert not service.resume('codex:fork', 'codex:parent', fork_revision=first_revision)['ok']
+    assert saved_path.read_bytes() == branch_bytes
+    result = service.hook('codex', {'hook_event_name': 'SessionStart', 'source': 'fork', 'session_id': 'auto-fork',
+        'cwd': str(work), 'parent_session_id': 'codex:parent', 'fork_user_count': 1})
+    assert '第一轮完成' in result['hookSpecificOutput']['additionalContext']
+    prompt(service, 'codex', 'auto-fork', work, '分支第一条新要求')
+    branch, _ = _load(service, service.index.session('codex:auto-fork'))
+    assert len(branch.users) == 2 and branch.header['branch_user_count'] == 1
+    assert path.read_bytes() == original
+
+
+def test_dead_end_becomes_retryable_after_dependency_change(env):
+    service, _, work = env
+    service.store.save_public_card('工具', '示例依赖', {'version': '1'})
+    prompt(service, 'codex', 'dead', work, '检查依赖限制')
+    result = service.save('codex:dead', [{'op': 'append', 'section': 'dead_end', 'items': [
+        {'attempt': '运行旧接口', 'conditions': '示例依赖 1', 'reason_kind': '环境/权限限制', 'strength': '暂缓'}]}])
+    assert result['written']['dead_ends'] == ['X1']
+    service.store.save_public_card('工具', '示例依赖', {'version': '2'})
+    prompt(service, 'codex', 'reader', work, '接续依赖检查')
+    result = service.resume('codex:reader', 'codex:dead')
+    assert '可重试' in result['handoff']

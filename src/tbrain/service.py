@@ -20,7 +20,8 @@ from .settings import SettingsStore
 
 
 class TbrainService:
-    def __init__(self, home: Path | None = None, *, vault: Path | None = None):
+    def __init__(self, home: Path | None = None, *, vault: Path | None = None, agent: str = ''):
+        self.agent = agent
         self.home = paths.app_home(home)
         self.home.mkdir(parents=True, exist_ok=True)
         self._settings = SettingsStore(self.home)
@@ -139,10 +140,13 @@ class TbrainService:
         store.ensure_layout()
         index = self.index
         states = index.file_states()
+        changed_projects = set()
         session_root = (vault / "会话总结")
         if session_root.is_dir():
             for path in session_root.rglob("*.md"):
-                self._index_file(path, "session", vault, states)
+                project = self._index_file(path, "session", vault, states)
+                if project is not None:
+                    changed_projects.add(project)
         for kind in ("安装", "环境变量", "PATH", "代理", "配置", "工作区", "工具"):
             folder = (vault / "公共池" / kind)
             if not folder.is_dir():
@@ -153,6 +157,20 @@ class TbrainService:
             path = (vault / row["path"]) if row.get("path") else None
             if not path or not path.is_file():
                 index.remove_session(row["session_id"])
+                changed_projects.add(row["project"])
+        for project in changed_projects:
+            self.sync_session_index(project)
+
+    def sync_session_index(self, project: str) -> None:
+        # 读索引和发布 Markdown 共用写事务，较早的快照不能后写覆盖较新的索引。
+        with self.index.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            rows = [dict(row) for row in con.execute("SELECT * FROM sessions WHERE project=? ORDER BY updated_at DESC, session_id", (project,))]
+            rows.sort(key=lambda row: _priority(row['status']))
+            if project:
+                self.store.write_project_index(project, rows)
+            else:
+                self.store.write_independent_index(rows)
 
     def _index_file(self, path: Path, kind: str, vault: Path, states: dict) -> None:
         index = self.index
@@ -182,6 +200,7 @@ class TbrainService:
                                  "state": str(front.get("state") or "生效"),
                                  "path": relative, "updated_at": str(front.get("updated_at") or "")}, body)
         index.mark_scan(relative, stat.st_mtime, stat.st_size, digest)
+        return summary.project if kind == "session" else None
 
     def _row_from_summary(self, summary: handoff.Summary, relative: str) -> dict:
         goals = summary.goals()
@@ -258,6 +277,8 @@ class TbrainService:
     # ------------------------------------------------------------------
     def hook(self, host: str, raw: dict) -> dict:
         from . import hosts
+        if self._agent_disabled(identity.build_session_id(host, 'hook')):
+            return {}
 
         raw = raw or {}
         event = hosts.normalize(host, raw)
@@ -268,21 +289,28 @@ class TbrainService:
     # ------------------------------------------------------------------
     # 四个工具
     # ------------------------------------------------------------------
+    def _agent_disabled(self, session_id: str) -> dict | None:
+        from .hosts import config
+        parts = identity.split_session_id(session_id)
+        host = self.agent or (parts[0] if parts else '')
+        if host and config.read_connect_state(self.home).get(host, {}).get('enabled') is False:
+            return {'ok': False, 'error': 'Tbrain 在此 Agent 中已关闭，请在 Agent 管理页开启后重连。'}
+        return None
     def bootstrap(self, session_id: str, agent: str = "", cwd: str = "", host_record: str = "",
                   project: str | None = None) -> dict:
         agent = agent or (identity.split_session_id(session_id) or ("unknown", ""))[0]
         cwd = cwd or os.getcwd()
-        return flow.bootstrap(self, session_id=session_id, agent=agent, cwd=cwd,
+        return self._agent_disabled(session_id) or flow.bootstrap(self, session_id=session_id, agent=agent, cwd=cwd,
                               host_record=host_record, project=project)
 
     def search(self, query: str, session_id: str = "", limit: int = 5) -> dict:
-        return flow.search(self, query, session_id, limit)
+        return self._agent_disabled(session_id) or flow.search(self, query, session_id, limit)
 
     def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
-        return flow.save(self, session_id, operations, last_test)
+        return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
 
-    def resume(self, session_id: str, target: str) -> dict:
-        return flow.resume(self, session_id, target)
+    def resume(self, session_id: str, target: str, fork_user_count: int | None = None, fork_revision: str = "") -> dict:
+        return self._agent_disabled(session_id) or flow.resume(self, session_id, target, fork_user_count=fork_user_count, fork_revision=fork_revision)
 
     def tool(self, name: str, arguments: dict | None = None) -> dict:
         arguments = arguments or {}
@@ -296,7 +324,8 @@ class TbrainService:
             return self.save(arguments.get("session_id", ""), arguments.get("operations") or [],
                              arguments.get("last_test"))
         if name == "resume":
-            return self.resume(arguments.get("session_id", ""), arguments.get("target", ""))
+            return self.resume(arguments.get("session_id", ""), arguments.get("target", ""),
+                               arguments.get("fork_user_count"), arguments.get("fork_revision", ""))
         return {"ok": False, "error": f"未知工具：{name}"}
 
     # ------------------------------------------------------------------

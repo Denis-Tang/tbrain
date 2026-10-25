@@ -143,6 +143,7 @@ def test_evict_skips_current_version_and_self(tmp_path):
     proc.register("desktop", version="0.6.0", home=tmp_path)  # current process
     _write_registry(tmp_path, 990301, version="0.6.0")       # same version
     _write_registry(tmp_path, 990302, version="0.5.9")       # older
+    _write_registry(tmp_path, 990303, version="0.6.1")       # newer must survive an old host
     requested: list[int] = []
 
     proc.evict_old_versions(

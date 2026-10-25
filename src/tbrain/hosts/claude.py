@@ -68,7 +68,7 @@ def connect(host: str = HOST, app_home: Path | None = None,
     if not isinstance(servers, dict):
         servers = {}
         mcp_payload["mcpServers"] = servers
-    servers["tbrain"] = base.mcp_server_entry(home, entry)
+    servers["tbrain"] = base.mcp_server_entry(home, entry, HOST)
     config.write_json_atomic(mcp_path, mcp_payload)
     files.append(str(mcp_path))
 
@@ -126,7 +126,9 @@ def doctor(host: str = HOST, app_home: Path | None = None,
     configured = _hooks_configured(payload, entry) if isinstance(payload, dict) else []
     servers = mcp_payload.get("mcpServers") if isinstance(mcp_payload, dict) else {}
     mcp_entry = servers.get("tbrain") if isinstance(servers, dict) else None
-    item = {"id": HOST, "host": HOST}
+    item = {"id": HOST, "host": HOST, "mcp": bool(mcp_entry), "hooks": len(configured) == len(config.HOOK_EVENTS),
+            "enabled": bool(mcp_entry or configured), "paths": [str(locations['mcp']), str(locations['settings'])],
+            "reload": '新开 Claude Code 会话；已有会话可在 /mcp 重连。'}
 
     if not configured and not mcp_entry:
         item.update(status="yellow", detail="未接入 Claude Code；运行 tbrain connect claude-code。")
@@ -134,9 +136,11 @@ def doctor(host: str = HOST, app_home: Path | None = None,
         item.update(status="red", detail=f"固定入口缺失：{entry}（重新安装 Tbrain）")
     elif not mcp_entry:
         item.update(status="yellow", detail="hook 已写入，但 ~/.claude.json 缺少 tbrain MCP 条目。")
-    elif str((mcp_entry or {}).get("command") or "") != entry:
+    elif str((mcp_entry or {}).get("command") or "") != entry or mcp_entry.get('args') != base.mcp_args(home, HOST):
         item.update(status="yellow",
                     detail="MCP 条目和固定入口不一致；重新运行 tbrain connect claude-code。")
+    elif not item['hooks']:
+        item.update(status='yellow', detail=f'MCP 已写入，Hook 配置不完整（{len(configured)}/5）；重新开启可补齐。')
     else:
         item.update(status="green",
                     detail=f"已接入 {len(configured)}/5 个 hook 事件与用户级 MCP；新会话生效。")

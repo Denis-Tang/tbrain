@@ -33,7 +33,7 @@ def _patch_block(app_home: Path, entry: str, plugin_uri: str) -> str:
         "        serverName: tbrain",
         "        transport: stdio",
         f"        command: {config.yaml_scalar(entry)}",
-        f"        args: {json.dumps(base.mcp_args(app_home), ensure_ascii=False)}",
+        f"        args: {json.dumps(base.mcp_args(app_home, HOST), ensure_ascii=False)}",
         "    - id: tbrain-native",
         f"      name: {config.yaml_scalar(plugin_uri)}",
         "      config:",
@@ -185,7 +185,9 @@ def doctor(host: str = HOST, app_home: Path | None = None,
            install_root: Path | None = None, settings=None, profile: str | None = None) -> dict:
     home, root, entry = _context(app_home, install_root, settings)
     locations = config.dsh_paths(profile)
-    item = {"id": HOST, "host": HOST}
+    item = {"id": HOST, "host": HOST, 'mcp': False, 'hooks': False, 'enabled': False,
+            'paths': [str(locations['patch']), str(paths.integrations_dir(home) / NATIVE_NAME)],
+            'reload': '完整退出并重开 DSH；运行中的会话不会因写入配置立即切换。'}
     patch_path = locations["patch"]
     text = config.read_text(patch_path)
     if not text:
@@ -194,6 +196,7 @@ def doctor(host: str = HOST, app_home: Path | None = None,
         return item
     ids = config.find_yaml_ids(text)
     tbrain_ids = [name for name in ids if name.startswith("tbrain-")]
+    item.update(mcp='tbrain-mcp' in ids, hooks='tbrain-native' in ids, enabled=bool(tbrain_ids))
     if not tbrain_ids:
         item.update(status="yellow",
                     detail=f"未接入 DSH（profile patch 中没有 Tbrain 条目）；运行 tbrain connect dsh。")
@@ -222,7 +225,7 @@ def doctor(host: str = HOST, app_home: Path | None = None,
                for entry in block.get("insert", [])}
     mcp = entries.get("tbrain-mcp", {}).get("config", {})
     native_config = entries.get("tbrain-native", {}).get("config", {})
-    if (mcp.get("command") != entry or mcp.get("args") != base.mcp_args(home)
+    if (mcp.get("command") != entry or mcp.get("args") != base.mcp_args(home, HOST)
             or native_config.get("command") != entry or native_config.get("home") != str(home)
             or "tbrain-cc-hooks" in ids):
         item.update(status="yellow", detail="DSH 启动参数或原生接入配置过期；重新运行 tbrain connect dsh。")

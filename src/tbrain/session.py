@@ -11,6 +11,9 @@ import json
 import re
 import subprocess
 import time
+import sys
+import platform
+from importlib import metadata
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -75,10 +78,6 @@ def _same_text(left: str, right: str) -> bool:
 def _session_row(service, session_id: str) -> dict | None:
     service.refresh_index()
     row = service.index.session(session_id)
-    if not row and (identity_parts := identity.split_session_id(session_id)):
-        link = service.index.get_session_link(*identity_parts)
-        if link:
-            row = service.index.session(link["session_id"])
     if not row:
         return None
     path = service.vault_root() / row["path"]
@@ -93,6 +92,7 @@ def load_session(service, session_id_or_row) -> tuple[handoff.Summary, Path] | N
         return None
     text = service.store.read_text(row["abs_path"])
     summary = handoff.parse(text)
+    _refresh_dead_ends(service, summary)
     owners = summary.header.setdefault("user_owned_fields", [])
     for field, digest in summary.header.get("model_fingerprints", {}).items():
         if field in ("target", "next_step") and digest != handoff.fingerprint(getattr(summary, field)):
@@ -101,14 +101,26 @@ def load_session(service, session_id_or_row) -> tuple[handoff.Summary, Path] | N
     return summary, row["abs_path"]
 
 
-def write_session(service, summary: handoff.Summary, path: Path) -> None:
+def write_session(service, summary: handoff.Summary, path: Path, *, create: bool = False) -> None:
+    _refresh_dead_ends(service, summary)
     for field in ("target", "next_step"):
         if field not in summary.header.get("user_owned_fields", []):
             summary.header.setdefault("model_fingerprints", {})[field] = handoff.fingerprint(getattr(summary, field))
+    snapshot = handoff.parse(handoff.render(summary))
+    for key in ("updated_at", "last_activity_at", "revision"):
+        snapshot.header.pop(key, None)
+    revision = f"U{len(summary.users)}-{handoff.fingerprint(handoff.render(snapshot))[:16]}"
+    summary.header["revision"] = revision
     body = handoff.render(summary)
-    service.store.write_text(path, body)
+    service.store.write_text(path, body, create=create)
     service.remember_write(path, body)
     service.index.upsert_session(_row_from_summary(service, summary, path), body)
+    service.sync_session_index(summary.project)
+    folder = service.vault_root() / ".tbrain" / "会话版本" / handoff.fingerprint(summary.session_id)
+    try:
+        service.store.write_text(folder / (revision + ".md"), body, create=True)
+    except FileExistsError:
+        pass  # 心跳没有改变交接内容时复用同一个版本。
 
 
 def _row_from_summary(service, summary: handoff.Summary, path: Path) -> dict:
@@ -167,22 +179,22 @@ def create_summary(service, *, host: str, host_session_id: str, cwd: str,
     project = project_override if project_override is not None else service.store.match_project(cwd)
     history = _history_names(service, project)
     sequence = next_sequence(service, project, date)
-    low_info = naming.is_low_information(first_message)
-    if low_info or not first_message.strip():
-        name = naming.temp_name(date, sequence)
-        provisional = True
-    else:
-        name = naming.session_name(first_message, project, history, date, sequence)
-        provisional = False
-    summary = handoff.new_summary(
-        name=name, project=project, session_id=identity.build_session_id(host, host_session_id),
-        agent=host, cwd=cwd, host_record=host_record, started_at=_utc_iso(now.utc),
-        raw_command=first_message, provisional=provisional,
-    )
-    path = service.store.session_path(project or "独立", now.local, name)
+    provisional = naming.is_low_information(first_message) or not first_message.strip()
     service.store.ensure_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_session(service, summary, path)
+    while True:
+        name = (naming.temp_name(date, sequence) if provisional else
+                naming.session_name(first_message, project, history, date, sequence))
+        summary = handoff.new_summary(
+            name=name, project=project, session_id=identity.build_session_id(host, host_session_id),
+            agent=host, cwd=cwd, host_record=host_record, started_at=_utc_iso(now.utc),
+            raw_command=first_message, provisional=provisional,
+        )
+        path = service.store.session_path(project or "独立", now.local, name)
+        try:
+            write_session(service, summary, path, create=True)
+            break
+        except FileExistsError:
+            sequence += 1
     service.index.register_link(host, host_session_id, summary.session_id, cwd,
                                 identity.first_message_hash(first_message), summary.header["started_at"])
     service.index.log_access(summary.session_id, "bootstrap")
@@ -190,25 +202,16 @@ def create_summary(service, *, host: str, host_session_id: str, cwd: str,
 
 
 def resolve_session(service, host: str, host_session_id: str, cwd: str,
-                    first_message: str = "") -> tuple[handoff.Summary, Path, bool]:
-    """按宿主身份找已有会话；新 ID 则用 cwd + 原命令完全相同匹配旧会话；都没有则新建。"""
+                    first_message: str = "", host_record: str = "") -> tuple[handoff.Summary, Path, bool]:
+    """只按宿主身份复用；不同 ID（包括分支）分别保存，通过 resume 显式接续。"""
     session_id = identity.build_session_id(host, host_session_id)
     row = _session_row(service, session_id)
     if row:
         summary, path = load_session(service, row)
         _mark_active(service, summary, path)
         return summary, path, False
-    reused = identity.find_reused_session(service.index, cwd, first_message)
-    if reused:
-        row = _session_row(service, reused)
-        if row:
-            summary, path = load_session(service, row)
-            service.index.register_link(host, host_session_id, summary.session_id, cwd,
-                                        identity.first_message_hash(first_message), _utc_iso(service.now().utc))
-            _mark_active(service, summary, path)
-            return summary, path, False
     summary, path = create_summary(service, host=host, host_session_id=host_session_id, cwd=cwd,
-                                   first_message=first_message)
+                                   first_message=first_message, host_record=host_record)
     return summary, path, True
 
 
@@ -262,7 +265,18 @@ def _project_prompt_block(service, project: str) -> str:
     if not project:
         return ""
     data = service.store.project_prompt(project)
-    return prompt_mod.render(data.get("sections") or {}, data.get("user") or "").strip()
+    parents = []
+    ancestors = {project}
+    parent = (service.store.project(project) or {}).get("parent")
+    while parent:
+        if parent in ancestors:
+            raise ValueError('项目卡父级关系形成循环，请修正项目卡')
+        ancestors.add(parent)
+        rules = service.store.project_prompt(parent)["sections"].get("硬规则", "")
+        if rules:
+            parents.insert(0, f"## 继承 {parent} 的硬规则\n{rules}")
+        parent = (service.store.project(parent) or {}).get("parent")
+    return "\n\n".join(parents + [prompt_mod.render(data.get("sections") or {}, data.get("user") or "").strip()])
 
 
 def _attachment_block(service, project: str) -> str:
@@ -279,10 +293,18 @@ def _attachment_block(service, project: str) -> str:
 def _resume_rows(service, summary: handoff.Summary, related_query: str, limit: int = 5) -> list[dict]:
     project = summary.project
     child_projects = service.child_projects(project)
-    rows = service.index.resume_view(project, child_projects, limit=limit, related_query=related_query)
+    rows = service.index.resume_view(project, child_projects, limit=50, related_query=related_query,
+                                     cwd=str(summary.header.get("cwd") or "") if not project else "")
+    rows = [row for row in rows if row['session_id'] != summary.session_id]
+    if not rows:
+        rows = [row for row in service.index.resume_view(project, child_projects, limit=50,
+                cwd=str(summary.header.get('cwd') or '') if not project else '') if row['session_id'] != summary.session_id]
+    service.index.set_meta('resume_view:' + summary.session_id, json.dumps({
+        'at': _utc_iso(service.now().utc), 'cwd': summary.header.get('cwd', '') if not project else '',
+        'rows': [{key: row[key] for key in ('session_id', 'status', 'updated_at', 'cwd', 'name')} for row in rows]}, ensure_ascii=False))
     for row in rows:
         row["updated_display"] = _display(service, row.get("updated_at", ""))
-    return rows
+    return rows[:limit]
 
 
 def _resume_block(service, rows: list[dict], root_project: str) -> str:
@@ -325,7 +347,18 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     blocks.append(("", _attachment_block(service, summary.project)))
     rows = _resume_rows(service, summary, related_query)
     blocks.append(("", _resume_block(service, rows, summary.project)))
-    footer = _time_block(service) + "\n\n" + _identity_block(service, summary)
+    recent = _recent_users_block(summary) if resume else ""
+    if recent:
+        recent = recent[-HOST_BUDGETS.get(host, 8000) // 3:]
+    progress = ''
+    if resume:
+        progress = '\n'.join(['## 本会话已保存进度', '原始命令：' + _clip(summary.raw_command, 1000),
+                              '目标：' + summary.target, '下一步：' + summary.next_step] +
+                             [item['id'] + ' ' + item['text'] for item in summary.items('已完成')[-5:]])
+        progress = _clip(progress, HOST_BUDGETS.get(host, 8000) // 4)
+    pending = service.store.pending_confirmations(summary.project)
+    footer = "\n\n".join(part for part in (progress, recent, _clip(pending, 1500), _time_block(service),
+                                           _identity_block(service, summary)) if part)
     budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(footer) - 80
     parts: list[str] = []
     used = 0
@@ -387,6 +420,18 @@ def handle_hook(service, event: HookEvent) -> HookResult:
     warning = _version_warning(service)
     host = event.host or "unknown"
 
+    if event.kind == "tool-result":
+        summary, path = _load_or_none(service, host, event.host_session_id)
+        if summary is not None and event.extra.get("last_test"):
+            result = event.extra["last_test"]
+            if not isinstance(result, dict) or not isinstance(result.get('command'), str) or not isinstance(result.get('exit_code'), int):
+                return HookResult(additional_context='工具结果缺少 command 或整数 exit_code，未记录验证结果。')
+            summary.header["last_verify"] = {"command": str(result["command"]),
+                                              "exit_code": result["exit_code"],
+                                              "at": _utc_iso(service.now().utc)}
+            write_session(service, summary, path)
+        return HookResult()
+
     if event.kind == "session-end":
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is not None:
@@ -429,6 +474,17 @@ def handle_hook(service, event: HookEvent) -> HookResult:
 
     if event.kind == "session-start":
         source = (event.source or "startup").lower()
+        if source == "fork":
+            parent = event.extra.get("parent_session_id", "")
+            if parent and parent != identity.build_session_id(host, event.host_session_id):
+                current = bootstrap(service, identity.build_session_id(host, event.host_session_id), host,
+                                    event.cwd, event.extra.get("host_record", ""))
+                result = resume(service, current["session_id"], parent,
+                                fork_user_count=event.extra.get("fork_user_count"),
+                                fork_revision=event.extra.get("fork_revision", ""), fork=True)
+                return HookResult(additional_context=(result.get("handoff") or result.get("error", "")) +
+                                   f"\n\n当前会话 session_id: {current['session_id']}")
+            return HookResult()
         if source == "startup":
             return HookResult()
         existing = _load_or_none(service, host, event.host_session_id)
@@ -439,10 +495,6 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         _mark_active(service, summary, path)
         related = " ".join([summary.raw_command] + handoff.last_users(summary, 3)).strip()
         package = assemble_startup(service, summary, host, resume=True, related_query=related)
-        if source == "compact":
-            # Claude Code cannot inject context on PreCompact, so the reminder to
-            # save and the recent user instructions arrive here instead.
-            package += "\n\n" + _recent_users_block(summary, "最近 5 条用户指令（压缩后补发）")
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
         return HookResult(additional_context=(warning + "\n\n" if warning else "") + package)
@@ -452,13 +504,16 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         existing = _load_or_none(service, host, event.host_session_id)
         if existing[0] is None:
             summary, path, created = resolve_session(service, host, event.host_session_id, event.cwd,
-                                                     first_message=first_message)
+                                                     first_message=first_message,
+                                                     host_record=event.extra.get("host_record", ""))
             package = assemble_startup(service, summary, host, related_query=first_message)
             if warning:
                 package = warning + "\n\n" + package
             service.index.log_access(summary.session_id, "bootstrap")
             return HookResult(additional_context=package)
         summary, path = existing
+        if event.extra.get("host_record"):
+            summary.header["host_record"] = event.extra["host_record"]
         if not summary.raw_command.strip():
             # 无 hook 宿主先用 bootstrap 建了空总结：第一条消息补成原始命令与 U1。
             summary.raw_command = first_message
@@ -496,8 +551,6 @@ def record_user(service, summary: handoff.Summary, path: Path, text: str) -> Non
         return
     now = _utc_iso(service.now().utc)
     users = summary.sections.setdefault("用户指令", [])
-    if users and _same_text(users[-1].get("text", ""), text):
-        return
     handoff.add_user(summary, text)
     summary.header["last_activity_at"] = now
     summary.header["updated_at"] = now
@@ -511,11 +564,11 @@ def record_user(service, summary: handoff.Summary, path: Path, text: str) -> Non
 
 
 def timeout_fallback(service) -> int:
-    hours = int(service.settings.load().timeout_hours or 0)
+    hours = float(service.settings.load().timeout_hours or 0)
     if hours <= 0:
         return 0
     changed = 0
-    threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
+    threshold = service.now().utc - timedelta(hours=hours)
     for row in service.index.sessions(status=["进行中"]):
         moment = _parse_utc(row.get("last_activity_at"))
         if moment is None or moment >= threshold:
@@ -548,9 +601,8 @@ def context_switch_hint(service, summary: handoff.Summary, tokens, window) -> st
     ratio = float(tokens) / float(window)
     if ratio < 0.65:
         return ""
-    savings = int(min(50, max(10, (ratio - 0.5) * 60)))
     return (f"记录已保存。当前会话上下文已用 {ratio * 100:.0f}%（约 {int(tokens)} tokens）。"
-            f"建议新开会话继续，可省约 {savings}% 的后续上下文成本。")
+            "建议新开会话接续，以减少后续携带的上下文。费用节省未估算。")
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +716,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 sections = operation.get("sections")
                 if not summary.project:
                     raise ValueError("独立会话没有项目提示词")
-                result = service.store.save_project_prompt(summary.project, sections or {})
+                result = service.store.save_project_prompt(summary.project, sections or {}, summary=summary)
                 written["project_prompt"] = result.get("written") or {}
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
@@ -688,7 +740,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         summary.header["last_verify"] = {
             "command": str(last_test.get("command") or ""),
             "exit_code": last_test.get("exit_code"),
-            "at": str(last_test.get("at") or now_iso),
+            "at": now_iso,
         }
     write_session(service, summary, path)
     service.index.log_access(summary.session_id, "save")
@@ -706,6 +758,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         "current_time": _time_block(service),
         "session": {"session_id": summary.session_id, "name": summary.name, "project": summary.project,
                     "status": summary.status},
+        "revision": summary.header.get("revision", ""),
     }
 
 
@@ -762,9 +815,13 @@ def _append_evidence(service, summary, item, rejected, warnings):
         rejected.append({"section": "证据", "reason": "证据内容不能为空",
                          "example": '{"kind":"file","text":"src/tbrain/vault.py:42"}'})
         return ""
-    if kind and kind not in ("file", "command", "commit"):
+    if kind not in ("file", "command", "commit"):
         rejected.append({"section": "证据", "reason": "kind 只允许 file/command/commit", "example": '{"kind":"file","text":"..."}'})
         return ""
+    if len(text) > handoff.ITEM_MAX_CHARS:
+        rejected.append({'section': '证据', 'reason': '单条证据不超过 200 字，不能静默截断',
+                         'example': '{"kind":"file","text":"src/example.py:1"}'})
+        return ''
     if kind == "file":
         match = re.match(r"^(.+?):(\d+)$", text)
         if not match:
@@ -784,9 +841,36 @@ def _append_evidence(service, summary, item, rejected, warnings):
             rejected.append({"section": "证据", "reason": "命令+输出最多 3 行", "example": '{"kind":"command","text":"pytest -q\\n130 passed"}'})
             return ""
     for candidate in summary.sections.get("证据", []):
-        if _same_text(candidate.get("text", ""), text):
+        if candidate.get("text", "").strip() == text:
             return f"E{candidate['number']}"
     return handoff.add_item(summary, "证据", text)
+
+
+def _dead_end_context(service, conditions: str, command: str, summary, cards=None) -> dict:
+    cards = service.store.public_cards() if cards is None else cards
+    packages = {}
+    for name in set(re.findall(r'[A-Za-z][A-Za-z0-9_.-]*', conditions)):
+        try:
+            packages[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+    return {'platform': platform.system() + ' ' + platform.release(), 'python': sys.version.split()[0],
+            'packages': packages,
+            'dependencies': {card['name']: [card.get('version', ''), card.get('location', '')]
+                             for card in cards if card['name'].casefold() in conditions.casefold()},
+            'command_passed': bool(command and summary.header.get('last_verify', {}).get('command') == command
+                                   and summary.header['last_verify'].get('exit_code') == 0)}
+
+
+def _refresh_dead_ends(service, summary) -> None:
+    if not summary.header.get('dead_end_conditions'):
+        return
+    cards = service.store.public_cards()
+    for item in summary.items('未走通的路'):
+        saved = summary.header.get('dead_end_conditions', {}).get(item['id'])
+        if saved and saved['baseline'] != _dead_end_context(service, saved['conditions'], saved['command'], summary, cards):
+            source = next(row for row in summary.sections['未走通的路'] if row['number'] == item['number'])
+            source['text'] = re.sub(r'\| (已排除|暂缓)', '| 可重试', source['text'])
 
 
 def _append_dead_end(service, summary, item, rejected):
@@ -810,6 +894,11 @@ def _append_dead_end(service, summary, item, rejected):
     if strength == "已排除" and not str(item.get("evidence") or "").strip():
         rejected.append({"section": "未走通的路", "reason": "结论为“已排除”必须附证据 E#", "example": '{"attempt":"...","strength":"已排除","evidence":"E2"}'})
         return ""
+    if item.get("evidence") and (not re.fullmatch(r"E\d+", str(item["evidence"])) or
+                                 not summary.has_reference(str(item["evidence"]))):
+        rejected.append({"section": "未走通的路", "reason": "证据 E# 不存在，请先保存证据并使用返回编号",
+                         "example": '{"evidence":"E1"}'})
+        return ""
     text = f"{attempt} | {reason_kind} | {conditions} | {strength}"
     if item.get("evidence"):
         text += f" [证据:{item['evidence']}]"
@@ -819,7 +908,12 @@ def _append_dead_end(service, summary, item, rejected):
     for candidate in summary.sections.get("未走通的路", []):
         if _same_text(candidate.get("text", ""), text):
             return f"X{candidate['number']}"
-    return handoff.add_item(summary, "未走通的路", text)
+    number = handoff.add_item(summary, "未走通的路", text)
+    command = str(item.get('command') or attempt)
+    summary.header.setdefault('dead_end_conditions', {})[number] = {
+        'conditions': conditions, 'command': command,
+        'baseline': _dead_end_context(service, conditions, command, summary)}
+    return number
 
 
 def _save_env(service, summary, item, rejected):
@@ -835,8 +929,12 @@ def _save_env(service, summary, item, rejected):
     if kind not in ("安装", "环境变量", "PATH", "代理", "配置", "工作区", "工具"):
         rejected.append({"op": "env", "reason": "type 只允许：安装/环境变量/PATH/代理/配置/工作区/工具", "example": _op_example("env")})
         return ""
-    card = service.store.save_public_card(kind, str(item.get("name")).strip(), item,
-                                          source_session=f"[[{summary.name}]]")
+    try:
+        card = service.store.save_public_card(kind, str(item.get("name")).strip(), item,
+                                              source_session=f"[[{summary.name}]]")
+    except ValueError as exc:
+        rejected.append({'op': 'env', 'reason': str(exc), 'example': _op_example('env')})
+        return ''
     return card.get("id") or ""
 
 
@@ -846,6 +944,7 @@ def _save_env(service, summary, item, rejected):
 
 def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
     service.refresh_index()
+    timeout_fallback(service)
     query = str(query or "").strip()
     if not query:
         return {"ok": False, "error": "query 不能为空", "results": []}
@@ -874,7 +973,7 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
     return {"ok": True, "query": query, "results": unique, "current_time": _time_block(service)}
 
 
-def resume(service, session_id: str, target: str) -> dict:
+def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_revision: str = "", fork: bool = False) -> dict:
     row = _session_row(service, session_id)
     if not row:
         return {"ok": False, "error": "当前会话不存在；请先让 hook 立项或调用 bootstrap"}
@@ -891,6 +990,38 @@ def resume(service, session_id: str, target: str) -> dict:
     if target_row["session_id"] == current.session_id:
         return {"ok": False, "error": "不能接续当前会话本身"}
     old, _ = load_session(service, target_row)
+    if fork or fork_user_count is not None or fork_revision:
+        if current.target or current.next_step or any(current.sections.get(section) for section in handoff.ITEM_PREFIXES):
+            return {'ok': False, 'error': '当前会话已有保存进度，不能用历史分支替换；请在新会话中选定分叉点'}
+        folder = service.vault_root() / ".tbrain" / "会话版本" / handoff.fingerprint(old.session_id)
+        versions = list(folder.glob("*.md"))
+        if fork_revision:
+            versions = [path for path in versions if path.stem == fork_revision]
+        elif fork_user_count is not None:
+            if not isinstance(fork_user_count, int) or fork_user_count < 0:
+                return {"ok": False, "error": "fork_user_count 必须是非负整数"}
+            versions = [path for path in versions if path.name.startswith(f"U{fork_user_count}-")]
+        else:
+            return {"ok": False, "error": "分支需提供 fork_revision 或 fork_user_count；不能用父会话最新进度代替分叉点"}
+        if not versions:
+            return {"ok": False, "error": "没有对应分叉点的保存版本，请回查宿主原文；当前会话仍独立保存"}
+        version = max(versions, key=lambda path: path.stat().st_mtime_ns)
+        old = handoff.parse(service.store.read_text(version))
+        for section in old.sections:
+            inherited = [dict(item) for item in old.sections[section]]
+            if section == "用户指令":
+                inherited += [{"number": len(inherited) + i + 1, "text": item["text"]}
+                              for i, item in enumerate(current.users)]
+            current.sections[section] = inherited
+        current.raw_command = current.raw_command or old.raw_command
+        current.target, current.next_step = old.target, old.next_step
+        current.archive = list(old.archive)
+        current.extra = dict(old.extra)
+        for key in ("last_verify", "git", "dead_end_conditions"):
+            if key in old.header:
+                current.header[key] = old.header[key]
+        current.header.update(branched_from=f"[[{old.name}]]", branch_revision=version.stem,
+                              branch_user_count=len(old.users))
     users = old.users[-3:]
     done = [f"{item['id']} {item.get('text', '')}" for item in old.items("已完成")]
     evidence = [f"{item['id']} {item.get('text', '')}" for item in old.items("证据")]
@@ -901,6 +1032,8 @@ def resume(service, session_id: str, target: str) -> dict:
     lines += ([f"- {item['id']}: {item.get('text', '')}" for item in users] or ["（无）"]) + [""]
     lines += ["### 已完成"] + (done[-10:] or ["（无）"]) + [""]
     lines += ["### 证据"] + (evidence[-10:] or ["（无）"]) + [""]
+    for title in ("决策", "未走通的路"):
+        lines += [f"### {title}"] + [f"{item['id']} {item['text']}" for item in old.items(title)] + [""]
     if old.extra.get("旧总结原文（迁移）"):
         lines += ["### 旧总结原文（迁移）", old.extra["旧总结原文（迁移）"], ""]
     # 当前会话写“接续自”
@@ -912,13 +1045,16 @@ def resume(service, session_id: str, target: str) -> dict:
             current_path = rename_session(service, current, current_path, naming.resume_name(old.name, date, seq))
         write_session(service, current, current_path)
     service.index.log_access(old.session_id, "resume")
+    ranking = service.index.record_resume_feedback(current.session_id, current.project, old.session_id)
     return {"ok": True, "resumed_from": old.name, "session_id": current.session_id,
             "resumed_session_id": old.session_id,
-            "handoff": "\n".join(lines), "current_time": _time_block(service)}
+            "handoff": "\n".join(lines), "current_time": _time_block(service), "ranking": ranking}
 
 
 def bootstrap(service, session_id: str, agent: str, cwd: str, host_record: str = "",
               project: str | None = None) -> dict:
+    service.refresh_index()
+    timeout_fallback(service)
     host, host_session_id = identity.split_session_id(session_id) or (identity.normalize_host(agent or "unknown"), session_id)
     existing = _load_or_none(service, host, host_session_id)
     if existing[0] is None:
@@ -927,6 +1063,7 @@ def bootstrap(service, session_id: str, agent: str, cwd: str, host_record: str =
                                        project_override=project)
     else:
         summary, path = existing
+        _mark_active(service, summary, path)
         if project is not None and project != "":
             if service.store.project(project):
                 summary.header["project"] = project
@@ -934,11 +1071,12 @@ def bootstrap(service, session_id: str, agent: str, cwd: str, host_record: str =
                 write_session(service, summary, path)
     service.refresh_index()
     package = assemble_startup(service, summary, host,
-                              related_query=summary.raw_command)
+                              resume=bool(summary.users), related_query=summary.raw_command)
     service.index.log_access(summary.session_id, "bootstrap")
     return {
         "ok": True,
         "session_id": summary.session_id,
+        "revision": summary.header.get("revision", ""),
         "session": {"name": summary.name, "project": summary.project, "status": summary.status},
         "project": summary.project,
         "project_directory": str(_project_dir(service, summary.project)) if summary.project else "",

@@ -145,6 +145,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		return {
 			session_id: sessionIdOf(ctx),
 			cwd: cwdOf(ctx),
+			host_record: ctx.sessionManager.getSessionFile() || "",
 			context_tokens: usage.tokens,
 			context_window: usage.window,
 			...event,
@@ -177,7 +178,8 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (_event: any, ctx: any) => {
 		const response = hookEvent("Stop", eventPayload({ stop_hook_active: false }, ctx));
-		const reminder = String(response?.additional_context || response?.reason || "");
+		const hint = hookEvent("Context", eventPayload({}, ctx));
+		const reminder = [response?.additional_context || response?.reason, hint?.additional_context].filter(Boolean).join("\n");
 		if (!reminder.trim()) return;
 		try {
 			// pi has no Stop-block equivalent: degrade to a next-turn reminder (design D5).
@@ -192,6 +194,17 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_before_compact", async (_event: any, ctx: any) => {
 		remember(hookEvent("PreCompact", eventPayload({}, ctx)));
+	});
+	pi.on("session_compact", async (_event: any, ctx: any) => {
+		remember(hookEvent("SessionStart", eventPayload({ source: "compact" }, ctx)));
+	});
+	pi.on("tool_result", async (event: any, ctx: any) => {
+		if (event.toolName === "bash" && /\b(pytest|unittest|test|check|build)\b/i.test(event.input?.command || "") &&
+			typeof event.details?.exitCode === "number") {
+			hookEvent("ToolResult", eventPayload({ last_test: {
+				command: event.input.command, exit_code: event.details.exitCode,
+			} }, ctx));
+		}
 	});
 
 	pi.on("session_shutdown", async (event: any, ctx: any) => {
@@ -212,7 +225,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("bootstrap", {
-				session_id: sessionIdOf(ctx),
+				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				agent: HOST,
 				cwd: String(params?.cwd || cwdOf(ctx)),
 				host_record: String(params?.host_record || ""),
@@ -234,7 +247,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("search", {
 				query: String(params?.query || ""),
-				session_id: sessionIdOf(ctx),
+				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				limit: Number(params?.limit || 5),
 			});
 			return { content: [{ type: "text", text: toolText(result) }], details: result };
@@ -253,7 +266,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("save", {
-				session_id: sessionIdOf(ctx),
+				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				operations: Array.isArray(params?.operations) ? params.operations : [],
 				last_test: params?.last_test ?? null,
 			});
@@ -267,11 +280,15 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		description: "读取某个会话的接续视图（下一步、未完成目标、最近进展）。",
 		parameters: Type.Object({
 			target: Type.String({ description: "会话名或会话 ID" }),
+			fork_user_count: Type.Optional(Type.Number({ description: "历史分支的用户轮次；省略为普通接续" })),
+			fork_revision: Type.Optional(Type.String({ description: "精确分叉保存版本，取自 save/bootstrap 返回值" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("resume", {
-				session_id: sessionIdOf(ctx),
+				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				target: String(params?.target || ""),
+				fork_user_count: params?.fork_user_count,
+				fork_revision: params?.fork_revision || "",
 			});
 			return { content: [{ type: "text", text: toolText(result) }], details: result };
 		},

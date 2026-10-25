@@ -212,7 +212,7 @@ def test_claude_connect_only_adds_tbrain_entries_and_backs_up(iso):
     assert mcp_after["mcpServers"]["other"] == mcp_before["mcpServers"]["other"]
     tbrain_server = mcp_after["mcpServers"]["tbrain"]
     assert tbrain_server["command"] == iso.entry
-    assert tbrain_server["args"] == ["--home", str(iso.home), "mcp"]
+    assert tbrain_server["args"] == ["--home", str(iso.home), "mcp", "--agent", "claude-code"]
 
     # idempotent: a second connect does not duplicate handlers
     _call(iso, "connect", HOST)
@@ -372,7 +372,7 @@ def test_dsh_connect_patch_and_native_plugin(iso):
                for entry in (block.get("insert") or []) if isinstance(entry, dict)}
     assert entries["tbrain-mcp"]["name"] == "@deepseek-ai/dsh-mcp-client"
     assert entries["tbrain-mcp"]["config"]["command"] == iso.entry
-    assert entries["tbrain-mcp"]["config"]["args"] == ["--home", str(iso.home), "mcp"]
+    assert entries["tbrain-mcp"]["config"]["args"] == ["--home", str(iso.home), "mcp", "--agent", "dsh"]
     assert entries["tbrain-native"]["name"].startswith("file:///")
     assert "tbrain-dsh.mjs" in entries["tbrain-native"]["name"]
     assert entries["tbrain-native"]["config"]["command"] == iso.entry
@@ -404,7 +404,7 @@ def test_dsh_reconnect_preserves_user_plugin_inside_old_markers(iso):
     text = iso.dsh_patch.read_text(encoding="utf-8")
     user = "- id: user-added-later\n  name: user-plugin\n  config:\n    value: !!js '() => 42'\n"
     text = text.replace(config.YAML_MARK_END, user + config.YAML_MARK_END)
-    text = text.replace(f'args: {json.dumps(["--home", str(iso.home), "mcp"])}', 'args: []')
+    text = text.replace(f'args: {json.dumps(["--home", str(iso.home), "mcp", "--agent", "dsh"])}', 'args: []')
     iso.dsh_patch.write_text(text, encoding="utf-8")
     assert hosts.doctor("dsh", iso.home, iso.root, iso.settings)["status"] == "yellow"
     _call(iso, "connect", "dsh")

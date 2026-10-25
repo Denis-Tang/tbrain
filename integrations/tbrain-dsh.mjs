@@ -121,6 +121,19 @@ export function apply(ctx, config = {}) {
 		cwd: agent.session.header.cwd,
 	});
 
+	ctx.on("tools/post-execute", async (exec, result, next) => {
+		if (exec.agent && isRoot(exec.agent) && ["bash", "pwsh"].includes(exec.name) &&
+			/\b(pytest|unittest|test|check|build)\b/i.test(exec.arguments?.command || "")) {
+			const output = (result.content || []).filter(block => block.type === "text").map(block => block.text).join("");
+			const exit = /\n\[exit code: (\d+)\]\s*$/.exec(output);
+			if (!result.isError && !/\[(?:killed|stopped|shell exited|shell killed|running|background)/.test(output)) {
+				await callHook(settings, { ...payload(exec.agent, "ToolResult"),
+					last_test: { command: exec.arguments.command, exit_code: exit ? Number(exit[1]) : 0 } });
+			}
+		}
+		return next();
+	});
+
 	ctx.on("agent/created", async ({ agent, source }) => {
 		if (!isRoot(agent)) return;
 		trackedRoots.add(agent.session.header.id);
@@ -140,9 +153,9 @@ export function apply(ctx, config = {}) {
 			const result = await callHook(settings, { ...payload(agent, "UserPromptSubmit"), prompt });
 			if (result.additional_context) contexts.push(message(result.additional_context));
 		}
-		const pressure = ctx.sessionProjections.stateOf(agent.session, "contextPressure");
+		const pressure = ctx.sessionProjections.snapshot(agent.session).values.contextPressure;
 		const tokens = ctx.tokenMeter.measure(agent.session).totalTokens;
-		const window = pressure.contextWindow;
+		const window = pressure?.contextWindow;
 		const id = agent.session.header.id;
 		if (window && tokens / window >= CONTEXT_RATIO && Date.now() - (lastHint.get(id) || 0) >= CONTEXT_COOLDOWN_MS) {
 			const result = await callHook(settings, { ...payload(agent, "Context"), context_tokens: tokens, context_window: window });

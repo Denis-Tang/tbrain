@@ -269,7 +269,7 @@ def read_connect_state(app_home: Path) -> dict:
 def write_connect_state(app_home: Path, host: str, values: dict) -> dict:
     path = connect_state_path(app_home)
     state = read_connect_state(app_home)
-    state[host] = {**(state.get(host) or {}), **values, "at": datetime.now().isoformat(timespec="seconds")}
+    state[host] = {**(state.get(host) or {}), **values, "enabled": True, "at": datetime.now().isoformat(timespec="seconds")}
     write_json_atomic(path, state)
     return state
 
@@ -277,6 +277,5 @@ def write_connect_state(app_home: Path, host: str, values: dict) -> dict:
 def clear_connect_state(app_home: Path, host: str) -> None:
     path = connect_state_path(app_home)
     state = read_connect_state(app_home)
-    if host in state:
-        state.pop(host, None)
-        write_json_atomic(path, state)
+    state[host] = {'enabled': False}
+    write_json_atomic(path, state)

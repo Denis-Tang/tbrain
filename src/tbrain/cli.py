@@ -31,7 +31,8 @@ def _parser() -> argparse.ArgumentParser:
         return item
 
     sub("desktop", "打开桌面界面（默认）")
-    sub("mcp", "启动 stdio MCP 服务")
+    mcp = sub("mcp", "启动 stdio MCP 服务")
+    mcp.add_argument('--agent', default='', choices=['', 'claude-code', 'codex', 'dsh'], help='接入的 Agent')
     hook = sub("hook", "读取宿主 hook 的 stdin JSON，输出宿主可消费的 JSON")
     hook.add_argument("--host", required=True, help="claude-code|codex|dsh|pi")
     tool = sub("tool", "以命令行调用 MCP 工具（供 pi 扩展等使用）")
@@ -345,7 +346,7 @@ def main(argv=None) -> int:
         if command == "mcp":
             from .mcp_server import run
 
-            run(home=_app_home(args))
+            run(home=_app_home(args), agent=args.agent)
             return 0
         if command == "desktop":
             from .desktop import run

@@ -206,3 +206,13 @@ def test_update_check_failure_degrades(api, monkeypatch):
     monkeypatch.setattr(update, "check_latest", broken)
     result = brain.update_check(False)
     assert result.get("ok") is False or "error" in result
+
+
+def test_upgrade_requests_restart_after_reply(api, monkeypatch):
+    desktop, service, vault, _ = api
+    root = vault.parent / 'install'
+    monkeypatch.setattr(service, 'apply_upgrade', lambda: {
+        'ok': True, 'upgraded': True, 'install_root': str(root), 'to': '0.6.4'})
+    result = desktop.update_apply()
+    assert result['restarting'] and desktop._quit_requested
+    assert desktop._restart_executable == root / 'versions' / '0.6.4' / 'tbrain.exe'

@@ -25,6 +25,7 @@ class DesktopAPI:
     def __init__(self, service: TbrainService):
         self._service = service
         self._quit_requested = False
+        self._restart_executable = None
 
     def _call(self, method, *args):
         try:
@@ -166,7 +167,12 @@ class DesktopAPI:
         return self._call(self._service.check_update, force)
 
     def update_apply(self):
-        return self._call(self._service.apply_upgrade)
+        result = self._call(self._service.apply_upgrade)
+        if result.get('ok') and result.get('upgraded'):
+            self._restart_executable = Path(result['install_root']) / 'versions' / result['to'] / 'tbrain.exe'
+            self._quit_requested = True
+            result['restarting'] = True
+        return result
 
     def open_document(self, path):
         return self._call(self._service.open_document, path)
@@ -229,12 +235,16 @@ def run(home: Path | None = None):
     if os.name != "nt":
         raise SystemExit("Tbrain 桌面程序仅支持 Windows")
     from ctypes import wintypes
+    import hashlib
+    resolved_home = paths.app_home(home)
+    mutex_name = 'Local\\Tbrain.Desktop.' + hashlib.sha256(str(resolved_home).casefold().encode()).hexdigest()[:16]
+    api = None
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateMutexW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel.CreateMutexW(None, False, "Local\\Tbrain.Desktop")
+    handle = kernel.CreateMutexW(None, False, mutex_name)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     already_running = ctypes.get_last_error() == 183
@@ -255,12 +265,12 @@ def run(home: Path | None = None):
         if evicted.get("requested"):
             # 旧版桌面退出后单实例锁才释放，这里重新申请一次，避免“淘汰了旧窗口却没有新窗口”。
             kernel.CloseHandle(handle)
-            handle = kernel.CreateMutexW(None, False, "Local\\Tbrain.Desktop")
+            handle = kernel.CreateMutexW(None, False, mutex_name)
             if not handle:
                 raise ctypes.WinError(ctypes.get_last_error())
             already_running = ctypes.get_last_error() == 183
         window = user.FindWindowW(None, "Tbrain")
-        if already_running or window:
+        if already_running:
             if window:
                 user.ShowWindow(window, 9)
                 user.SetForegroundWindow(window)
@@ -277,7 +287,8 @@ def run(home: Path | None = None):
         except Exception:
             watcher = None
         try:
-            _maintenance_free_run(DesktopAPI(service), service.home, stop)
+            api = DesktopAPI(service)
+            _maintenance_free_run(api, service.home, stop)
         finally:
             stop.set()
             try:
@@ -290,3 +301,7 @@ def run(home: Path | None = None):
                 pass
     finally:
         kernel.CloseHandle(handle)
+    if api is not None and api._restart_executable is not None:
+        subprocess.Popen([str(api._restart_executable), '--home', str(resolved_home), 'desktop'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.CREATE_NO_WINDOW)

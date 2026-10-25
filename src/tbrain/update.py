@@ -504,6 +504,8 @@ def upgrade_from_package(source, version: str = "", home: Path | None = None,
         if not installed.get("ok"):
             raise UpdateError("新版本文件校验失败：" + "、".join(installed.get("missing") or []))
         evicted = proc.evict_old_versions(target_version, timeout=timeout, home=home)
+        if evicted.get('remaining'):
+            raise UpdateError('旧版本进程尚未退出，未切换版本：' + '、'.join(map(str, evicted['remaining'])))
         switched = installer.switch_current(target_version, root)
         if not switched.get("ok"):
             raise UpdateError("切换当前版本失败：" + "、".join(switched.get("missing") or []))

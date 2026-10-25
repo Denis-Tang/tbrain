@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import re
+import json
+import math
 import sqlite3
 import threading
 import time
@@ -141,6 +143,14 @@ CREATE TABLE IF NOT EXISTS access_log (
     at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS resume_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    target TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS blocks (
     path TEXT,
     block TEXT,
@@ -153,8 +163,6 @@ CREATE TABLE IF NOT EXISTS blocks (
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_access_session ON access_log(session_id, at);
-CREATE INDEX IF NOT EXISTS idx_session_links_lookup
-    ON session_links(cwd, first_message_hash, created_at);
 CREATE INDEX IF NOT EXISTS idx_public_cards_kind ON public_cards(kind);
 """
 
@@ -829,6 +837,39 @@ class Index:
             ).fetchall()
         return [str(row["kind"]) for row in rows]
 
+    def record_resume_feedback(self, current: str, project: str, target: str) -> dict:
+        snapshot = self.get_meta('resume_view:' + current)
+        if not snapshot:
+            return {}
+        with self.connect() as conn:
+            conn.execute('INSERT INTO resume_feedback(project,target,snapshot,at) VALUES(?,?,?,?)',
+                         (project, target, snapshot, self._stamp()))
+        return self.ranking_report(project)
+
+    def ranking_report(self, project: str) -> dict:
+        with self.connect() as conn:
+            samples = conn.execute('SELECT target,snapshot FROM resume_feedback WHERE project=? ORDER BY id DESC LIMIT 500',
+                                   (project,)).fetchall()
+        metrics = {}
+        for tau in (3, 7, 14):
+            reciprocal = hit5 = 0.0
+            for sample in samples:
+                view = json.loads(sample['snapshot'])
+                now = _parse_ts(view['at'])
+                rows = sorted(enumerate(view['rows']), key=lambda pair: (
+                    0 if not view['cwd'] or _normalize_path(pair[1]['cwd']) == _normalize_path(view['cwd']) else 1,
+                    status_priority(pair[1]['status']),
+                    -math.exp(-_days_since(pair[1]['updated_at'], now) / (30 if is_finished(pair[1]['status']) else tau)),
+                    pair[0]))
+                ids = [row['session_id'] for _, row in rows]
+                rank = ids.index(sample['target']) + 1 if sample['target'] in ids else 0
+                reciprocal += 1 / rank if rank else 0
+                hit5 += bool(rank and rank <= 5)
+            metrics[str(tau)] = {'mrr': reciprocal / len(samples) if samples else 0,
+                                 'hit5': hit5 / len(samples) if samples else 0}
+        # 状态优先、同状态按新近排序时，tau 只改分数，不改顺序；相同结果不能算收益。
+        return {'samples': len(samples), 'tau': 7, 'metrics': metrics, 'ready': len(samples) >= 50}
+
     # -- 文件扫描状态 -------------------------------------------------------
 
     def mark_scan(self, path: str, mtime: float, size: int, hash: str) -> None:
@@ -977,17 +1018,6 @@ class Index:
                 (str(host), str(host_session_id)),
             ).fetchone()
         return dict(row) if row is not None else None
-
-    def find_link_by_cwd_and_message(self, cwd: str, first_message_hash: str) -> str:
-        """同 cwd 且“原始命令 == 首条消息”完全相同 -> 复用原 session_id（取最新）。"""
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT session_id FROM session_links "
-                "WHERE cwd = ? AND first_message_hash = ? "
-                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                (str(cwd or ""), str(first_message_hash or "")),
-            ).fetchone()
-        return str(row["session_id"]) if row is not None and row["session_id"] else ""
 
     def links_for_session(self, session_id: str) -> list[dict]:
         with self.connect() as conn:

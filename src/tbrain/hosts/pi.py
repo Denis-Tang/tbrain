@@ -76,9 +76,10 @@ def disconnect(host: str = HOST, app_home: Path | None = None,
 def doctor(host: str = HOST, app_home: Path | None = None,
            install_root: Path | None = None, settings=None) -> dict:
     home, root, entry, locations = _target(app_home, install_root, settings)
-    item = {"id": HOST, "host": HOST}
     target = locations["extension"]
     installed = target.is_file() and MARKER in config.read_text(target)
+    item = {"id": HOST, "host": HOST, 'mcp': False, 'hooks': installed, 'tools': installed, 'enabled': installed,
+            'paths': [str(target)], 'reload': '新开 pi 会话或执行 /reload。工具与生命周期事件由同一个扩展提供。'}
     if not installed:
         item.update(status="yellow",
                     detail="pi 扩展未安装；运行 tbrain connect pi（新开 pi 会话或 /reload 生效）。")

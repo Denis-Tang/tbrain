@@ -326,13 +326,15 @@ def test_session_links_register_lookup_and_update(index: Index):
     assert index.get_session_link("codex", "host-9")["created_at"] == STAMP
 
 
-def test_find_link_by_cwd_and_message_latest_wins(index: Index):
-    index.register_link("cc", "a", "session-a", r"D:\w", "same-hash", "2026-10-20T00:00:00Z")
-    index.register_link("cc", "b", "session-b", r"D:\w", "same-hash", "2026-10-21T00:00:00Z")
-    index.register_link("cc", "c", "session-c", r"D:\w", "other-hash", "2026-10-22T00:00:00Z")
-    assert index.find_link_by_cwd_and_message(r"D:\w", "same-hash") == "session-b"
-    assert index.find_link_by_cwd_and_message(r"D:\w", "missing") == ""
-    assert index.find_link_by_cwd_and_message(r"D:\elsewhere", "same-hash") == ""
+def test_resume_replay_reports_real_ranks_without_false_tau_improvement(index):
+    import json
+    rows = [dict(session_id='first', status='进行中', updated_at=STAMP, cwd='D:/work', name='first'),
+            dict(session_id='chosen', status='进行中', updated_at=iso_days_ago(1), cwd='D:/work', name='chosen')]
+    index.set_meta('resume_view:current', json.dumps({'at': STAMP, 'cwd': '', 'rows': rows}))
+    for _ in range(50):
+        report = index.record_resume_feedback('current', 'P1', 'chosen')
+    assert report['ready'] and report['samples'] == 50 and report['tau'] == 7
+    assert all(metrics == {'mrr': 0.5, 'hit5': 1.0} for metrics in report['metrics'].values())
 
 
 # ---------------------------------------------------------------------------

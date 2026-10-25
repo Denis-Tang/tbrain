@@ -81,6 +81,10 @@ class Summary:
     def goals(self) -> list[dict]:
         return [{**item, "id": f"G{item['number']}"} for item in self.sections.get("未完成目标", [])]
 
+    def has_reference(self, reference: str) -> bool:
+        ids = {item['id'] for item in self.users + self.items('证据')}
+        return reference in ids or any(re.match(rf"^- {re.escape(reference)}\b", line) for line in self.archive)
+
 
 def _now_iso(value: datetime | str | None) -> str:
     if isinstance(value, datetime):

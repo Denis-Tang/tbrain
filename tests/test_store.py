@@ -266,6 +266,9 @@ def test_save_project_rejects_invalid_name_and_parent(store: Store):
         store.save_project("P2", [], parent="不存在的项目")
     with pytest.raises(ValueError):
         store.save_project("P1", [], parent="P1")
+    store.save_project('child', [], parent='P1')
+    with pytest.raises(ValueError, match='循环'):
+        store.save_project('P1', [], parent='child')
 
 
 def test_match_project_longest_prefix_windows_case_and_separators(store: Store):
@@ -322,6 +325,11 @@ def test_delete_project_archives_to_internal_dir_and_keeps_sessions(store: Store
 
 
 def test_project_prompt_sections_round_trip(store: Store):
+    from tbrain import handoff
+    summary = handoff.new_summary(name="来源会话", project="P1", session_id="codex:source", agent="codex",
+                                  cwd="", host_record="", started_at=STAMP, raw_command="第一条")
+    handoff.add_user(summary, "第二条")
+    handoff.add_user(summary, "第三条：写入必须原子")
     store.save_project("P1", [r"D:\p1"])
     initial = store.project_prompt("P1")
     assert set(initial["sections"]) == {"最终目标", "硬规则", "当前阶段", "关键路径和命令"}
@@ -334,6 +342,7 @@ def test_project_prompt_sections_round_trip(store: Store):
             "硬规则": "- 写入必须原子（来源：#U3）",
             "当前阶段": "第 4 步",
         },
+        summary=summary,
     )
     assert set(result["written"]) == {"最终目标", "硬规则", "当前阶段"}
     assert result["rejected"] == []
@@ -421,6 +430,25 @@ def test_public_card_validates_kind_and_name(store: Store):
         store.save_public_card("未知类型", "x", {})
     with pytest.raises(ValueError):
         store.save_public_card("安装", "", {})
+
+
+def test_public_card_user_changes_remain_active_and_conflict_persists(store):
+    card = store.save_public_card('工具', '测试工具', {'version': '1', 'body': '模型原文'})
+    path = Path(card['path'])
+    path.write_text(path.read_text(encoding='utf-8').replace('模型原文', '用户手改正文'), encoding='utf-8')
+    for version in ('2', '3'):
+        with pytest.raises(ValueError, match='待用户确认'):
+            store.save_public_card('工具', '测试工具', {'version': version, 'body': '模型更新'})
+    assert '用户手改正文' in store.public_cards()[0]['body']
+    assert not list((path.parent / '归档').glob('*.md'))
+    assert '待用户确认' in Store(store.vault, store.app_home).pending_confirmations('')
+    from tbrain.service import TbrainService
+    service = TbrainService(store.app_home, vault=store.vault)
+    service.settings.update({'ntp_enabled': False})
+    service.bootstrap('codex:cards', 'codex', str(store.vault))
+    result = service.save('codex:cards', [{'op': 'env', 'items': [
+        {'type': '工具', 'name': '测试工具', 'version': '4'}, {'type': '工具', 'name': '另一工具', 'version': '1'}]}])
+    assert result['written']['env'] == ['工具-另一工具'] and len(result['rejected']) == 1
 
 
 def test_public_l1_contains_kind_lines_and_hot_facts(store: Store):

@@ -2,7 +2,7 @@
 
 本文说明 Tbrain 的版本化安装、固定入口、进程淘汰、升级/回退流程，以及四个宿主（Claude Code、Codex、DeepSeek Harness、pi）的接入与 `doctor` 检查。
 
-0.6.2 新用户可解压后双击 `tbrain.exe`，在首次设置页选择知识库和 Agent，点击“开始使用”。安装完成后从 Windows 开始菜单启动；下文命令用于手动安装、管理与排查。Agent 需要提前安装和登录；未勾选的宿主不写配置。
+0.6.3 新用户可解压后双击 `tbrain.exe`，在首次设置页选择知识库和 Agent，点击“开始使用”。安装完成后从 Windows 开始菜单启动；下文命令用于手动安装、管理与排查。Agent 需要提前安装和登录；未勾选的宿主不写配置。
 
 ## 1. 版本化安装布局
 
@@ -30,7 +30,7 @@
 
 ```text
 "<安装目录>\bin\tbrain.cmd" hook --host <host> [--home "<应用数据目录>"]
-"<安装目录>\bin\tbrain.cmd" --home "<应用数据目录>" mcp
+"<安装目录>\bin\tbrain.cmd" --home "<应用数据目录>" mcp --agent <host>
 ```
 
 入口脚本是纯 ASCII 的 cmd 批处理：读取同目录 `..\current.txt`，然后执行 `versions\<当前版本>\tbrain.exe %*`。升级只做两件事：
@@ -42,7 +42,7 @@
 
 ## 3. 进程登记与旧版本淘汰
 
-`~/.tbrain/processes/<pid>.json` 记录长驻进程：`pid`、`version`、`role`、`exe`、`started_at`、`updated_at`。desktop 与 MCP 进程启动时登记，退出时删除；新版本会：
+`~/.tbrain/processes/<pid>.json` 记录长驻进程：`pid`、`version`、`role`、`exe`、`started_at`、`updated_at`。desktop 与 MCP 进程启动时登记，退出时删除；新版本只淘汰版本号更旧的进程，旧版不会反过来结束新版。新版本会：
 
 1. 找到登记的旧版本进程，写 `processes/<pid>.exit`（内容是退出请求，含 requester／当前版本）；
 2. 旧进程的后台 watcher 线程发现 `.exit` 后优雅退出（MCP/desktop 由调用方注册回调）；
@@ -156,3 +156,32 @@ MCP 参数为 `--home <应用数据目录> mcp`。原生插件通过固定入口
 - **发布资产要求？** `update` 只接受带 SHA256 摘要的 GitHub Release 资产（资产元数据 `digest` 字段，或发布时附带 `.sha256` 校验文件供人工核对）；没有摘要的包会被拒绝下载。
 - **安装包里的版本号从哪来？** 构建时 `scripts/build.ps1` 把 `src/tbrain/__init__.py` 的版本写入包内 `VERSION` 文件（PyInstaller 目录里没有可读的 `tbrain/__init__.py`），`tbrain install/upgrade` 从该文件推断版本；源头仍是 `__version__`。
 - **升级包如何生成？** `pwsh -File scripts/build.ps1`，产物 `dist/tbrain` 直接匹配 `installer.REQUIRED_FILES`；版本号只从 `src/tbrain/__init__.py` 读取。
+
+
+## 0.6.3：Agent 管理与更新生效
+
+安装后在左侧“Agent 管理”开启 Claude Code、Codex、DSH、pi 各自的总开关；展开详情查看工具、Hook、配置路径和加载步骤。未接入的 Agent 不写配置，其他插件和 MCP 条目保留。pi 的工具与事件由扩展提供，不写 MCP 配置。
+
+| Agent | 开启后的操作 |
+|---|---|
+| Claude Code | 登录模型服务，重开会话；必要时在 `/mcp` 重连 |
+| Codex | 重开 Codex，在 `/hooks` 审核并信任 Tbrain；首次工具调用按原生提示批准 |
+| DSH | 完整退出后重开；Tbrain 默认管理 desktop profile，其他 profile 用现有 `connect dsh --profile <name>` |
+| pi | 新开会话或 `/reload`，先在 pi 内完成模型认证 |
+
+关闭开关会移除 Tbrain 配置，并在应用数据中记录禁用。已经启动的新版 MCP 即使仍被宿主缓存，也会拒绝工具读写；缓存 Hook 不再记录消息。工具名称从宿主列表消失仍需重开或重连。此控制要求实际运行 0.6.3；升级前已经缓存的旧代码需先结束。
+
+桌面点击安装更新后，0.6.3 会先返回结果，再退出旧原生窗口、释放单实例占用，启动目标版本。旧进程无法结束时不切换 current。回退需要显式执行 rollback；启动时的进程淘汰仅针对更旧版本。
+
+版本目录默认保留两份便于回退；“旧进程退出”不代表磁盘只保留一份程序。知识库和应用数据不删除。当前公开更新源 `Denis-Tang/tbrain/releases/latest` 返回 404，尚不能从公开源完成应用内更新；本地 HTTP 下载与真实安装包升级已隔离验证，发布包之后才能验证公开源的整条链路。
+
+
+### 隔离实测结果（2026-10-25）
+
+使用真实构建包测试两条升级路径：0.6.2→0.6.3 的本地 HTTP 升级，以及在 0.6.3 桌面点击“检查更新／升级”到仅用于验证的 0.6.4。桌面完成下载后自动退出并打开新版本；旧桌面、原生窗口和 MCP PID 存活数为 0，四宿主配置与固定入口内容不变。0.6.4 测试包不发布，交付候选仍为 0.6.3。
+
+在升级后的实际窗口逐个关闭、重新开启四个 Agent：关闭时三个已连接 MCP 的无 session_id 检索均被拒绝，pi 工具被禁用，四个 Hook 均未写入消息；重新开启后原 MCP 连接恢复，pi 工具恢复，四个 Hook 各生成一份独立会话总结。
+
+Codex CLI 另以隔离 CODEX_HOME 验证：未信任时不生成总结；单次测试参数 `--dangerously-bypass-hook-trust` 放行后原生 Hook 捕获一条原始指令。此测试没有登录，模型请求返回 401，不代表已验证“用户在 /hooks 信任后，Hook 与模型联合运行”；生产接入仍需用户在 /hooks 审核，不自动写信任记录。
+
+四个 Agent 的实际模型保存与新会话接续已分别通过；Claude/Codex 的模型测试关闭全局 Hook 以隔离真实知识库。自动回归 249 项通过，含 8 个设计验收场景。公开 Release 下载链路仍待发布资产后验证。

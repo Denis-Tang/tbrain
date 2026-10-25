@@ -308,3 +308,13 @@ def test_upgrade_evicts_registered_old_process(tmp_path):
         update_module.proc.evict_old_versions = original
     assert result["evicted"]["requested"] == [fake_pid]
     assert fake_pid in result["evicted"]["exited"]
+
+
+def test_upgrade_keeps_current_when_old_process_cannot_exit(tmp_path, monkeypatch):
+    home, root = tmp_path / 'home', tmp_path / 'install'
+    install_fake_version(root, tmp_path)
+    package = make_package(tmp_path, NEXT_VERSION)
+    monkeypatch.setattr(update.proc, 'evict_old_versions', lambda *args, **kwargs: {'remaining': [12345]})
+    with pytest.raises(update.UpdateError, match='旧版本进程尚未退出'):
+        update.upgrade_from_package(package, NEXT_VERSION, home=home, install_root=root)
+    assert installer.current_version(root) == __version__

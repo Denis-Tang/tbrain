@@ -474,3 +474,28 @@
 - `dsh-asar/`：从桌面 asar 抽出的 `api-catalog.js`、`dsh-agent-loop.js`、`dsh-mcp-client`/`token-meter` README
 - `dsh-probe/`：DSH 原生插件与假 LLM 实验（probe.mjs、probe021.mjs、mock-llm.py、cc-hook.mjs、hooks.json、patch*.yml、日志）
 - `dsh-home*/`、`dsh021/`：隔离 DSH_HOME 与 npm 安装的 DSH 0.2.1-rc.3（临时，不入库）
+
+
+## 0.6.3 补充：其他项目的接入与更新实现
+
+本节对照的是源代码和官方更新文档；不能把“写入配置”当成“宿主已经执行 Hook”。
+
+| 项目 | 实现 | Tbrain 采用的部分 |
+|---|---|---|
+| [CC Switch](https://github.com/farion1231/cc-switch) | `src-tauri/src/services/mcp.rs` 按宿主同步或移除配置，Codex 单独处理 TOML；`src/lib/updater.ts` 调用 Tauri updater | 独立 Agent 列表、统一总开关，后台保留各宿主实际配置格式 |
+| [Claude-Mem](https://github.com/thedotmack/claude-mem) | `plugin/hooks/hooks.json` 接生命周期；MCP 与 worker 分离，worker 从固定安装位置启动 | 工具与 Hook 明确分工；不假设工具接入就会自动捕获消息 |
+| [Serena](https://github.com/oraios/serena/blob/main/docs/02-usage/030_clients.md) | MCP stdio 或 HTTP；Hook 是另一个可选入口，配置后用宿主核实与重连 | 页面同时显示工具、Hook 和重连要求 |
+
+源码读取时 CC Switch 为 `de0a235ad6389ce4afa333b472cdee615a3f3987`，Claude-Mem 为 `bab040941390f6c1e82c0508ec806f2fc8255cbb`，Serena 为 `abb0a0f01b94bc8050086f0fb860077d17730324`。
+
+更新框架有共同的退出交接步骤：
+
+- [Electron autoUpdater](https://www.electronjs.org/docs/latest/api/auto-updater)：下载就绪后由 `quitAndInstall()` 执行退出和安装。
+- [Tauri updater](https://v2.tauri.app/plugin/updater/)：`downloadAndInstall()` 后调用 `relaunch()`。
+- [Velopack](https://docs.velopack.io/integrating/overview)：更新辅助进程等待主程序退出，再替换和启动；提供 ApplyUpdatesAndRestart/Exit。
+
+这些框架不负责退出其他 Agent 持有的任意独立 MCP 服务。Tbrain 使用固定入口、版本目录与本应用数据目录下的进程登记：先请求旧进程退出，超时结束其进程树，确认退出后切换入口。桌面自行更新还需要在返回结果后关闭旧 WPF 窗口并重启。只保留磁盘旧目录供回退，不允许旧进程长期占用。
+
+当前 [Codex MCP](https://developers.openai.com/codex/mcp/) 和 [Codex Hooks](https://developers.openai.com/codex/hooks/) 仍是两个配置入口。Hook 需要用户在 `/hooks` 信任；测试中的单次工具批准覆盖不代表生产环境已经信任 Hook。
+
+真实 DSH CLI 验证发现 `ctx.sessionProjections.stateOf()` 已移除，0.6.3 改为 `snapshot(session).values.contextPressure`。此前以 stateOf 模拟的测试无法发现宿主 API 漂移；相关直接测试已同步到当前接口。

@@ -301,10 +301,11 @@ def evict_old_versions(current_version: str, timeout: float = DEFAULT_TIMEOUT,
     sleep = sleep or time.sleep
     current = str(current_version or __version__)
     mine = os.getpid()
+    from .installer import _version_key
 
     candidates = [item for item in live_processes(home=home, alive=alive)
                   if int(item.get("pid") or 0) not in (mine, 0)
-                  and str(item.get("version") or "") != current]
+                  and _version_key(str(item.get("version") or "")) < _version_key(current)]
     requested: list[int] = []
     for item in candidates:
         pid = int(item["pid"])

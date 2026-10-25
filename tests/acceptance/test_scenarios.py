@@ -90,13 +90,26 @@ def test_scenario3_after_stage_save_resume_has_done_evidence_next(brain):
 # 4 -------------------------------------------------------------------------
 WORKER = r"""
 import sys
+import time
 from pathlib import Path
 from tbrain.service import TbrainService
+from tbrain import session as flow
 
 home, vault, cwd, session = sys.argv[1:5]
 service = TbrainService(Path(home), vault=Path(vault))
+next_sequence = flow.next_sequence
+def simultaneous_sequence(*args):
+    sequence = next_sequence(*args)
+    (Path(home) / (session + ".ready")).touch()
+    deadline = time.monotonic() + 15
+    while len(list(Path(home).glob("*.ready"))) < 2:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("另一会话没有到达命名位置")
+        time.sleep(0.01)
+    return sequence
+flow.next_sequence = simultaneous_sequence
 service.hook("codex", {"hook_event_name": "UserPromptSubmit", "session_id": session,
-                       "cwd": cwd, "prompt": "并发写入验收 " + session + "：同一项目两个会话同时保存"})
+                       "cwd": cwd, "prompt": "并发写入验收。同一项目两个会话同时保存 " + session})
 for index in range(12):
     result = service.save("codex:" + session, [
         {"op": "append", "section": "done", "items": [{"text": f"并发项 {index} by {session}"}]},
@@ -112,6 +125,7 @@ def test_scenario4_concurrent_sessions_do_not_overwrite(brain):
     home = brain.service.home
     vault = brain.vault
     work = brain.workdir("concurrent")
+    brain.service.configure_project("Tbrain", [str(work)])
     env = dict(os.environ, TBRAIN_HOME=str(home), PYTHONIOENCODING="utf-8")
     processes = [
         subprocess.Popen([sys.executable, "-c", WORKER, str(home), str(vault), str(work), session],
@@ -126,6 +140,11 @@ def test_scenario4_concurrent_sessions_do_not_overwrite(brain):
     brain.service.reset_vault()
     brain.service.settings.update({"vault_path": str(vault), "ntp_enabled": False})
     brain.service.refresh_index()
+    rows = [brain.service.index.session("codex:" + session) for session in ("worker-a-0001", "worker-b-0002")]
+    assert len({row["path"] for row in rows}) == 2
+    assert len(list((vault / "会话总结").rglob("*.md"))) == 2
+    markdown_index = brain.service.store.project_index_path('Tbrain').read_text(encoding='utf-8')
+    assert all(row['name'] in markdown_index for row in rows)
     for session in ("worker-a-0001", "worker-b-0002"):
         summary, _ = _summary_of(brain, "codex:" + session)
         ours = [item for item in summary.items("已完成") if session in item["text"]]
@@ -133,7 +152,7 @@ def test_scenario4_concurrent_sessions_do_not_overwrite(brain):
     con = sqlite3.connect(home / "index.sqlite3")
     assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     con.close()
-    results = brain.service.search("并发写入验收")
+    results = brain.service.search("并发写入验收", "codex:worker-a-0001")
     assert results["ok"] and results["results"]
 
 

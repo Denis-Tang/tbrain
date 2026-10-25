@@ -70,6 +70,7 @@ def _with_meta(service: TbrainService, result: dict) -> dict:
 def create_server(home: Path | None = None, *, service=None) -> FastMCP:
     service = service or TbrainService(home)
     server = FastMCP("Tbrain")
+    server._mcp_server.version = __version__
 
     @server.tool(description=(
         "启动/恢复本会话并返回启动包（全局提示词、项目提示词、公共池索引、附件卡片、接续视图前 5 条、当前时间）。"
@@ -99,17 +100,20 @@ def create_server(home: Path | None = None, *, service=None) -> FastMCP:
     @server.tool(description=(
         "返回旧会话的交接包（原始命令、目标、未完成目标、下一步、最近 3 条用户指令、已完成与证据清单），"
         "并在当前会话总结写入“接续自”。target 是会话名或 session_id；旧会话文件不会被修改。"
+        "历史分支传 fork_revision（精确保存版本）或 fork_user_count（用户轮次），只继承该保存点。"
     ))
-    def resume(session_id: str, target: str) -> dict:
-        return _with_meta(service, service.resume(session_id=session_id, target=target))
+    def resume(session_id: str, target: str, fork_user_count: int | None = None, fork_revision: str = "") -> dict:
+        """历史分支传 fork_revision（精确保存版本）或 fork_user_count（用户轮次）；省略为普通接续。"""
+        return _with_meta(service, service.resume(session_id=session_id, target=target,
+                          fork_user_count=fork_user_count, fork_revision=fork_revision))
 
     return server
 
 
-def run(home: Path | None = None) -> None:
+def run(home: Path | None = None, agent: str = '') -> None:
     import os
 
-    service = TbrainService(home)
+    service = TbrainService(home, agent=agent)
     watcher = None
     try:
         from . import proc

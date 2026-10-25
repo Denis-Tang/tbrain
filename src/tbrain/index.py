@@ -845,6 +845,10 @@ class Index:
             row = conn.execute("SELECT * FROM files WHERE path = ?", (str(path),)).fetchone()
         return dict(row) if row is not None else None
 
+    def file_states(self) -> dict[str, dict]:
+        with self.connect() as conn:
+            return {row["path"]: dict(row) for row in conn.execute("SELECT * FROM files")}
+
     def file_changed(
         self,
         path: str,

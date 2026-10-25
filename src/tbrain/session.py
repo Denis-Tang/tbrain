@@ -75,6 +75,10 @@ def _same_text(left: str, right: str) -> bool:
 def _session_row(service, session_id: str) -> dict | None:
     service.refresh_index()
     row = service.index.session(session_id)
+    if not row and (identity_parts := identity.split_session_id(session_id)):
+        link = service.index.get_session_link(*identity_parts)
+        if link:
+            row = service.index.session(link["session_id"])
     if not row:
         return None
     path = service.vault_root() / row["path"]
@@ -88,10 +92,19 @@ def load_session(service, session_id_or_row) -> tuple[handoff.Summary, Path] | N
     if not row:
         return None
     text = service.store.read_text(row["abs_path"])
-    return handoff.parse(text), row["abs_path"]
+    summary = handoff.parse(text)
+    owners = summary.header.setdefault("user_owned_fields", [])
+    for field, digest in summary.header.get("model_fingerprints", {}).items():
+        if field in ("target", "next_step") and digest != handoff.fingerprint(getattr(summary, field)):
+            if field not in owners:
+                owners.append(field)
+    return summary, row["abs_path"]
 
 
 def write_session(service, summary: handoff.Summary, path: Path) -> None:
+    for field in ("target", "next_step"):
+        if field not in summary.header.get("user_owned_fields", []):
+            summary.header.setdefault("model_fingerprints", {})[field] = handoff.fingerprint(getattr(summary, field))
     body = handoff.render(summary)
     service.store.write_text(path, body)
     service.remember_write(path, body)
@@ -312,10 +325,8 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     blocks.append(("", _attachment_block(service, summary.project)))
     rows = _resume_rows(service, summary, related_query)
     blocks.append(("", _resume_block(service, rows, summary.project)))
-    blocks.append(("", _time_block(service)))
-    blocks.append(("", _identity_block(service, summary)))
-
-    budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"])
+    footer = _time_block(service) + "\n\n" + _identity_block(service, summary)
+    budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(footer) - 80
     parts: list[str] = []
     used = 0
     trimmed = False
@@ -336,7 +347,7 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     package = "\n\n".join(parts)
     if trimmed:
         package += "\n\n（启动包已按宿主上限裁剪；更多内容可调用 bootstrap / search 获取。）"
-    return package
+    return package + "\n\n" + footer
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +529,8 @@ def _parse_utc(value) -> datetime | None:
 
 
 def context_switch_hint(service, summary: handoff.Summary, tokens, window) -> str:
+    if int(summary.header.get("saved_users") or 0) < len(summary.users):
+        return ""
     settings = service.settings.load()
     if not getattr(settings, "reminder_context_switch", True):
         return ""
@@ -553,6 +566,9 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     raw_text = service.store.read_text(path)
     program_hash = service.program_written_hash(path)
     user_edited = bool(program_hash) and handoff.fingerprint(raw_text) != program_hash
+    if user_edited and not summary.header.get("model_fingerprints"):
+        summary.header["user_owned_fields"] = ["target", "next_step"]
+    protected = summary.header.get("user_owned_fields", [])
     written: dict = {"users": [], "done": [], "decisions": [], "dead_ends": [], "evidence": [],
                      "goals": [], "target": "", "next_step": "", "status": "", "env": [], "project_prompt": {}}
     rejected: list[dict] = []
@@ -563,8 +579,9 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         return {"ok": False, "error": "operations 必须是非空数组", "current_time": _time_block(service)}
 
     for operation in operations:
+        reject_start = len(rejected)
         if not isinstance(operation, dict):
-            rejected.append({"op": str(operation), "reason": "操作必须是对象", "example": '{"op":"append","section":"done","items":[{"text":"..."}]}'})
+            rejected.append({"op": str(operation), "operation": operation, "reason": "操作必须是对象", "example": '{"op":"append","section":"done","items":[{"text":"..."}]}'})
             continue
         op = str(operation.get("op") or "")
         try:
@@ -577,7 +594,10 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 if not isinstance(items, list) or not items:
                     raise ValueError("items 必须是非空数组")
                 for item in items:
+                    item_start = len(rejected)
                     appended = _append_item(service, summary, section, item, rejected, warnings)
+                    for error in rejected[item_start:]:
+                        error["operation"] = {**operation, "items": [item]}
                     if appended:
                         written_key = {"已完成": "done", "决策": "decisions", "未走通的路": "dead_ends",
                                        "证据": "evidence", "未完成目标": "goals"}[section]
@@ -585,12 +605,12 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             elif op == "replace":
                 section = str(operation.get("section") or "")
                 text = str(operation.get("text") or "").strip()
-                if user_edited:
+                if section in protected:
                     summary.conflicts.append(
                         f"- 用户手改过本会话总结，{section} 的模型更新未覆盖（{_utc_iso(service.now().utc)}），待用户确认")
                     rejected.append({"op": "replace", "section": section,
                                      "reason": "该会话总结已被用户手改，程序不覆盖；内容保留在“待用户确认”",
-                                     "example": "如需覆盖，请先在 Obsidian 里把对应区块改回或手动合并"})
+                                     "example": "请手动合并；确认恢复模型维护后，移除文件头 user_owned_fields 中的对应字段"})
                     continue
                 if section == "target":
                     if len(text) > handoff.TARGET_MAX_CHARS:
@@ -625,7 +645,10 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 if not isinstance(items, list) or not items:
                     raise ValueError("env.items 必须是非空数组")
                 for item in items:
+                    item_start = len(rejected)
                     card = _save_env(service, summary, item, rejected)
+                    for error in rejected[item_start:]:
+                        error["operation"] = {**operation, "items": [item]}
                     if card:
                         written["env"].append(card)
             elif op == "project_prompt":
@@ -641,13 +664,16 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         except ValueError as exc:
             rejected.append({"op": op, "reason": str(exc),
                              "example": _op_example(op)})
+        for error in rejected[reject_start:]:
+            error.setdefault("operation", operation)
 
-    pending_added = _record_rejections(service, summary, rejected, operations)
+    pending_added = _record_rejections(service, summary, rejected)
     now = service.now()
     now_iso = _utc_iso(now.utc)
     summary.header["updated_at"] = now_iso
     summary.header["last_activity_at"] = now_iso
-    summary.header["saved_users"] = len(summary.users)
+    if not rejected:
+        summary.header["saved_users"] = len(summary.users)
     summary.header["git"] = service.git_info(str(summary.header.get("cwd") or ""))
     if last_test:
         summary.header["last_verify"] = {
@@ -661,12 +687,12 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     if hint:
         note = hint
     return {
-        "ok": True,
+        "ok": not rejected or any(written.values()),
         "written": written,
         "rejected": rejected,
         "warnings": warnings,
         "note": note,
-        "user_modified": user_edited,
+        "user_modified": user_edited or bool(protected),
         "pending": pending_added,
         "current_time": _time_block(service),
         "session": {"session_id": summary.session_id, "name": summary.name, "project": summary.project,
@@ -866,6 +892,8 @@ def resume(service, session_id: str, target: str) -> dict:
     lines += ([f"- {item['id']}: {item.get('text', '')}" for item in users] or ["（无）"]) + [""]
     lines += ["### 已完成"] + (done[-10:] or ["（无）"]) + [""]
     lines += ["### 证据"] + (evidence[-10:] or ["（无）"]) + [""]
+    if old.extra.get("旧总结原文（迁移）"):
+        lines += ["### 旧总结原文（迁移）", old.extra["旧总结原文（迁移）"], ""]
     # 当前会话写“接续自”
     if current.name != old.name:
         current.header["resumed_from"] = f"[[{old.name}]]"
@@ -875,7 +903,8 @@ def resume(service, session_id: str, target: str) -> dict:
             current_path = rename_session(service, current, current_path, naming.resume_name(old.name, date, seq))
         write_session(service, current, current_path)
     service.index.log_access(old.session_id, "resume")
-    return {"ok": True, "resumed_from": old.name, "session_id": old.session_id,
+    return {"ok": True, "resumed_from": old.name, "session_id": current.session_id,
+            "resumed_session_id": old.session_id,
             "handoff": "\n".join(lines), "current_time": _time_block(service)}
 
 
@@ -937,34 +966,33 @@ def _write_rejections(service, payload: dict) -> None:
     temporary.replace(path)
 
 
-def _record_rejections(service, summary: handoff.Summary, rejected: list[dict], operations: list[dict]) -> list[str]:
+def _record_rejections(service, summary: handoff.Summary, rejected: list[dict]) -> list[str]:
     """同一不合格操作重试 2 次后，把原文写进“待整理”并标未校验。"""
     if not any(item.get("reason") for item in rejected):
         return []
     payload = _read_rejections(service)
     session_rejects = payload.get(summary.session_id, {})
     pending_added: list[str] = []
-    raw_by_op = {}
-    for operation in operations or []:
-        try:
-            raw_by_op[json.dumps(operation, ensure_ascii=False, sort_keys=True)] = operation
-        except (TypeError, ValueError):
-            continue
+    remaining = []
+    seen = set()
     for item in rejected:
         if item.get("reason", "").startswith("该会话总结已被用户手改"):
+            remaining.append(item)
             continue
-        signature = json.dumps({k: v for k, v in item.items() if k not in ("example",)},
-                               ensure_ascii=False, sort_keys=True)
-        count = int(session_rejects.get(signature) or 0) + 1
-        if count > 2:
-            raw = next(iter(raw_by_op.values()), {"op": item.get("op"), "raw": item})
-            text = json.dumps(raw, ensure_ascii=False)
-            line = f"- 未校验：{text}（{_utc_iso(service.now().utc)}，多次不合格，原文保留）"
-            summary.pending.append(line)
-            pending_added.append(line)
-            session_rejects.pop(signature, None)
-        else:
+        raw = item["operation"]
+        signature = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+        count = int(session_rejects.get(signature) or 0)
+        if signature not in seen:
+            count += 1
             session_rejects[signature] = count
+            if count == 3:
+                line = f"- 未校验：{signature}（{_utc_iso(service.now().utc)}，多次不合格，原文保留）"
+                summary.pending.append(line)
+                pending_added.append(line)
+            seen.add(signature)
+        if count < 3:
+            remaining.append(item)
+    rejected[:] = remaining
     payload[summary.session_id] = session_rejects
     _write_rejections(service, payload)
     return pending_added

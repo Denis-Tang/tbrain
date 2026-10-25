@@ -209,27 +209,6 @@ def codex_handlers(host: str, entry: str, app_home: Path) -> dict[str, list[dict
     return {event: [dict(handler)] for event in HOST_EVENTS}
 
 
-def bridge_handlers(host: str, entry: str, app_home: Path) -> dict[str, list[dict]]:
-    # The Claude-hooks bridge executes command hooks itself; use the plain quoted
-    # form that also works from cmd.exe (Windows hosts run commands through a shell).
-    handler = {"type": "command", "command": hook_command(host, entry, app_home), "timeout": 10}
-    return {event: [dict(handler)] for event in HOST_EVENTS}
-
-
-def write_bridge_hooks(app_home: Path, entry: str) -> Path:
-    """Write ``app_home/hooks.json`` for the DSH Claude-hooks bridge (content stable)."""
-    app_home = Path(app_home)
-    payload = {"hooks": {}}
-    merge_tbrain_hooks(payload, bridge_handlers("dsh", entry, app_home), entry)
-    target = paths.hooks_json(app_home)
-    config.write_json_atomic(target, payload)
-    return target
-
-
-def read_bridge_hooks(app_home: Path) -> dict:
-    return config.read_json(paths.hooks_json(app_home))
-
-
 # ---------------------------------------------------------------------------
 # normalize / render
 # ---------------------------------------------------------------------------
@@ -283,7 +262,7 @@ def render(host: str, result, event: str = "") -> dict:
     additional = str(getattr(result, "additional_context", "") or "")
     decision = str(getattr(result, "decision", "") or "")
     reason = str(getattr(result, "reason", "") or "")
-    if key == "pi":
+    if key in ("pi", "dsh"):
         return {"additional_context": additional,
                 "decision": "block" if decision == "block" else "",
                 "reason": reason}

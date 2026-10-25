@@ -81,9 +81,11 @@ def _parser() -> argparse.ArgumentParser:
     prompt.add_argument("scope", nargs="?", default="global", choices=["global", "project"])
     prompt.add_argument("--name", default="", help="项目名（scope=project 时）")
     prompt.add_argument("--save", default=None, help="把文件内容保存为提示词（项目用 JSON sections）")
-    migrate = sub("migrate", "旧版数据迁移（dry-run 报告）")
+    migrate = sub("migrate", "旧版数据迁移（默认 dry-run；--execute 正式写入新 vault）")
     migrate.add_argument("--old-home", required=True, help="旧版应用数据目录（如 ~/.shared-brain）")
-    migrate.add_argument("--dry-run", action="store_true", default=True, help="只报告，不写入（默认）")
+    migrate.add_argument("--dry-run", action="store_true", default=False, help="只报告，不写入")
+    migrate.add_argument("--execute", action="store_true", help="正式执行迁移（写入新 vault，旧数据只读）")
+    migrate.add_argument("--to", default="", help="目标 vault（默认 settings.vault_path）")
     sub("version", "显示版本与安装状态")
     return parser
 
@@ -198,7 +200,11 @@ def _cmd_sessions(args) -> dict:
 
 
 def _cmd_migrate(args) -> dict:
-    return _service(_app_home(args)).migrate_dry_run(args.old_home)
+    service = _service(_app_home(args))
+    target = Path(args.to).expanduser() if getattr(args, "to", "") else None
+    if getattr(args, "execute", False) and not getattr(args, "dry_run", False):
+        return service.migrate(args.old_home, execute=True, new_vault=target)
+    return service.migrate(args.old_home, execute=False, new_vault=target)
 
 
 def _cmd_install(args) -> dict:

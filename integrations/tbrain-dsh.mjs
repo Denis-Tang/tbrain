@@ -1,20 +1,4 @@
-/**
- * Tbrain native plugin for DeepSeek Harness (cordis plugin, engine 0.2.x).
- *
- * The official Claude-hooks bridge (@deepseek-ai/dsh-hooks-claude-code) already
- * covers SessionStart / UserPromptSubmit / Stop / PostToolUse. This small plugin
- * adds what the bridge cannot see:
- *
- *   - PreCompact reminders      -> session/event "compaction/start"
- *   - SessionEnd status          -> agent/disposed && session/disposed
- *   - context usage / switch hint-> agent/pre-step + ctx.tokenMeter
- *
- * Configuration comes from the profile patch entry `tbrain-native`:
- *   config: { command: <fixed entry>, home: <app home> }
- *
- * Every call is fire-and-forget with a hard timeout: a missing Tbrain program must
- * never break the DSH session.
- */
+/** Tbrain DSH lifecycle adapter. Uses only Node builtins and injected host services. */
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -22,10 +6,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const name = "tbrain-native";
-export const inject = ["agents", "tokenMeter"];
+export const inject = ["agents", "tokenMeter", "sessionProjections"];
 
-const HOOK_TIMEOUT_MS = 4000;
-const CONTEXT_RATIO = 0.75;
+const HOOK_TIMEOUT_MS = 10000;
+const CONTEXT_RATIO = 0.65;
 const CONTEXT_COOLDOWN_MS = 120000;
 
 function defaultEntry() {
@@ -50,7 +34,9 @@ function callHook(settings, payload) {
 		try {
 			if (process.platform === "win32") {
 				// A .cmd file must go through cmd.exe when spawned from Node.
-				child = spawn("cmd.exe", ["/d", "/c", settings.command, ...args], {
+				const command = [settings.command, ...args].map(value => `"${value}"`).join(" ");
+				child = spawn("cmd.exe", ["/d", "/s", "/c", `"${command}"`], {
+					windowsVerbatimArguments: true,
 					windowsHide: true,
 					stdio: ["pipe", "pipe", "ignore"],
 				});
@@ -125,80 +111,74 @@ function sourceOf(value) {
 
 export function apply(ctx, config = {}) {
 	const settings = resolveSettings(config);
-	const endedSessions = new Set();
+	const trackedRoots = new Set();
+	const reminded = new Set();
 	const lastHint = new Map();
-	const rootAgents = () => {
-		try {
-			return (ctx.agents && ctx.agents.roots && ctx.agents.roots()) || [];
-		} catch {
-			return [];
+	const isRoot = agent => ctx.agents.roots().includes(agent);
+	const payload = (agent, event) => ({
+		hook_event_name: event,
+		session_id: agent.session.header.id,
+		cwd: agent.session.header.cwd,
+	});
+
+	ctx.on("agent/created", async ({ agent, source }) => {
+		if (!isRoot(agent)) return;
+		trackedRoots.add(agent.session.header.id);
+		const result = await callHook(settings, { ...payload(agent, "SessionStart"), source: sourceOf(source) });
+		injectContext(agent, result.additional_context);
+	});
+
+	ctx.on("agent/pre-step", async ({ agent, messages }, next) => {
+		if (!isRoot(agent)) return next();
+		trackedRoots.add(agent.session.header.id);
+		const contexts = [];
+		for (const incoming of messages) {
+			if (incoming.role !== "user" || incoming.source?.kind === "tbrain-native") continue;
+			const prompt = incoming.content.filter(block => block.type === "text").map(block => block.text).join("");
+			if (!prompt) continue;
+			reminded.delete(agent.session.header.id);
+			const result = await callHook(settings, { ...payload(agent, "UserPromptSubmit"), prompt });
+			if (result.additional_context) contexts.push(message(result.additional_context));
 		}
-	};
-	const agentForSession = (session) => {
+		const pressure = ctx.sessionProjections.stateOf(agent.session, "contextPressure");
+		const tokens = ctx.tokenMeter.measure(agent.session).totalTokens;
+		const window = pressure.contextWindow;
+		const id = agent.session.header.id;
+		if (window && tokens / window >= CONTEXT_RATIO && Date.now() - (lastHint.get(id) || 0) >= CONTEXT_COOLDOWN_MS) {
+			const result = await callHook(settings, { ...payload(agent, "Context"), context_tokens: tokens, context_window: window });
+			if (result.additional_context) {
+				contexts.push(message(result.additional_context));
+				lastHint.set(id, Date.now());
+			}
+		}
+		const downstream = await next();
+		return downstream.kind === "enter" ? { ...downstream, messages: [...downstream.messages, ...contexts] } : downstream;
+	});
+
+	ctx.on("agent/turn-stopping", async ({ agent }) => {
+		if (!isRoot(agent)) return;
+		const id = agent.session.header.id;
+		const result = await callHook(settings, { ...payload(agent, "Stop"), stop_hook_active: reminded.has(id) });
+		if (result.decision === "block") {
+			reminded.add(id);
+			agent.steer(message(result.reason));
+		}
+	});
+
+	ctx.on("session/event", async (session, event) => {
+		if (event.type !== "compaction/start") return;
+		const agent = ctx.agents.roots().find(root => root.session === session);
+		if (!agent) return;
+		const result = await callHook(settings, payload(agent, "PreCompact"));
+		injectContext(agent, result.additional_context);
+	});
+
+	const end = async session => {
 		const id = session?.header?.id;
-		if (!id) return null;
-		return rootAgents().find((agent) => agent?.session?.header?.id === id) || null;
+		if (!trackedRoots.delete(id)) return;
+		reminded.delete(id);
+		lastHint.delete(id);
+		await callHook(settings, { hook_event_name: "SessionEnd", session_id: id, cwd: session.header.cwd });
 	};
-
-	// SessionEnd: the bridge has no Claude-shaped SessionEnd hook.
-	const fireSessionEnd = (session) => {
-		const id = session?.header?.id || "";
-		if (!id || endedSessions.has(id)) return;
-		endedSessions.add(id);
-		callHook(settings, {
-			hook_event_name: "SessionEnd",
-			session_id: id,
-			cwd: String(session?.header?.cwd || ""),
-			reason: "disposed",
-		}).catch(() => {});
-	};
-	ctx.on("agent/disposed", (payload) => fireSessionEnd(payload?.agent?.session || payload?.session));
-	ctx.on("session/disposed", (session) => fireSessionEnd(session));
-
-	// Session events: PreCompact (compaction/start) and user messages.
-	ctx.on("session/event", (session, event) => {
-		const type = event?.type;
-		if (type === "compaction/start") {
-			const agent = agentForSession(session);
-			callHook(settings, {
-				hook_event_name: "PreCompact",
-				session_id: String(session?.header?.id || ""),
-				cwd: String(session?.header?.cwd || ""),
-				source: "compact",
-			}).then((response) => injectContext(agent, response?.additional_context)).catch(() => {});
-		}
-	});
-
-	// Context usage / switch hint: DSH exposes ctx.tokenMeter and context pressure.
-	ctx.on("agent/pre-step", ({ agent }) => {
-		if (!agent || !rootAgents().includes(agent)) return;
-		let tokens = null;
-		let window = null;
-		try {
-			const measured = ctx.tokenMeter.measure(agent.session);
-			tokens = Number(measured?.totalTokens ?? measured?.surfaceTokens ?? 0) || 0;
-		} catch {
-			/* tokenMeter unavailable */
-		}
-		try {
-			window = ctx.llm?.resolveModelInfo?.()?.context ?? null;
-		} catch {
-			window = null;
-		}
-		if (!window || !Number.isFinite(window) || window <= 0) return;
-		const ratio = tokens / window;
-		if (ratio < CONTEXT_RATIO) return;
-		const sessionId = String(agent?.session?.header?.id || "");
-		const key = sessionId || "unknown";
-		const last = lastHint.get(key) || 0;
-		if (Date.now() - last < CONTEXT_COOLDOWN_MS) return;
-		lastHint.set(key, Date.now());
-		callHook(settings, {
-			hook_event_name: "Context",
-			session_id: sessionId,
-			cwd: String(agent?.session?.header?.cwd || ""),
-			context_tokens: Math.round(tokens),
-			context_window: Math.round(window),
-		}).then((response) => injectContext(agent, response?.additional_context)).catch(() => {});
-	});
+	ctx.on("agent/disposed", ({ agent }) => end(agent.session));
 }

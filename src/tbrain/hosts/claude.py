@@ -72,9 +72,6 @@ def connect(host: str = HOST, app_home: Path | None = None,
     config.write_json_atomic(mcp_path, mcp_payload)
     files.append(str(mcp_path))
 
-    # 3) canonical hooks file (used by the DSH Claude-hooks bridge)
-    files.append(str(base.write_bridge_hooks(home, entry)))
-
     config.write_connect_state(home, HOST, {"entry": entry, "install_root": str(root),
                                             "files": files, "backups": backups})
     return {"ok": True, "host": HOST, "entry": entry, "install_root": str(root),

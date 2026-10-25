@@ -11,11 +11,13 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
 
 from .service import TbrainService
+from . import __version__, installer, paths
 
 
 class DesktopAPI:
@@ -37,6 +39,72 @@ class DesktopAPI:
     def quit(self):
         self._quit_requested = True
         return {"ok": True}
+
+    def setup_info(self):
+        return self._call(self._setup_info)
+
+    def _setup_info(self):
+        settings = self._service.settings.load()
+        root = paths.install_root(self._service.home, settings)
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local")
+        available = {host: bool(shutil.which(host)) for host in ("claude", "codex", "pi")}
+        available["claude-code"] = available.pop("claude") or any(
+            (Path.home() / ".vscode/extensions").glob("anthropic.claude-code-*"))
+        available["dsh"] = (local / "Programs/DeepSeek Harness/DeepSeek Harness.exe").is_file()
+        if os.name == "nt" and not available["codex"]:
+            probe = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                                    "@(Get-AppxPackage -Name OpenAI.Codex).Count"],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+            available["codex"] = probe.returncode == 0 and probe.stdout.strip() not in ("", "0")
+        return {"required": not bool(settings.vault_path),
+                "vault_path": settings.vault_path or str(Path.home() / "Documents/TbrainVault"),
+                "install_root": str(root), "installed": installer.verify_layout(root=root)["ok"],
+                "hosts": available}
+
+    def setup(self, vault_path, hosts):
+        return self._call(self._setup, vault_path, hosts)
+
+    def _setup(self, vault_path, selected):
+        from .hosts import config
+
+        if not isinstance(selected, list) or any(host not in config.SUPPORTED_HOSTS for host in selected):
+            raise ValueError("请选择支持的 Agent")
+        if not isinstance(vault_path, str) or not vault_path.strip():
+            raise ValueError("请选择知识库文件夹")
+        vault = Path(vault_path.strip()).expanduser()
+        if not vault.is_absolute() or vault.is_file():
+            raise ValueError("知识库必须是文件夹的完整路径")
+        info = self._setup_info()
+        missing = [host for host in selected if not info["hosts"][host]]
+        if missing:
+            raise ValueError("未检测到 Agent，请安装后刷新：" + "、".join(missing))
+        root = Path(info["install_root"])
+        if not installer.verify_layout(__version__, root)["ok"]:
+            if not getattr(sys, "frozen", False):
+                raise ValueError("请使用构建后的安装包完成安装")
+            installer.install_from_dir(Path(sys.executable).parent, __version__, root)
+        vault.mkdir(parents=True, exist_ok=True)
+        config.backup_file(self._service.settings.path)
+        self._service.save_settings({"vault_path": str(vault), "install_root": str(root)})
+        if os.name == "nt":
+            shortcut = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Tbrain.lnk"
+            shortcut.parent.mkdir(parents=True, exist_ok=True)
+            config.backup_file(shortcut)
+            link = str(shortcut).replace("'", "''")
+            target = str(root / "current/tbrain.exe").replace("'", "''")
+            app_home = str(self._service.home).replace("'", "''")
+            command = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
+                       f"$s.TargetPath='{target}';$s.Arguments='--home \"{app_home}\" desktop';"
+                       "$s.Save()")
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15, check=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        results = []
+        for host in dict.fromkeys(selected):
+            result = self.connect(host)
+            results.append({"host": host, **result})
+        return {"ok": True, "hosts": results}
 
     # 会话 -----------------------------------------------------------------
     def sessions(self, status_filter="all"):

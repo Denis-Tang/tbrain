@@ -123,13 +123,32 @@ def test_repeated_bad_operations_move_to_pending(env):
     service, vault, work = env
     session = "eeeeeeee-1111-2222-3333-444444444444"
     prompt(service, "claude-code", session, work, "测试不合格条目的待整理兜底")
-    bad = [{"op": "append", "section": "done", "items": [{"text": "x" * 260}]}]
+    bad = [
+        {"op": "append", "section": "done", "items": [{"text": "有效条目"}]},
+        {"op": "append", "section": "decision", "items": [{"text": "缺少理由"}]},
+    ]
     for _ in range(3):
         result = service.save(sid("claude-code", session), bad)
-        assert result["rejected"]
+    assert not result["rejected"]
     summary, _ = _load(service, service.index.session(sid("claude-code", session)))
     assert summary.pending
     assert any("未校验" in item for item in summary.pending)
+    assert len(summary.pending) == 1 and "缺少理由" in summary.pending[0]
+    assert "有效条目" not in summary.pending[0]
+    again = service.save(sid("claude-code", session), bad)
+    assert not again["rejected"] and not again["pending"]
+
+
+def test_rejected_save_keeps_stop_reminder(env):
+    service, _, work = env
+    session = "rejected-save"
+    prompt(service, "claude-code", session, work, "保存失败后仍需提醒")
+    stop = {"hook_event_name": "Stop", "session_id": session, "cwd": str(work)}
+    assert service.hook("claude-code", stop)["decision"] == "block"
+    result = service.save(sid("claude-code", session), [
+        {"op": "append", "section": "decision", "items": [{"text": "无理由"}]}])
+    assert not result["ok"] and result["rejected"]
+    assert service.hook("claude-code", stop)["decision"] == "block"
 
 
 def test_user_edited_target_is_not_overwritten(env):
@@ -152,6 +171,14 @@ def test_user_edited_target_is_not_overwritten(env):
     assert summary.target == "用户手写的目标"
     assert summary.conflicts
     assert summary.items("已完成")
+    again = service.save(sid("claude-code", session), [
+        {"op": "replace", "section": "target", "text": "再次覆盖"},
+        {"op": "replace", "section": "next_step", "text": "跑 pytest 验证手改目标仍在"},
+    ])
+    assert again["rejected"]
+    summary, _ = _load(service, service.index.session(sid("claude-code", session)))
+    assert summary.target == "用户手写的目标"
+    assert summary.next_step == "跑 pytest 验证手改目标仍在"
 
 
 def test_resume_returns_handoff_and_marks_resumed_from(env):
@@ -176,6 +203,18 @@ def test_resume_returns_handoff_and_marks_resumed_from(env):
     assert "补 HTTPS 兜底并跑时间测试" in result["handoff"]
     new_summary, _ = _load(service, service.index.session(sid("codex", new_session)))
     assert new_summary.header["resumed_from"] == f"[[{old_name}]]"
+    assert result["session_id"] == sid("codex", new_session)
+    assert result["resumed_session_id"] == sid("claude-code", old_session)
+    from tbrain import session as flow
+    old_summary, old_path = flow.load_session(service, sid("claude-code", old_session))
+    old_summary.extra["旧总结原文（迁移）"] = "旧版下一步：验证任务接续"
+    flow.write_session(service, old_summary, old_path)
+    before = old_path.read_bytes()
+    result = service.resume(sid("codex", new_session), old_name)
+    assert "旧版下一步：验证任务接续" in result["handoff"]
+    service.save(result["session_id"], [
+        {"op": "append", "section": "done", "items": [{"text": "新会话工作"}]}])
+    assert old_path.read_bytes() == before
 
 
 def test_search_scopes_project_public_and_independent(env):
@@ -251,6 +290,19 @@ def test_multi_host_same_records(env):
     assert any(link["host"] == "pi" for link in links)
     result = service.search("跨宿主", sid("pi", other))
     assert result["results"]
+    result = service.save(sid("pi", other), [
+        {"op": "append", "section": "done", "items": [{"text": "恢复后的新宿主 ID 仍可保存"}]}])
+    assert result["ok"]
+    assert result["session"]["session_id"] == sid("codex", session)
+
+
+def test_long_startup_prompt_keeps_identity_and_time(env):
+    service, _, work = env
+    service.save_global_prompt("长提示词" * 4000)
+    result = service.bootstrap("claude-code:long-startup", "claude-code", str(work))
+    assert "session_id: claude-code:long-startup" in result["package"]
+    assert "## 当前时间" in result["package"]
+    assert len(result["package"]) <= 9000
 
 
 def test_project_prompt_through_save(env):

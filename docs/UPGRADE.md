@@ -1,6 +1,8 @@
 # Tbrain 升级与宿主接入说明
 
-本文说明 Tbrain 0.6.0 的版本化安装、固定入口、进程淘汰、升级/回退流程，以及四个宿主（Claude Code、Codex、DeepSeek Harness、pi）的接入与 `doctor` 检查。
+本文说明 Tbrain 的版本化安装、固定入口、进程淘汰、升级/回退流程，以及四个宿主（Claude Code、Codex、DeepSeek Harness、pi）的接入与 `doctor` 检查。
+
+0.6.2 新用户可解压后双击 `tbrain.exe`，在首次设置页选择知识库和 Agent，点击“开始使用”。安装完成后从 Windows 开始菜单启动；下文命令用于手动安装、管理与排查。Agent 需要提前安装和登录；未勾选的宿主不写配置。
 
 ## 1. 版本化安装布局
 
@@ -100,26 +102,20 @@ tbrain doctor
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` hooks（5 事件，`shell: powershell` 全引号命令）；`~/.claude.json` 用户级 `mcpServers.tbrain` | 新会话 |
 | Codex | `~/.codex/hooks.json`（command + commandWindows）；`~/.codex/config.toml` 的 `[mcp_servers.tbrain]` | 新进程；hook 需 `/hooks` 信任 |
-| DeepSeek Harness | profile patch 的 `tbrain-mcp` / `tbrain-cc-hooks` / `tbrain-native` 三项；`<app_home>/hooks.json` 桥配置；原生插件复制到 `<app_home>/integrations/` | MCP 热重连；桥/插件重开 DSH |
+| DeepSeek Harness | profile patch 的 `tbrain-mcp` / `tbrain-native` 两项；原生插件复制到 `<app_home>/integrations/` | MCP 热重连；原生插件重开 DSH |
 | pi | `~/.pi/agent/extensions/tbrain.ts`（无 MCP） | 新 pi 会话或 `/reload` |
 
 ### Codex hook 信任
 
 Codex 对非 managed hook 采用 hash 信任，未信任的 hook 会静默跳过。Tbrain 的命令指向固定入口，升级不改变 hook 内容，因此信任一次即可。程序**不写** `trusted_hash`、**不使用** `--dangerously-bypass-hook-trust`；`doctor` 在信任前显示黄色“待信任”，并提示在 Codex 中执行 `/hooks` 审核。
 
-### DSH 桥与原生插件依赖
+### DSH 原生接入
 
-DSH 的桥（`@deepseek-ai/dsh-hooks-claude-code`）与原生插件不联网安装：`connect dsh` 只写配置并复制原生插件文件，依赖缺失时 `doctor` 给黄色并给出手动命令（黄色=待用户操作），例如：
+0.6.1 使用单一原生插件处理生命周期，不再加载 `tbrain-cc-hooks`。重新运行 `connect dsh` 会移除旧 Tbrain 条目并写入两项配置，保留其他插件与注释；已有桥依赖包不卸载。
 
-```text
-dsh plugin --profile desktop add @deepseek-ai/dsh-hooks-claude-code@0.2.1-rc.3
-```
+MCP 参数为 `--home <应用数据目录> mcp`。原生插件通过固定入口调用 CLI，读取 `additional_context`，收尾未保存时只续跑一次；压缩前注入最近用户指令。上下文占用从宿主 tokenMeter/contextPressure 读取，仅在本轮已保存时建议换会话。
 
-桥版本应与 DSH 桌面引擎版本对齐（本机基线 0.2.1-rc.3）；DSH 升级后需同步升级桥，`doctor` 会检查版本不一致。
-
-### 共用 hooks 文件
-
-`<应用数据目录>/hooks.json` 是 Claude 风格的 hook 文件，由 `connect` 生成、内容稳定（固定入口），供 DSH 的 Claude hooks 桥通过 `configPath` 读取。Claude Code 与 Codex 的 hook 由同一生成逻辑内联写入各自配置（各自带 `--host`），不要求物理同一文件。
+`doctor` 检查固定入口、启动参数和原生插件配置，不把“配置完整”当成真实宿主执行证明。升级后需在 DSH 新会话验证建档、save 与 resume。
 
 ## 7. doctor 检查项
 
@@ -131,7 +127,7 @@ dsh plugin --profile desktop add @deepseek-ai/dsh-hooks-claude-code@0.2.1-rc.3
 | `processes` | 无进程或均为当前版本 | 有旧版本进程仍在运行 | — |
 | `claude-code` | hooks + MCP 均指向固定入口 | 未接入 / MCP 条目不一致 | 固定入口缺失 |
 | `codex` | 已接入且 hook 已信任 | 未接入 / **hook 待信任** / 信任记录可能过期 | 固定入口缺失 |
-| `dsh` | 三项插件条目、hooks 文件、原生插件、桥依赖齐全 | 未接入 / 配置不完整 / **桥未安装（给出手动命令）** / 桥版本不匹配 | **旧 Shared Brain 条目残留** / hooks 文件缺失 / 原生插件缺失 |
+| `dsh` | MCP 与原生插件两项配置完整，启动参数正确 | 未接入 / 配置不完整 | **旧 Shared Brain 条目残留** / 原生插件缺失 |
 | `pi` | 扩展已安装 | 未接入 | 固定入口缺失 |
 
 ## 8. 常见问题

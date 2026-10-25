@@ -88,11 +88,6 @@ def exit_request_file(pid: int, home: Path | None = None) -> Path:
     return processes_dir(home) / f"{int(pid)}.exit"
 
 
-def hooks_json(home: Path | None = None) -> Path:
-    """The Claude-style hooks file shared with the DSH Claude-hooks bridge."""
-    return app_home(home) / "hooks.json"
-
-
 def integrations_dir(home: Path | None = None) -> Path:
     """Stable copy of the runtime integration files (DSH native plugin)."""
     return app_home(home) / "integrations"

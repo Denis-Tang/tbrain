@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from tbrain.desktop import DesktopAPI
+from tbrain import __version__
 from tbrain.service import TbrainService
 
 
@@ -40,7 +41,7 @@ def _create_session(service, work, host="claude-code", session="desktop-1", text
 def test_status_and_settings(api):
     brain, service, vault, work = api
     status = brain.status()
-    assert status["version"] == "0.6.0"
+    assert status["version"] == __version__
     assert status["ready"] is True
     assert str(vault) in status["vault_path"]
     assert isinstance(status["timezones"], list) and "Asia/Shanghai" in status["timezones"]
@@ -50,6 +51,58 @@ def test_status_and_settings(api):
     assert saved["ok"] is True
     assert saved["settings"]["timezone"] == "UTC"
     assert brain.time()["timezone"] == "UTC"
+
+
+def test_first_run_setup_installs_only_selected_hosts(tmp_path, monkeypatch):
+    import shutil
+    import sys
+    from tbrain import desktop, installer
+    from test_installer import make_package
+
+    home, vault, root = tmp_path / "home", tmp_path / "中文知识库", tmp_path / "install"
+    for key, name in (("TBRAIN_INSTALL_ROOT", "install"), ("CLAUDE_CONFIG_DIR", "claude"),
+                      ("CODEX_HOME", "codex"), ("DSH_HOME", "dsh"),
+                      ("PI_CODING_AGENT_DIR", "pi"), ("APPDATA", "appdata"), ("LOCALAPPDATA", "local")):
+        monkeypatch.setenv(key, str(tmp_path / name))
+    dsh_exe = tmp_path / "local/Programs/DeepSeek Harness/DeepSeek Harness.exe"
+    dsh_exe.parent.mkdir(parents=True)
+    dsh_exe.touch()
+    package = make_package(tmp_path, __version__)
+    shutil.copytree(Path(__file__).parents[1] / "integrations", package / "integrations", dirs_exist_ok=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(package / "tbrain.exe"))
+    monkeypatch.setattr(desktop.shutil, "which", lambda name: f"test-{name}")
+    service = TbrainService(home)
+    service.settings.save({"ntp_enabled": False})
+    brain = DesktopAPI(service)
+    assert brain.status()["ready"] is False
+    assert brain.status()["vault_path"] == ""
+    assert brain.status()["vaults"] == []
+    assert brain.setup_info()["required"] is True
+    for _ in range(2):
+        result = brain.setup(str(vault), ["claude-code", "dsh", "pi"])
+        assert result["ok"] and all(item["ok"] for item in result["hosts"])
+    assert installer.current_version(root) == __version__
+    assert brain.status()["ready"] is True
+    assert brain.setup_info()["required"] is False
+    assert not (tmp_path / "codex").exists()
+    text = (tmp_path / "dsh/profiles/desktop/cordis.patch.yml").read_text(encoding="utf-8")
+    assert text.count("id: tbrain-mcp") == text.count("id: tbrain-native") == 1
+    assert (vault / "全局提示词.md").exists()
+    if sys.platform == "win32":
+        assert (tmp_path / "appdata/Microsoft/Windows/Start Menu/Programs/Tbrain.lnk").is_file()
+
+
+def test_setup_rejects_missing_agent_and_invalid_paths_before_install(api, monkeypatch):
+    brain, service, vault, _ = api
+    monkeypatch.setenv("LOCALAPPDATA", str(vault / "no-apps"))
+    monkeypatch.setattr("tbrain.desktop.shutil.which", lambda name: f"old-cli-{name}")
+    assert brain.setup_info()["hosts"]["dsh"] is False
+    before = service.settings.path.read_bytes()
+    assert "完整路径" in brain.setup("relative", ["dsh"])["error"]
+    assert "未检测到" in brain.setup(str(vault), ["dsh"])["error"]
+    assert "支持的" in brain.setup(str(vault), ["unknown"])["error"]
+    assert service.settings.path.read_bytes() == before
 
 
 def test_sessions_detail_and_rename(api):
@@ -68,6 +121,30 @@ def test_sessions_detail_and_rename(api):
     renamed = brain.rename_session(rows[0]["path"], "改名后的会话")
     assert renamed["ok"] is True
     assert brain.sessions("all")[0]["name"] == "改名后的会话"
+
+
+def test_session_refresh_reads_external_edits_and_deletions(api):
+    brain, service, vault, work = api
+    _create_session(service, work)
+    row = brain.sessions()[0]
+    path = vault / row["path"]
+    text = path.read_text(encoding="utf-8").replace("status: 进行中", "status: 已完成")
+    path.write_text(text, encoding="utf-8")
+    assert brain.sessions("进行中") == []
+    assert brain.sessions("已完成")[0]["session_id"] == row["session_id"]
+    path.unlink()
+    assert brain.sessions() == []
+
+
+def test_projects_keep_parent_child_relationship(api):
+    brain, _, _, work = api
+    child_work = work / "child"
+    child_work.mkdir()
+    brain.project_save("主项目", [str(work)])
+    brain.project_save("子项目", [str(child_work)], parent="主项目")
+    projects = {item["name"]: item for item in brain.projects()}
+    assert projects["主项目"]["parent"] == ""
+    assert projects["子项目"]["parent"] == "主项目"
 
 
 def test_global_prompt_roundtrip(api):

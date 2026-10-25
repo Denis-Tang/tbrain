@@ -16,7 +16,7 @@ def test_new_summary_records_raw_command_and_u1():
     summary = _summary()
     assert summary.raw_command == "帮我把索引改成 SQLite"
     assert [item["text"] for item in summary.users] == ["帮我把索引改成 SQLite"]
-    assert summary.header["saved_users"] == 1
+    assert summary.header["saved_users"] == 0
     assert summary.status == "进行中"
 
 

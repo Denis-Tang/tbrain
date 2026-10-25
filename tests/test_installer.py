@@ -24,7 +24,6 @@ def make_package(base: Path, version: str, marker: str = "") -> Path:
     (app / "runtime" / "node.exe").write_bytes(b"fake-node-" + version.encode())
     (app / "_internal" / "tbrain" / "web" / "app.js").write_text("// web", encoding="utf-8")
     (app / "integrations" / "README.md").write_text("readme", encoding="utf-8")
-    (app / "integrations" / "hooks.json").write_text("{}", encoding="utf-8")
     (app / "integrations" / "pi" / "tbrain.ts").write_text("// pi", encoding="utf-8")
     (app / "marker.txt").write_text(marker or version, encoding="utf-8")
     return app

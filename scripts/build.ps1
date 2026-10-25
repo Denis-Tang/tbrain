@@ -5,7 +5,7 @@
 #   desktop/Tbrain.Desktop.exe
 #   runtime/node.exe
 #   _internal/                 (PyInstaller onedir payload)
-#   integrations/              (hooks.json template, DSH native plugin, pi extension)
+#   integrations/              (DSH native plugin, pi extension)
 #   README.md, LICENSE, THIRD-PARTY-NOTICES.txt
 #
 # The version is read from src/tbrain/__init__.py only. No network access: the
@@ -101,7 +101,6 @@ if __name__ == "__main__":
         'desktop/Tbrain.Desktop.exe',
         'runtime/node.exe',
         'integrations/README.md',
-        'integrations/hooks.json',
         'integrations/tbrain-dsh.mjs',
         'integrations/pi/tbrain.ts'
     )

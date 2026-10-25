@@ -188,7 +188,7 @@ def test_scenario7_user_edited_content_is_not_overwritten(brain):
     result = brain.service.save("claude-code:sc7-session-1", [
         {"op": "replace", "section": "target", "text": "模型自动写回的目标"},
     ])
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["user_modified"] is True
     summary, _ = _summary_of(brain, "claude-code:sc7-session-1")
     assert summary.target == "用户改成自己的目标"

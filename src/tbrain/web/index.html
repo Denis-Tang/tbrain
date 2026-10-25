@@ -29,6 +29,23 @@
   <main tabindex="0" aria-label="页面内容">
     <header><h1 id="page-title">总观</h1></header>
 
+    <section id="setup" class="page" aria-label="首次设置">
+      <form id="setup-form" class="card setup-card">
+        <div class="card-heading"><h2>开始使用 Tbrain</h2></div>
+        <label for="setup-vault">知识库文件夹</label>
+        <div class="input-row"><input id="setup-vault" required autocomplete="off" spellcheck="false"><button type="button" class="button secondary" id="setup-browse">选择</button></div>
+        <div class="section-heading setup-heading"><h2>接入 Agent</h2><button type="button" class="button quiet small" id="setup-refresh">刷新</button></div>
+        <div id="setup-hosts" class="setup-hosts"></div>
+        <p class="field-empty" id="setup-install-path"></p>
+        <div class="form-actions"><button type="submit" class="button primary" id="setup-submit">开始使用</button></div>
+      </form>
+      <article id="setup-result" class="card" hidden>
+        <div class="card-heading"><h2>安装完成</h2></div>
+        <div id="setup-results" class="host-list" aria-live="polite"></div>
+        <div class="form-actions"><button type="button" class="button primary" id="setup-finish">进入总观</button></div>
+      </article>
+    </section>
+
     <section id="overview" class="page active" aria-label="总观">
       <section class="card prompt-card" id="prompt-card" aria-label="全局提示词">
         <button type="button" class="prompt-toggle" id="toggle-prompt" aria-expanded="false" aria-controls="prompt-body">
@@ -44,15 +61,18 @@
       </section>
 
       <div class="toolbar">
-        <div class="chips" id="status-filters" role="group" aria-label="状态筛选">
-          <button type="button" class="chip active" data-filter="全部" aria-pressed="true">全部</button>
-          <button type="button" class="chip" data-filter="进行中" aria-pressed="false">进行中</button>
-          <button type="button" class="chip" data-filter="受阻" aria-pressed="false">受阻</button>
-          <button type="button" class="chip" data-filter="待验证" aria-pressed="false">待验证</button>
-          <button type="button" class="chip" data-filter="已完成" aria-pressed="false">已完成</button>
-          <button type="button" class="chip" data-filter="已放弃" aria-pressed="false">已放弃</button>
-          <button type="button" class="chip" data-filter="已中断" aria-pressed="false">已中断</button>
-        </div>
+        <details class="status-menu" id="status-menu">
+          <summary class="filter-toggle"><span id="filter-label">全部</span><span class="chevron" aria-hidden="true">⌄</span></summary>
+          <div class="filter-options" id="status-filters" role="group" aria-label="状态筛选">
+            <button type="button" class="filter-option active" data-filter="全部" aria-label="全部" aria-pressed="true"><span>全部</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="进行中" aria-label="进行中" aria-pressed="false"><span>进行中</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="受阻" aria-label="受阻" aria-pressed="false"><span>受阻</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="待验证" aria-label="待验证" aria-pressed="false"><span>待验证</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="已完成" aria-label="已完成" aria-pressed="false"><span>已完成</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="已放弃" aria-label="已放弃" aria-pressed="false"><span>已放弃</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="filter-option" data-filter="已中断" aria-label="已中断" aria-pressed="false"><span>已中断</span><span class="filter-count"></span><span class="filter-check" aria-hidden="true">✓</span></button>
+          </div>
+        </details>
         <div class="toolbar-side"><span class="count" id="session-count"></span><button type="button" class="button secondary" id="refresh-sessions">刷新</button></div>
       </div>
 
@@ -61,13 +81,16 @@
 
     <section id="projects" class="page" aria-label="项目配置">
       <div class="toolbar">
-        <span class="count" id="project-count"></span>
-        <button type="button" class="button primary" id="new-project">新增项目</button>
+        <div id="project-location" class="project-location"></div>
+        <div class="toolbar-side"><button type="button" class="button secondary" id="refresh-projects">刷新</button><button type="button" class="button primary" id="new-project">新增项目</button></div>
       </div>
       <div id="project-list" class="project-list" aria-live="polite"><div class="empty-state">正在读取</div></div>
     </section>
 
     <section id="settings" class="page" aria-label="设置">
+      <article class="card" id="install-card" hidden>
+        <div class="update-row"><h2>安装到此电脑</h2><button type="button" class="button primary" id="open-setup">完成安装</button></div>
+      </article>
       <article class="card">
         <div class="card-heading"><h2>外观</h2></div>
         <div class="segmented" id="appearance" role="group" aria-label="外观">

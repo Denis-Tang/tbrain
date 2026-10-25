@@ -4,7 +4,7 @@
 
   const $ = (id) => document.getElementById(id);
 
-  const PAGES = { overview: "总观", projects: "项目配置", settings: "设置" };
+  const PAGES = { overview: "总观", projects: "项目配置", settings: "设置", setup: "首次设置" };
   const PROMPT_SECTIONS = ["最终目标", "硬规则", "当前阶段", "关键路径和命令"];
   const STATUS_CLASS = { 进行中: "run", 受阻: "block", 待验证: "verify", 已完成: "done", 已放弃: "abandon", 已中断: "interrupt" };
   const AGENTS = { "claude-code": "Claude Code", codex: "Codex", dsh: "DSH", pi: "pi", "dsh-native": "DSH" };
@@ -30,7 +30,11 @@
     page: "overview",
     filter: "全部",
     sessions: [],
+    sessionsLoaded: false,
+    sessionsRequest: null,
     projects: [],
+    projectsLoaded: false,
+    projectView: "",
     timezones: [],
     settings: null,
     status: null,
@@ -46,6 +50,7 @@
     toastTimer: 0,
     lastFocus: null,
     booted: false,
+    setup: null,
   };
 
   function hasBridge() {
@@ -190,8 +195,10 @@
   }
 
   function goTo(page) {
+    if (state.setup && state.setup.required && page !== "setup") page = "setup";
     if (!PAGES[page]) return;
     state.page = page;
+    document.querySelector("main").scrollTop = 0;
     document.querySelectorAll(".nav-item").forEach((item) => {
       const active = item.dataset.page === page;
       item.classList.toggle("active", active);
@@ -205,45 +212,103 @@
     else if (page === "settings") loadSettings();
   }
 
+  async function loadSetup() {
+    state.setup = await call("setup_info");
+    if (!$("setup-vault").value) $("setup-vault").value = state.setup.vault_path;
+    $("setup-install-path").textContent = `程序安装位置：${state.setup.install_root}`;
+    $("setup-result").hidden = true;
+    $("setup-form").hidden = false;
+    const list = $("setup-hosts");
+    const selected = [...list.querySelectorAll("input:checked")].map(input => input.value);
+    list.replaceChildren();
+    for (const host of CONNECTABLE) {
+      const available = state.setup.hosts[host];
+      const row = el("label", "setup-host");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.value = host;
+      check.setAttribute("aria-label", HOSTS[host]);
+      check.disabled = !available;
+      check.checked = available && selected.includes(host);
+      row.append(check, el("span", "host-name", HOSTS[host]), el("span", "host-detail", available ? "可接入" : "未检测到，安装后刷新"));
+      list.append(row);
+    }
+    goTo("setup");
+  }
+
   /* ---------- overview ---------- */
 
   async function loadOverview() {
     await Promise.all([loadSessions(), loadGlobalPrompt()]);
   }
 
-  async function loadSessions() {
-    if (!hasBridge()) {
-      state.sessions = [];
-      renderSessions();
-      return;
+  async function loadSessions(force = false) {
+    if (!hasBridge()) { renderSessions(); return; }
+    if (state.sessionsLoaded && !force) { renderSessions(); return; }
+    if (!state.sessionsRequest) {
+      state.sessionsRequest = call("sessions", "all").then((result) => {
+        state.sessions = Array.isArray(result) ? result : result.sessions || [];
+        state.sessionsLoaded = true;
+        state.projectsLoaded = false;
+      }).finally(() => { state.sessionsRequest = null; });
     }
-    const filter = state.filter === "全部" ? "all" : state.filter;
-    try {
-      const result = await call("sessions", filter);
-      const rows = Array.isArray(result) ? result : Array.isArray(result.sessions) ? result.sessions : [];
-      state.sessions = state.filter === "全部" ? rows : rows.filter((row) => row && row.status === state.filter);
-    } catch (error) {
-      state.sessions = [];
-      if (!error.bridge) toast(errorText(error), true);
-    }
+    try { await state.sessionsRequest; }
+    catch (error) { if (!error.bridge) toast(errorText(error), true); }
     renderSessions();
+  }
+
+  function appendSessionBatch(container, rows) {
+    let shown = 0;
+    const more = el("button", "button quiet load-more", "加载更多");
+    more.type = "button";
+    const append = () => {
+      more.remove();
+      const fragment = document.createDocumentFragment();
+      for (const row of rows.slice(shown, shown + 30)) fragment.append(sessionRow(row));
+      shown += 30;
+      container.append(fragment);
+      if (shown < rows.length) {
+        more.textContent = `加载更多 · 还有 ${rows.length - shown} 个`;
+        container.append(more);
+      }
+    };
+    more.addEventListener("click", append);
+    append();
   }
 
   function renderSessions() {
     const list = $("session-list");
-    const count = $("session-count");
     list.replaceChildren();
-    if (!hasBridge()) {
-      count.textContent = "";
-      list.append(emptyState(OFFLINE));
+    $("filter-label").textContent = state.filter;
+    for (const button of document.querySelectorAll("[data-filter]")) {
+      const count = state.sessions.filter(row => button.dataset.filter === "全部" || row.status === button.dataset.filter).length;
+      button.querySelector(".filter-count").textContent = count;
+    }
+    if (!hasBridge()) { list.append(emptyState(OFFLINE)); return; }
+    const rows = state.sessions.filter(row => state.filter === "全部" || row.status === state.filter);
+    $("session-count").textContent = `${rows.length} 个会话`;
+    if (!rows.length) {
+      list.append(emptyState(state.sessionsLoaded ? "暂无会话" : "正在读取"));
       return;
     }
-    count.textContent = state.sessions.length ? `${state.sessions.length} 个会话` : "";
-    if (!state.sessions.length) {
-      list.append(emptyState(state.filter === "全部" ? "暂无会话" : "没有符合条件的会话"));
-      return;
+    if (state.filter !== "全部") { appendSessionBatch(list, rows); return; }
+    const groups = new Map();
+    for (const row of rows) {
+      const name = projectLabel(row.project);
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(row);
     }
-    for (const session of state.sessions) list.append(sessionRow(session));
+    for (const [name, sessions] of [...groups].sort((a, b) => a[0].localeCompare(b[0], "zh-CN", {numeric: true}))) {
+      const group = el("details", "session-group");
+      const head = el("summary", "session-group-heading");
+      head.append(icon("chevron", ICONS.chevron), icon("group-folder", ICONS.folder), el("span", "group-name", name), el("span", "count", `${sessions.length} 个会话`));
+      const body = el("div", "session-group-body");
+      group.append(head, body);
+      group.addEventListener("toggle", () => {
+        if (group.open && !body.childElementCount) appendSessionBatch(body, sessions);
+      });
+      list.append(group);
+    }
   }
 
   function sessionRow(session) {
@@ -369,7 +434,7 @@
       }
       $("rename-row").hidden = true;
       renderDrawer(false);
-      await loadSessions();
+      await loadSessions(true);
       toast("已重命名");
     });
   }
@@ -427,7 +492,9 @@
 
   /* ---------- projects ---------- */
 
-  async function loadProjects() {
+  async function loadProjects(force = false) {
+    if (force) state.sessionsLoaded = false;
+    if (state.projectsLoaded && !force) { renderProjects(); return; }
     if (!hasBridge()) {
       state.projects = [];
       renderProjects();
@@ -436,15 +503,12 @@
     try {
       const result = await call("projects");
       state.projects = Array.isArray(result) ? result : Array.isArray(result.projects) ? result.projects : [];
+      state.projectsLoaded = true;
     } catch (error) {
       state.projects = [];
       if (!error.bridge) toast(errorText(error), true);
     }
     renderProjects();
-  }
-
-  function hasChildren(project) {
-    return state.projects.some((item) => item && item.parent === project.name);
   }
 
   function descendants(name) {
@@ -463,34 +527,51 @@
 
   function renderProjects() {
     const list = $("project-list");
+    const location = $("project-location");
     list.replaceChildren();
-    $("project-count").textContent = state.projects.length ? `${state.projects.length} 个项目` : "";
-    if (!hasBridge()) {
-      list.append(emptyState(OFFLINE));
-      return;
+    location.replaceChildren();
+    const parent = state.projects.find(project => project.name === state.projectView);
+    const projects = parent ? state.projects.filter(project => project.parent === parent.name)
+      : state.projects.filter(project => !project.parent || !state.projects.some(item => item.name === project.parent));
+    if (state.page === "projects") $("page-title").textContent = parent ? parent.name : PAGES.projects;
+    if (parent) {
+      const back = el("button", "button quiet project-back", "‹ 全部项目");
+      back.type = "button";
+      back.addEventListener("click", () => { state.projectView = ""; renderProjects(); document.querySelector("main").scrollTop = 0; });
+      location.append(back);
+      list.append(projectCard(parent, true));
+      const heading = el("div", "section-heading");
+      heading.append(el("h2", "", "子项目"), el("span", "count", `${projects.length} 个`));
+      list.append(heading);
+    } else {
+      state.projectView = "";
+      location.append(el("span", "count", `${projects.length} 个主项目 · ${state.projects.length} 个项目`));
     }
-    if (!state.projects.length) {
-      list.append(emptyState("暂无项目"));
-      return;
-    }
-    for (const project of state.projects) list.append(projectCard(project || {}));
+    if (!hasBridge()) { list.append(emptyState(OFFLINE)); return; }
+    if (!projects.length) list.append(emptyState(parent ? "暂无子项目" : "暂无项目"));
+    for (const project of projects) list.append(projectCard(project));
+    list.dataset.view = parent ? "detail" : "root";
   }
 
-  function projectCard(project) {
+  function projectCard(project, detailed = false) {
     const card = el("article", "project-card");
+    card.dataset.project = project.name;
+    if (!project.parent && !detailed) card.classList.add("drilldown");
     const head = el("div", "project-head");
     const toggle = el("button", "project-toggle");
     toggle.type = "button";
-    toggle.setAttribute("aria-expanded", "false");
+    if (project.parent || detailed) toggle.setAttribute("aria-expanded", "false");
     const info = el("span", "project-info");
     const nameLine = el("span", "project-name-line");
     nameLine.append(el("span", "project-name", project.name || "未命名"));
     if (project.parent) nameLine.append(el("span", "tag child", "子项目"));
-    if (hasChildren(project)) nameLine.append(el("span", "tag parent", "含子项目"));
+    const children = state.projects.filter(item => item.parent === project.name);
+    if (children.length) nameLine.append(el("span", "tag parent", `${children.length} 个子项目`));
     const paths = Array.isArray(project.paths) ? project.paths.filter((item) => typeof item === "string" && item.trim()) : [];
     const pathText = paths.length ? (paths.length > 1 ? `${paths[0]} 等 ${paths.length} 个路径` : paths[0]) : "暂无路径";
     const meta = el("span", "project-meta", `${Number(project.sessions) || 0} 个会话 · ${pathText}`);
     info.append(nameLine, meta);
+    if (children.length && !detailed) info.append(el("span", "project-children", children.map(item => item.name).join(" · ")));
     toggle.append(icon("folder-icon", ICONS.folder), info, icon("chevron project-chevron", ICONS.chevron));
     const actions = el("div", "project-actions");
     const edit = el("button", "button secondary small", "编辑");
@@ -503,6 +584,7 @@
     head.append(toggle, actions);
 
     const details = el("div", "project-details");
+    details.inert = true;
     const inner = el("div", "details-inner");
     const body = el("div", "project-body");
     const pathSection = el("div");
@@ -528,8 +610,10 @@
     card.append(head, details);
 
     toggle.addEventListener("click", () => {
+      if (!project.parent && !detailed) { state.projectView = project.name; renderProjects(); document.querySelector("main").scrollTop = 0; return; }
       const open = !card.classList.contains("open");
       card.classList.toggle("open", open);
+      details.inert = !open;
       toggle.setAttribute("aria-expanded", String(open));
       if (open && !promptContainer.dataset.loaded) loadProjectPrompt(project, promptContainer);
     });
@@ -713,6 +797,8 @@
       }
       state.settings = settings || {};
       renderSettings(state.settings);
+      state.setup = await call("setup_info");
+      $("install-card").hidden = state.setup.installed;
     } catch (error) {
       if (error.bridge) renderSettingsOffline();
       else toast(errorText(error), true);
@@ -747,6 +833,7 @@
   function renderTimezoneOptions(current) {
     const select = $("timezone");
     select.replaceChildren();
+    select.append(new Option("跟随系统", ""));
     const zones = [];
     for (const zone of state.timezones || []) {
       if (typeof zone === "string" && zone && !zones.includes(zone)) zones.push(zone);
@@ -754,7 +841,7 @@
     if (current && !zones.includes(current)) zones.unshift(current);
     if (!zones.length) zones.push("UTC");
     for (const zone of zones) select.append(new Option(zone, zone));
-    select.value = current && zones.includes(current) ? current : zones[0];
+    select.value = current;
   }
 
   async function loadDoctor() {
@@ -810,6 +897,10 @@
           button.type = "button";
           button.dataset.host = host;
           button.dataset.hostAction = action;
+          if (action === "connect" && state.setup && !state.setup.hosts[host]) {
+            button.disabled = true;
+            button.title = "未检测到 Agent，请安装后刷新";
+          }
           actions.append(button);
         }
       }
@@ -947,6 +1038,35 @@
   /* ---------- events ---------- */
 
   function bindEvents() {
+    $("setup-browse").addEventListener("click", event => withBusy(event.currentTarget, async () => {
+      const path = await chooseFolder();
+      if (path) $("setup-vault").value = path;
+    }));
+    $("setup-refresh").addEventListener("click", event => withBusy(event.currentTarget, loadSetup));
+    $("open-setup").addEventListener("click", event => withBusy(event.currentTarget, loadSetup));
+    $("setup-form").addEventListener("submit", event => {
+      event.preventDefault();
+      withBusy($("setup-submit"), async () => {
+        const selected = [...$("setup-hosts").querySelectorAll("input:checked")].map(input => input.value);
+        const result = await call("setup", $("setup-vault").value, selected);
+        const list = $("setup-results");
+        list.replaceChildren(el("p", "", "Tbrain 已安装，知识库已就绪。"));
+        for (const item of result.hosts) {
+          const row = el("div", "host-row");
+          row.append(el("span", "host-name", HOSTS[item.host]), el("span", "host-detail", item.error || item.detail));
+          list.append(row);
+        }
+        state.status = await call("status");
+        state.setup.required = false;
+        updateStatusUI(state.status);
+        $("setup-form").hidden = true;
+        $("setup-result").hidden = false;
+        document.querySelectorAll(".nav-item").forEach(item => { item.disabled = false; });
+        state.sessionsLoaded = false;
+        state.projectsLoaded = false;
+      });
+    });
+    $("setup-finish").addEventListener("click", () => goTo("overview"));
     document.querySelectorAll(".nav-item").forEach((button) => {
       button.addEventListener("click", () => goTo(button.dataset.page));
     });
@@ -961,11 +1081,18 @@
         item.classList.toggle("active", active);
         item.setAttribute("aria-pressed", String(active));
       });
-      loadSessions();
+      $("status-menu").open = false;
+      renderSessions();
+    });
+    document.addEventListener("click", event => {
+      if (!$("status-menu").contains(event.target)) $("status-menu").open = false;
+    });
+    $("status-menu").addEventListener("keydown", event => {
+      if (event.key === "Escape") { $("status-menu").open = false; $("status-menu").querySelector("summary").focus(); }
     });
 
     $("refresh-sessions").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
-      await loadSessions();
+      await loadSessions(true);
       await loadGlobalPrompt();
     }));
 
@@ -996,6 +1123,7 @@
       if (event.target.closest("a")) event.preventDefault();
     });
 
+    $("refresh-projects").addEventListener("click", event => withBusy(event.currentTarget, () => loadProjects(true)));
     $("new-project").addEventListener("click", () => openProjectEditor(null));
     $("cancel-project").addEventListener("click", () => $("project-dialog").close());
     $("add-project-path").addEventListener("click", () => {
@@ -1026,7 +1154,7 @@
       withBusy($("save-project"), async () => {
         await call("project_save", name, paths, $("project-parent").value, $("project-allow-child").checked, state.editing.original);
         $("project-dialog").close();
-        await loadProjects();
+        await loadProjects(true);
         toast("已保存");
       });
     });
@@ -1034,7 +1162,7 @@
     $("confirm-delete").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
       await call("project_delete", state.deleting);
       $("delete-dialog").close();
-      await loadProjects();
+      await loadProjects(true);
       toast("已删除");
     }));
 
@@ -1052,6 +1180,9 @@
       };
       withBusy(event.submitter || $("save-settings"), async () => {
         const result = await call("save_settings", values);
+        state.sessionsLoaded = false;
+        state.projectsLoaded = false;
+        state.projectView = "";
         if (result.settings && typeof result.settings === "object") state.settings = result.settings;
         toast(result.restart_required ? "已保存，需重启" : "已保存");
         try {
@@ -1123,23 +1254,20 @@
     });
   }
 
-  function boot() {
+  async function boot() {
     if (state.booted) return;
     state.booted = true;
     applyTheme(false);
     bindEvents();
-    if (!hasBridge()) offlinePreview();
-    goTo("overview");
-    if (hasBridge()) {
-      call("status")
-        .then((status) => {
-          state.status = status;
-          updateStatusUI(status);
-        })
-        .catch((error) => {
-          if (!error.bridge) toast(errorText(error), true);
-        });
-    }
+    if (!hasBridge()) { offlinePreview(); goTo("overview"); return; }
+    try {
+      state.status = await call("status");
+      updateStatusUI(state.status);
+      if (!state.status.settings.vault_path) {
+        document.querySelectorAll(".nav-item").forEach(item => { item.disabled = true; });
+        await loadSetup();
+      } else goTo("overview");
+    } catch (error) { toast(errorText(error), true); }
   }
 
   window.addEventListener("desktopready", boot, { once: true });

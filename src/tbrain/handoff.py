@@ -51,6 +51,7 @@ class Summary:
     pending: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     archive: list[str] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)  # 未知/保留的二级标题 -> 原文（迁移与手工内容不丢失）
 
     # 便捷访问器 ----------------------------------------------------------
     @property
@@ -106,7 +107,7 @@ def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: st
         "git": {"branch": "", "head": "", "dirty": 0},
         "last_verify": {"command": "", "exit_code": None, "at": ""},
         "status": status,
-        "saved_users": 1,
+        "saved_users": 0,
         "provisional_name": bool(provisional),
     }
     summary.raw_command = raw_command
@@ -126,6 +127,7 @@ def _clip_user(text: str) -> str:
 
 def render(summary: Summary) -> str:
     header = {key: summary.header.get(key) for key in HEADER_FIELDS if key != "provisional_name"}
+    header.update({key: value for key, value in summary.header.items() if key not in header})
     header["provisional_name"] = bool(summary.header.get("provisional_name", False))
     front = yaml.safe_dump(header, allow_unicode=True, sort_keys=False, default_flow_style=False).strip()
     lines = ["---", front, "---", "", "## 原始命令", summary.raw_command or "", ""]
@@ -151,6 +153,10 @@ def render(summary: Summary) -> str:
     lines += ["## 待整理"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.pending] + [""]
     lines += ["## 待用户确认"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.conflicts] + [""]
     lines += ["## 归档"] + summary.archive + [""]
+    for name, body in summary.extra.items():
+        if name in SECTIONS:
+            continue
+        lines += [f"## {name}", str(body or ""), ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -175,11 +181,19 @@ def parse(text: str) -> Summary:
     summary = Summary(header=header)
     summary.sections = {"用户指令": [], "已完成": [], "决策": [], "未走通的路": [], "证据": [], "未完成目标": []}
     current = ""
+    current_unknown = ""
     current_item: dict | None = None
     for line in body.split("\n"):
         if line.startswith("## "):
             current = line[3:].strip()
             current_item = None
+            current_unknown = current if current not in SECTIONS else ""
+            if current_unknown:
+                summary.extra.setdefault(current_unknown, "")
+            continue
+        if current_unknown:
+            existing = summary.extra.get(current_unknown, "")
+            summary.extra[current_unknown] = (existing + "\n" + line) if existing else line
             continue
         match = _ITEM_RE.match(line)
         if match and current:

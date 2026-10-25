@@ -32,7 +32,7 @@ MCP 命令形如：
 "<安装目录>\bin\tbrain.cmd" --home "<应用数据目录>" mcp
 ```
 
-`hooks.json` 是本目录的**模板**（占位符 `__TBRAIN_ENTRY__`）。`tbrain connect dsh` 会把具体内容写到 `<应用数据目录>\hooks.json`，供 DSH 的官方 Claude hooks 桥读取；Claude Code 与 Codex 的 hook 由同一个生成器内联写入各自配置文件。
+`hooks.json` 是本目录的**模板**（占位符 `__TBRAIN_ENTRY__`）。`tbrain connect dsh` 会把具体内容写到 `<应用数据目录>\hooks.json`，作为历史兼容文件保留；DSH 0.6.1 不读取该文件；Claude Code 与 Codex 的 hook 由同一个生成器内联写入各自配置文件。
 
 ## 四宿主对照
 
@@ -40,15 +40,15 @@ MCP 命令形如：
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` 的 `hooks`（SessionStart / UserPromptSubmit / Stop / PreCompact / SessionEnd，`shell: powershell`）；`~/.claude.json` 顶层 `mcpServers.tbrain` | 新开会话 | Windows 上必须用全引号 PowerShell 形式，exec 形式会退化 |
 | Codex | `~/.codex/hooks.json`（`command` + `commandWindows`，同样 5 个事件）；`~/.codex/config.toml` 的 `[mcp_servers.tbrain]` | 新进程；hook 还需用户信任 | **hook 未信任不会执行**：在 Codex 中执行 `/hooks` 审核并信任，`doctor` 会显示黄色“待信任” |
-| DeepSeek Harness | profile patch `~/.dsh/profiles/<profile>/cordis.patch.yml` 插入三项：`tbrain-mcp`（`@deepseek-ai/dsh-mcp-client`）、`tbrain-cc-hooks`（`@deepseek-ai/dsh-hooks-claude-code`，`configPath` 指向 `<应用数据目录>/hooks.json`）、`tbrain-native`（本目录 `tbrain-dsh.mjs` 的 file URL） | MCP 可热重连；桥与原生插件需重开 DSH | 桥/插件依赖不自动联网安装：`dsh plugin add @deepseek-ai/dsh-hooks-claude-code@0.2.1-rc.3`；缺失时 `doctor` 显示黄色并给出手动步骤 |
+| DeepSeek Harness | profile patch 两项：`tbrain-mcp` 与 `tbrain-native`；原生插件复制到 `<应用数据目录>/integrations/` | 重开 DSH | 原生事件直接调用 CLI，无 Claude Hook 桥依赖 |
 | pi coding agent | `~/.pi/agent/extensions/tbrain.ts` | 新 pi 会话或 `/reload` | pi 无内置 MCP；扩展通过固定入口调用 `hook` 与 `tool` |
 
 ### DSH 说明
 
-- `tbrain-cc-hooks` 让 DSH 复用与 Claude/Codex 相同的 `hooks.json` 事件（SessionStart / UserPromptSubmit / Stop；桥不支持 PreCompact/SessionEnd）。
-- `tbrain-native`（`tbrain-dsh.mjs`）补齐桥没有的能力：`compaction/start` 的 PreCompact 提醒、`agent/disposed`/`session/disposed` 的 SessionEnd 状态、`agent/pre-step` 读 `ctx.tokenMeter` 后的换会话提醒。
-- `tbrain connect dsh` 会把 `tbrain-dsh.mjs` 复制到 `<应用数据目录>\integrations\`（含合法 `package.json`），profile patch 用该稳定路径，DSH 升级/切换版本都不会失效。可用 `--profile <名字>` 指定非 `desktop` 的 profile。
-- 真实 profile 里可能残留旧 Shared Brain 条目（`shared-brain-mcp`、`shared-brain-lifecycle`）：`doctor` 会把“旧 shared-brain 残留”标红，`tbrain disconnect dsh` 只删除 Tbrain 标记块，旧条目需要按迁移流程处理或手动删除。
+- `tbrain-native` 统一处理 `agent/created`、`agent/pre-step`、`agent/turn-stopping`、`session/event` 与 `agent/disposed`；仅记录根 Agent 的用户指令，子代理由根 Agent 汇总。
+- 收尾未保存时用 `agent.steer()` 续跑一次，避免重复提醒循环；PreCompact 注入最近用户指令。
+- 原生 CLI 响应使用 `additional_context`；MCP 仍提供四个工具，启动参数必须包含 `--home <目录> mcp`。
+- `connect dsh` 仅替换 Tbrain 条目，原生插件放在固定应用数据目录；旧官方桥包不再加载，不自动卸载。
 
 ### Codex 信任
 

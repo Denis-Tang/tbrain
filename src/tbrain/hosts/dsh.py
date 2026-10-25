@@ -1,34 +1,19 @@
-"""DeepSeek Harness (DSH) adapter.
-
-DSH's MCP servers and plugins live in the profile patch file
-``~/.dsh/profiles/<profile>/cordis.patch.yml``.  Tbrain inserts three entries:
-
-* ``tbrain-mcp``       -- ``@deepseek-ai/dsh-mcp-client`` for the stdio MCP server;
-* ``tbrain-cc-hooks``  -- ``@deepseek-ai/dsh-hooks-claude-code`` pointing at the
-  shared ``<app_home>/hooks.json`` (same events as Claude/Codex);
-* ``tbrain-native``    -- a small cordis plugin that adds what the bridge cannot:
-  PreCompact reminders, SessionEnd, context-usage based switch hints.
-
-The patch file is edited as a marked YAML block so every user entry, comment and
-``!!js`` expression stays byte-for-byte untouched.  Installing the bridge/native
-dependencies never touches the network: ``connect`` writes the config and
-``doctor`` explains the manual ``dsh plugin add`` step when the bridge package is
-missing.
-"""
+"""DSH 接入：固定入口 MCP + 统一原生生命周期插件。"""
 
 from __future__ import annotations
 
 import re
+import json
+
+import yaml
 from pathlib import Path
 
 from .. import __version__, paths
 from . import base, config
 
 HOST = "dsh"
-EXPECTED_BRIDGE_VERSION = "0.2.1-rc.3"
-BRIDGE_PACKAGE = "@deepseek-ai/dsh-hooks-claude-code"
 MCP_CLIENT_PACKAGE = "@deepseek-ai/dsh-mcp-client"
-REQUIRED_IDS = ("tbrain-mcp", "tbrain-cc-hooks", "tbrain-native")
+REQUIRED_IDS = ("tbrain-mcp", "tbrain-native")
 NATIVE_NAME = "tbrain-dsh.mjs"
 
 
@@ -48,11 +33,7 @@ def _patch_block(app_home: Path, entry: str, plugin_uri: str) -> str:
         "        serverName: tbrain",
         "        transport: stdio",
         f"        command: {config.yaml_scalar(entry)}",
-        "        args: []",
-        "    - id: tbrain-cc-hooks",
-        f"      name: {config.yaml_scalar(BRIDGE_PACKAGE)}",
-        "      config:",
-        f"        configPath: {config.yaml_scalar(str(paths.hooks_json(app_home)))}",
+        f"        args: {json.dumps(base.mcp_args(app_home), ensure_ascii=False)}",
         "    - id: tbrain-native",
         f"      name: {config.yaml_scalar(plugin_uri)}",
         "      config:",
@@ -71,9 +52,11 @@ def _install_native(app_home: Path) -> tuple[Path | None, list[str]]:
         return None, files
     target = target_dir / NATIVE_NAME
     target_dir.mkdir(parents=True, exist_ok=True)
+    config.backup_file(target)
     config.write_text_atomic(target, source.read_text(encoding="utf-8"))
     files.append(str(target))
     package = target_dir / "package.json"
+    config.backup_file(package)
     payload = {
         "name": "tbrain-dsh-native",
         "private": True,
@@ -86,25 +69,6 @@ def _install_native(app_home: Path) -> tuple[Path | None, list[str]]:
     return target, files
 
 
-def bridge_status(locations: dict) -> dict:
-    """Is the DSH Claude-hooks bridge package installed in the profile?"""
-    package_json = config.read_json(locations["package"])
-    declared = {}
-    if isinstance(package_json, dict):
-        declared = {**(package_json.get("dependencies") or {}), **(package_json.get("devDependencies") or {})}
-    installed_file = locations["node_modules"] / BRIDGE_PACKAGE / "package.json"
-    version = ""
-    if installed_file.is_file():
-        payload = config.read_json(installed_file)
-        version = str(payload.get("version") or "") if isinstance(payload, dict) else ""
-    installed = bool(version) or BRIDGE_PACKAGE in declared
-    expected = EXPECTED_BRIDGE_VERSION
-    version_match = (not version) or version == expected
-    return {"installed": installed, "version": version,
-            "declared": BRIDGE_PACKAGE in declared,
-            "expected": expected, "version_match": version_match}
-
-
 def connect(host: str = HOST, app_home: Path | None = None,
             install_root: Path | None = None, settings=None, profile: str | None = None) -> dict:
     home, root, entry = _context(app_home, install_root, settings)
@@ -115,9 +79,6 @@ def connect(host: str = HOST, app_home: Path | None = None,
 
     if not Path(entry).is_file():
         warnings.append(f"固定入口尚未安装：{entry}（先运行 tbrain install）")
-
-    # 1) shared hooks file for the Claude-hooks bridge
-    files.append(str(base.write_bridge_hooks(home, entry)))
 
     # 2) native plugin copy (stable location, survives version switches)
     native, native_files = _install_native(home)
@@ -134,16 +95,11 @@ def connect(host: str = HOST, app_home: Path | None = None,
     backup = config.backup_file(patch_path)
     if backup:
         backups.append(str(backup))
-    text = config.strip_yaml_block(text)
+    text, _ = _strip_tbrain_items(text)
     text = config.append_yaml_block(text, _patch_block(home, entry, plugin_uri))
     config.write_text_atomic(patch_path, text)
     files.append(str(patch_path))
 
-    bridge = bridge_status(locations)
-    if not bridge["installed"]:
-        warnings.append("未检测到 DSH 桥 " + BRIDGE_PACKAGE + "：请在 DSH profile 中执行 "
-                        "dsh plugin add " + BRIDGE_PACKAGE + "@" + EXPECTED_BRIDGE_VERSION +
-                        "（Tbrain 不联网安装依赖），然后重开 DSH。")
     config.write_connect_state(home, HOST, {
         "entry": entry,
         "install_root": str(root),
@@ -154,41 +110,37 @@ def connect(host: str = HOST, app_home: Path | None = None,
     })
     return {"ok": True, "host": HOST, "entry": entry, "install_root": str(root),
             "profile": locations["profile"], "files": files, "backups": backups,
-            "warnings": warnings, "bridge": bridge,
-            "detail": "DeepSeek Harness 已接入（MCP + Claude hooks 桥 + 原生插件）；"
-                      "MCP 配置可热重连，桥/插件需重开 DSH。"}
+            "warnings": warnings,
+            "detail": "DeepSeek Harness 已接入（MCP + 原生插件）；"
+                      "MCP 配置可热重连，原生插件需重开 DSH。"}
 
 
-def _force_strip_tbrain_items(text: str) -> tuple[str, int]:
-    """Fallback for patches written without our markers (PyYAML, best effort)."""
-    try:
-        import yaml
-
-        data = yaml.safe_load(text)
-    except Exception:
-        return text, 0
-    if not isinstance(data, list):
-        return text, 0
+def _strip_tbrain_items(text: str) -> tuple[str, int]:
+    """只移除 Tbrain 条目；宿主可能把用户插件放进原有标记块。"""
+    output = []
+    skip_indent = None
     removed = 0
-    output: list = []
-    for item in data:
-        if not isinstance(item, dict) or not isinstance(item.get("insert"), list):
-            output.append(item)
+    for line in text.splitlines(keepends=True):
+        if line.strip() in (config.YAML_MARK_START, config.YAML_MARK_END):
             continue
-        kept = []
-        for entry in item["insert"]:
-            if isinstance(entry, dict) and str(entry.get("id") or "").startswith("tbrain-"):
-                removed += 1
+        indent = len(line) - len(line.lstrip())
+        if skip_indent is not None:
+            if not line.strip() or indent > skip_indent:
                 continue
-            kept.append(entry)
-        if kept:
-            output.append({**item, "insert": kept})
-    if not removed:
-        return text, 0
-    try:
-        return yaml.safe_dump(output, sort_keys=False, allow_unicode=True), removed
-    except Exception:
-        return text, 0
+            skip_indent = None
+        if re.match(r"\s*- id: ['\"]?tbrain-", line):
+            skip_indent = indent
+            removed += 1
+            continue
+        output.append(line)
+    cleaned = []
+    for i, line in enumerate(output):
+        if line.strip() == "- insert:":
+            following = next((value for value in output[i + 1:] if value.strip()), "")
+            if not following or len(following) - len(following.lstrip()) <= len(line) - len(line.lstrip()):
+                continue
+        cleaned.append(line)
+    return "".join(cleaned), removed
 
 
 def disconnect(host: str = HOST, app_home: Path | None = None,
@@ -205,12 +157,7 @@ def disconnect(host: str = HOST, app_home: Path | None = None,
         backup = config.backup_file(patch_path)
         if backup:
             backups.append(str(backup))
-        stripped = config.strip_yaml_block(text)
-        removed += max(0, len(config.find_yaml_ids(text)) - len(config.find_yaml_ids(stripped)))
-        if stripped.strip() == text.strip() and any(
-                item.startswith("tbrain-") for item in config.find_yaml_ids(text)):
-            stripped, forced = _force_strip_tbrain_items(stripped)
-            removed += forced
+        stripped, removed = _strip_tbrain_items(text)
         config.write_text_atomic(patch_path, stripped)
         files.append(str(patch_path))
 
@@ -264,29 +211,22 @@ def doctor(host: str = HOST, app_home: Path | None = None,
     if not Path(entry).is_file():
         item.update(status="red", detail=f"固定入口缺失：{entry}（重新安装 Tbrain）")
         return item
-    hooks_file = paths.hooks_json(home)
-    if not hooks_file.is_file():
-        item.update(status="red",
-                    detail=f"共用 hooks 文件缺失：{hooks_file}；重新运行 tbrain connect dsh。")
-        return item
     native = paths.integrations_dir(home) / NATIVE_NAME
     if not native.is_file():
         item.update(status="red",
                     detail="DSH 原生插件未安装：运行 tbrain connect dsh 复制，或手动把安装目录中的 "
                            "integrations/tbrain-dsh.mjs 复制到 " + str(native) + "。")
         return item
-    bridge = bridge_status(locations)
-    if not bridge["installed"]:
-        item.update(status="yellow",
-                    detail="DSH 桥未安装（" + BRIDGE_PACKAGE + "）：Tbrain 不联网安装依赖，请在 DSH profile 执行 "
-                           "dsh plugin add " + BRIDGE_PACKAGE + "@" + EXPECTED_BRIDGE_VERSION +
-                           "，或手动安装到 profile 的 node_modules 后重开 DSH。")
-        return item
-    if bridge["version"] and not bridge["version_match"]:
-        item.update(status="yellow",
-                    detail=f"DSH 桥版本 {bridge['version']} 与当前引擎期望的 {EXPECTED_BRIDGE_VERSION} 不一致；"
-                           "DSH 升级后请同步升级桥。")
+    managed = text.partition(config.YAML_MARK_START)[2].partition(config.YAML_MARK_END)[0]
+    entries = {entry.get("id"): entry for block in (yaml.safe_load(managed) or [])
+               for entry in block.get("insert", [])}
+    mcp = entries.get("tbrain-mcp", {}).get("config", {})
+    native_config = entries.get("tbrain-native", {}).get("config", {})
+    if (mcp.get("command") != entry or mcp.get("args") != base.mcp_args(home)
+            or native_config.get("command") != entry or native_config.get("home") != str(home)
+            or "tbrain-cc-hooks" in ids):
+        item.update(status="yellow", detail="DSH 启动参数或原生接入配置过期；重新运行 tbrain connect dsh。")
         return item
     item.update(status="green",
-                detail=f"已接入 DSH（MCP + hooks 桥 + 原生插件，profile={locations['profile']}）。")
+                detail=f"DSH 配置完整（MCP + 原生插件，profile={locations['profile']}）。")
     return item

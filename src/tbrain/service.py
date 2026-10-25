@@ -138,32 +138,30 @@ class TbrainService:
         store = self.store
         store.ensure_layout()
         index = self.index
+        states = index.file_states()
         session_root = (vault / "会话总结")
         if session_root.is_dir():
             for path in session_root.rglob("*.md"):
-                self._index_file(path, kind="session")
+                self._index_file(path, "session", vault, states)
         for kind in ("安装", "环境变量", "PATH", "代理", "配置", "工作区", "工具"):
             folder = (vault / "公共池" / kind)
             if not folder.is_dir():
                 continue
             for path in folder.glob("*.md"):
-                self._index_file(path, kind="public")
+                self._index_file(path, "public", vault, states)
         for row in index.sessions():
             path = (vault / row["path"]) if row.get("path") else None
             if not path or not path.is_file():
                 index.remove_session(row["session_id"])
 
-    def _index_file(self, path: Path, kind: str) -> None:
+    def _index_file(self, path: Path, kind: str, vault: Path, states: dict) -> None:
         index = self.index
         try:
             stat = path.stat()
         except OSError:
             return
-        try:
-            relative = path.resolve().relative_to(self.vault_root().resolve()).as_posix()
-        except ValueError:
-            return
-        state = index.file_state(relative)
+        relative = path.relative_to(vault).as_posix()
+        state = states.get(relative)
         if state and float(state.get("mtime") or 0) == stat.st_mtime and int(state.get("size") or 0) == stat.st_size:
             return
         text = self.store.read_text(path)
@@ -219,11 +217,11 @@ class TbrainService:
             return info
         try:
             branch = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-                                    capture_output=True, text=True, timeout=2)
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
             head = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"],
-                                  capture_output=True, text=True, timeout=2)
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
             status = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
-                                    capture_output=True, text=True, timeout=3)
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3)
             if branch.returncode == 0:
                 info["branch"] = branch.stdout.strip()
             if head.returncode == 0:
@@ -363,7 +361,8 @@ class TbrainService:
     def status(self) -> dict:
         values = self.settings.load()
         vault = self.vault_root()
-        ready = bool(str(vault)) and vault.is_dir()
+        configured = bool(values.vault_path or self._vault_override)
+        ready = configured and vault.is_dir()
         try:
             from .settings import available_timezones_list
 
@@ -371,19 +370,19 @@ class TbrainService:
         except Exception:
             timezones = sorted(available_timezones())
         try:
-            current_time = clock.display(self.now())
+            current_time = clock.display(self.now()) if configured else ""
         except Exception:
             current_time = ""
         result = {
             "version": __version__,
             "ready": ready,
-            "vault_path": str(vault) if str(vault) else "",
+            "vault_path": str(vault) if configured else "",
             "settings": _settings_dict(values),
             "timezones": timezones,
             "current_time": current_time,
             "install_root": str(paths.install_root(self.home, values)),
             "current_version_on_disk": _installed_version(values),
-            "vaults": [{"path": str(vault), "exists": vault.is_dir()}] if str(vault) else [],
+            "vaults": [{"path": str(vault), "exists": vault.is_dir()}] if configured else [],
         }
         try:
             from . import installer
@@ -623,6 +622,20 @@ class TbrainService:
             "旧版解绑（改宿主全局配置）需另行确认后执行",
         ]
         return report
+
+    def migrate(self, old_home: str, execute: bool = False, new_vault: Path | None = None) -> dict:
+        from . import migrate as migrate_module
+
+        target = Path(new_vault).expanduser() if new_vault else self.vault_root()
+        old = Path(str(old_home or "")).expanduser()
+        if not execute:
+            return migrate_module.plan(old, target)
+        if not str(target):
+            return {"mode": "execute", "failed": ["未配置新 vault 路径（settings.vault_path 或 --to）"]}
+        if new_vault is not None:
+            self._vault_override = target
+            self.reset_vault()
+        return migrate_module.execute(self, old, target)
 
 
 # ---------------------------------------------------------------------------

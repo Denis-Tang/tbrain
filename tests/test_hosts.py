@@ -214,11 +214,6 @@ def test_claude_connect_only_adds_tbrain_entries_and_backs_up(iso):
     assert tbrain_server["command"] == iso.entry
     assert tbrain_server["args"] == ["--home", str(iso.home), "mcp"]
 
-    # shared hooks file for the DSH bridge is generated too
-    bridge = _read_json(paths.hooks_json(iso.home))
-    command = bridge["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    assert iso.entry in command and "--host dsh" in command
-
     # idempotent: a second connect does not duplicate handlers
     _call(iso, "connect", HOST)
     again = _read_json(iso.claude_settings)
@@ -357,7 +352,6 @@ def test_dsh_connect_patch_and_native_plugin(iso):
     result = _call(iso, "connect", "dsh")
     assert result["ok"] is True
     assert result["profile"] == "desktop"
-    assert result["bridge"]["installed"] is True
 
     text = iso.dsh_patch.read_text(encoding="utf-8")
     assert "用户自己的插件" in text
@@ -370,15 +364,15 @@ def test_dsh_connect_patch_and_native_plugin(iso):
     assert isinstance(data, list)
     ids = [entry.get("id") for block in data if isinstance(block, dict)
            for entry in (block.get("insert") or []) if isinstance(entry, dict)]
-    assert "tbrain-mcp" in ids and "tbrain-cc-hooks" in ids and "tbrain-native" in ids
+    assert "tbrain-mcp" in ids and "tbrain-native" in ids
+    assert "tbrain-cc-hooks" not in ids
     assert "user-plugin" in ids
 
     entries = {entry["id"]: entry for block in data if isinstance(block, dict)
                for entry in (block.get("insert") or []) if isinstance(entry, dict)}
     assert entries["tbrain-mcp"]["name"] == "@deepseek-ai/dsh-mcp-client"
     assert entries["tbrain-mcp"]["config"]["command"] == iso.entry
-    assert entries["tbrain-mcp"]["config"]["args"] == []
-    assert entries["tbrain-cc-hooks"]["config"]["configPath"] == str(paths.hooks_json(iso.home))
+    assert entries["tbrain-mcp"]["config"]["args"] == ["--home", str(iso.home), "mcp"]
     assert entries["tbrain-native"]["name"].startswith("file:///")
     assert "tbrain-dsh.mjs" in entries["tbrain-native"]["name"]
     assert entries["tbrain-native"]["config"]["command"] == iso.entry
@@ -405,19 +399,19 @@ def test_dsh_doctor_yellow_before_connect_and_red_for_old_residue(iso):
     assert "Shared Brain" in item["detail"]
 
 
-def test_dsh_missing_bridge_dependency_is_yellow(iso):
-    import shutil
-
-    (iso.dsh_profile / "package.json").unlink()
-    shutil.rmtree(iso.dsh_profile / "node_modules")
-    result = _call(iso, "connect", "dsh")
-    assert result["ok"] is True
-    assert any("dsh plugin add" in warning for warning in result["warnings"])
-
-    item = hosts.doctor("dsh", iso.home, iso.root, iso.settings)
-    assert item["status"] == "yellow"
-    assert "dsh plugin add" in item["detail"]
-    assert "不联网" in item["detail"] or "手动" in item["detail"]
+def test_dsh_reconnect_preserves_user_plugin_inside_old_markers(iso):
+    _call(iso, "connect", "dsh")
+    text = iso.dsh_patch.read_text(encoding="utf-8")
+    user = "- id: user-added-later\n  name: user-plugin\n  config:\n    value: !!js '() => 42'\n"
+    text = text.replace(config.YAML_MARK_END, user + config.YAML_MARK_END)
+    text = text.replace(f'args: {json.dumps(["--home", str(iso.home), "mcp"])}', 'args: []')
+    iso.dsh_patch.write_text(text, encoding="utf-8")
+    assert hosts.doctor("dsh", iso.home, iso.root, iso.settings)["status"] == "yellow"
+    _call(iso, "connect", "dsh")
+    assert user in iso.dsh_patch.read_text(encoding="utf-8")
+    assert hosts.doctor("dsh", iso.home, iso.root, iso.settings)["status"] == "green"
+    _call(iso, "disconnect", "dsh")
+    assert user in iso.dsh_patch.read_text(encoding="utf-8")
 
 
 def test_dsh_disconnect_removes_only_tbrain_entries(iso):
@@ -516,7 +510,7 @@ def test_render_produces_host_shapes():
     assert hosts.render("claude-code", block, "Stop") == {"decision": "block", "reason": "本轮尚未 save"}
     assert hosts.render("claude-code", HookResult(), "Stop") == {}
 
-    assert hosts.render("dsh", context, "SessionStart")["hookSpecificOutput"]["additionalContext"] == "请保存"
+    assert hosts.render("dsh", context, "SessionStart")["additional_context"] == "请保存"
     assert hosts.render("codex", block, "Stop")["decision"] == "block"
 
     pi_context = hosts.render("pi", context, "UserPromptSubmit")

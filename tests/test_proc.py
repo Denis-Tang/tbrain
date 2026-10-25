@@ -206,3 +206,21 @@ def test_evict_in_background_swallows_errors(tmp_path, monkeypatch):
     thread = proc.evict_in_background("0.6.9", home=tmp_path)
     thread.join(5)
     assert not thread.is_alive()
+
+
+def test_evict_force_kills_process_that_dropped_registry_but_stayed_alive(tmp_path):
+    """registry 文件被删不代表进程退了；旧版桌面卡在子进程上时就是这种情况。"""
+    _write_registry(tmp_path, 990501, version="0.5.9")
+    killed: list[int] = []
+
+    def alive(pid):
+        paths.process_file(pid, tmp_path).unlink(missing_ok=True)
+        return True
+
+    result = proc.evict_old_versions(
+        "0.6.0", timeout=0.05, home=tmp_path,
+        alive=alive, killer=lambda pid: killed.append(pid) or True,
+        sleep=lambda seconds: None,
+    )
+    assert killed == [990501]
+    assert result["forced"] == [990501]

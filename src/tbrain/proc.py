@@ -316,15 +316,10 @@ def evict_old_versions(current_version: str, timeout: float = DEFAULT_TIMEOUT,
             continue
 
     def still_running() -> list[int]:
-        running: list[int] = []
-        for pid in requested:
-            # The watcher deletes its registry file right before exiting; either
-            # signal (file gone or pid dead) counts as a clean exit.
-            if _read_json(_process_path(pid, home)) is None:
-                continue
-            if alive(pid):
-                running.append(pid)
-        return running
+        # Liveness, not registry presence: the watcher deletes its registry file
+        # before the callback finishes, so a process that fails to shut down
+        # (e.g. an old desktop still blocked on its child) must still be killed.
+        return [pid for pid in requested if alive(pid)]
 
     deadline = time.monotonic() + max(0.0, float(timeout))
     running = still_running()

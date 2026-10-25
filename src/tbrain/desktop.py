@@ -11,6 +11,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import subprocess
 import sys
@@ -171,8 +172,12 @@ class DesktopAPI:
         return self._call(self._service.open_document, path)
 
 
-def _maintenance_free_run(api: DesktopAPI, home: Path) -> None:
-    """启动 WPF/WebView2 窗口宿主并转发请求。"""
+def _maintenance_free_run(api: DesktopAPI, home: Path, stop: threading.Event | None = None) -> None:
+    """启动 WPF/WebView2 窗口宿主并转发请求。
+
+    ``stop`` 由退出监视器置位（新版本要求旧版本退出时）；这里用带超时的读取循环
+    检查它，否则进程会一直卡在子进程的 stdout 上，旧窗口永远不关。
+    """
     assets = Path(__file__).parent / "web"
     frozen = getattr(sys, "frozen", False)
     root = Path(sys.executable).parent if frozen else Path(__file__).resolve().parents[2] / "build"
@@ -181,9 +186,26 @@ def _maintenance_free_run(api: DesktopAPI, home: Path) -> None:
         raise FileNotFoundError(f"找不到桌面窗口宿主：{host}（请先运行 scripts/build.ps1 或 dotnet build）")
     with subprocess.Popen([str(host), str(assets), str(home / "webview")],
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8") as process:
+        lines: queue.Queue = queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for raw in process.stdout:
+                    lines.put(raw)
+            except (OSError, ValueError):
+                pass
+
+        threading.Thread(target=_pump, name="tbrain-desktop-stdout", daemon=True).start()
         try:
-            for line in process.stdout:
-                line = line.strip()
+            while True:
+                if stop is not None and stop.is_set():
+                    break
+                try:
+                    line = lines.get(timeout=0.2).strip()
+                except queue.Empty:
+                    if process.poll() is not None:
+                        break
+                    continue
                 if not line:
                     continue
                 request = json.loads(line)
@@ -197,6 +219,10 @@ def _maintenance_free_run(api: DesktopAPI, home: Path) -> None:
                 process.stdin.close()
             except OSError:
                 pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 def run(home: Path | None = None):
@@ -251,7 +277,7 @@ def run(home: Path | None = None):
         except Exception:
             watcher = None
         try:
-            _maintenance_free_run(DesktopAPI(service), service.home)
+            _maintenance_free_run(DesktopAPI(service), service.home, stop)
         finally:
             stop.set()
             try:

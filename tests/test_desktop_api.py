@@ -216,3 +216,20 @@ def test_upgrade_requests_restart_after_reply(api, monkeypatch):
     result = desktop.update_apply()
     assert result['restarting'] and desktop._quit_requested
     assert desktop._restart_executable == root / 'versions' / '0.6.4' / 'tbrain.exe'
+
+
+@pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('0.6.4', False)])
+def test_packaged_desktop_selects_new_version_before_host_reconnect(api, monkeypatch, installed, should_install):
+    from tbrain import desktop, installer
+
+    _, service, _, _ = api
+    root = Path(service.settings.load().install_root or desktop.paths.install_root(service.home))
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'current.txt').write_text(installed, encoding='utf-8')
+    executable = root.parent / 'download' / 'tbrain.exe'
+    monkeypatch.setattr(desktop.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(desktop.sys, 'executable', str(executable))
+    copied = []
+    monkeypatch.setattr(installer, 'install_from_dir', lambda *args: copied.append(args))
+    desktop._prepare_installation(service)
+    assert copied == ([(executable.parent, __version__, root)] if should_install else [])

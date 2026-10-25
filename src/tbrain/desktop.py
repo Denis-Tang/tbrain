@@ -231,12 +231,24 @@ def _maintenance_free_run(api: DesktopAPI, home: Path, stop: threading.Event | N
                 process.kill()
 
 
+def _prepare_installation(service: TbrainService) -> None:
+    if not getattr(sys, 'frozen', False):
+        return
+    root = paths.install_root(service.home, service.settings.load())
+    current = installer.current_version(root)
+    if current and installer._version_key(current) < installer._version_key(__version__):
+        installer.install_from_dir(Path(sys.executable).parent, __version__, root)
+
+
 def run(home: Path | None = None):
     if os.name != "nt":
         raise SystemExit("Tbrain 桌面程序仅支持 Windows")
     from ctypes import wintypes
     import hashlib
     resolved_home = paths.app_home(home)
+    service = TbrainService(resolved_home)
+    # 先更新固定入口：宿主重连时必须启动新版，否则旧 MCP 会反过来淘汰新窗口。
+    _prepare_installation(service)
     mutex_name = 'Local\\Tbrain.Desktop.' + hashlib.sha256(str(resolved_home).casefold().encode()).hexdigest()[:16]
     api = None
 
@@ -275,7 +287,6 @@ def run(home: Path | None = None):
                 user.ShowWindow(window, 9)
                 user.SetForegroundWindow(window)
             return
-        service = TbrainService(home)
         stop = threading.Event()
         watcher = None
         try:

@@ -282,6 +282,7 @@ def test_codex_connect_writes_hooks_and_mcp_toml(iso):
         assert iso.entry in handler["command"]
         assert handler["commandWindows"].startswith("& ")
         assert "--host codex" in handler["commandWindows"]
+        assert handler["timeout"] == (3 if event == "SessionEnd" else 10)
 
     after_text = iso.codex_config.read_text(encoding="utf-8")
     assert "# keep this comment" in after_text

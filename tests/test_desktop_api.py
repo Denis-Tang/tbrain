@@ -218,7 +218,7 @@ def test_upgrade_requests_restart_after_reply(api, monkeypatch):
     assert desktop._restart_executable == root / 'versions' / '0.6.4' / 'tbrain.exe'
 
 
-@pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('0.6.4', False)])
+@pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('99.0.0', False)])
 def test_packaged_desktop_selects_new_version_before_host_reconnect(api, monkeypatch, installed, should_install):
     from tbrain import desktop, installer
 

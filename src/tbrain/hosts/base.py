@@ -208,7 +208,8 @@ def codex_handlers(host: str, entry: str, app_home: Path) -> dict[str, list[dict
     command = hook_command(host, entry, app_home)
     handler = {"type": "command", "command": command,
                "commandWindows": "& " + command, "timeout": 10}
-    return {event: [dict(handler)] for event in HOST_EVENTS}
+    return {event: [{**handler, "timeout": 3 if event == "SessionEnd" else 10}]
+            for event in HOST_EVENTS}
 
 
 # ---------------------------------------------------------------------------

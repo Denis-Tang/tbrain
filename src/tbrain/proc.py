@@ -363,6 +363,33 @@ def evict_old_versions(current_version: str, timeout: float = DEFAULT_TIMEOUT,
     }
 
 
+def evict_in_background(current_version: str | None = None, home: Path | None = None,
+                        timeout: float = DEFAULT_TIMEOUT, on_done=None) -> threading.Thread:
+    """Run :func:`evict_old_versions` on a daemon thread.
+
+    Called right after a long-lived process registers itself, so starting the new
+    version always removes the previous one without delaying the MCP handshake (a
+    host kills a server that is slow to answer ``initialize``).
+    """
+    version = str(current_version or __version__)
+    resolved = paths.app_home(home)
+
+    def _run() -> None:
+        try:
+            outcome = evict_old_versions(version, timeout=timeout, home=resolved)
+        except Exception:  # eviction must never take the process down
+            return
+        if on_done is not None:
+            try:
+                on_done(outcome)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run, name="tbrain-evict", daemon=True)
+    thread.start()
+    return thread
+
+
 # ---------------------------------------------------------------------------
 # watcher
 # ---------------------------------------------------------------------------

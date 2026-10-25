@@ -179,3 +179,30 @@ def test_evict_does_not_use_default_killer(tmp_path, monkeypatch):
     )
     assert result["forced"] == [990401]
     assert called == [990401]
+
+
+def test_evict_in_background_runs_with_current_version(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    def fake_evict(version, timeout=0.0, home=None, **kwargs):
+        calls.append({"version": version, "home": home})
+        return {"requested": []}
+
+    monkeypatch.setattr(proc, "evict_old_versions", fake_evict)
+    done: list[dict] = []
+    thread = proc.evict_in_background("0.6.9", home=tmp_path, on_done=done.append)
+    thread.join(5)
+    assert not thread.is_alive()
+    assert [item["version"] for item in calls] == ["0.6.9"]
+    assert Path(calls[0]["home"]) == tmp_path.resolve()
+    assert done == [{"requested": []}]
+
+
+def test_evict_in_background_swallows_errors(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(proc, "evict_old_versions", boom)
+    thread = proc.evict_in_background("0.6.9", home=tmp_path)
+    thread.join(5)
+    assert not thread.is_alive()

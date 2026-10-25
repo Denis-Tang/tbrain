@@ -42,14 +42,32 @@
 
 ## 3. 进程登记与旧版本淘汰
 
-`~/.tbrain/processes/<pid>.json` 记录长驻进程：`pid`、`version`、`role`、`exe`、`started_at`、`updated_at`。desktop 与 MCP 进程启动时登记，退出时删除；升级后新版本会：
+`~/.tbrain/processes/<pid>.json` 记录长驻进程：`pid`、`version`、`role`、`exe`、`started_at`、`updated_at`。desktop 与 MCP 进程启动时登记，退出时删除；新版本会：
 
 1. 找到登记的旧版本进程，写 `processes/<pid>.exit`（内容是退出请求，含 requester／当前版本）；
 2. 旧进程的后台 watcher 线程发现 `.exit` 后优雅退出（MCP/desktop 由调用方注册回调）；
 3. 等待超时（默认 5 秒）仍未退出的，用 `taskkill /PID <pid> /T /F` 强制结束；
 4. 清理陈旧的登记与退出请求文件。
 
-边界：Claude/Codex 的 MCP 子进程由宿主持有，被结束后旧会话下一次工具调用会失败或由宿主自动重连；重开宿主/会话最稳妥。doctor 会把“旧版本进程仍在运行”显示为黄色提醒。
+**触发点（启动即淘汰）**：
+
+| 时机 | 行为 | 说明 |
+|---|---|---|
+| 桌面程序启动 | 先按 `current.txt` 加载的版本同步淘汰（最多等 3 秒），再判断单实例、再开窗口 | 旧版窗口被关闭后，新窗口才会出现；重申请单实例锁避免“淘汰了旧窗口却没有新窗口” |
+| MCP server 启动 | 登记后开一个 daemon 线程淘汰，不阻塞 stdio 握手 | 新版本一被宿主拉起来就清理旧版本，不拖慢 `initialize` |
+| `tbrain install` | 装完并切换 `current` 后淘汰其他版本 | 覆盖“直接装包、没走 upgrade”的情况 |
+| `tbrain upgrade` | 安装 → 淘汰 → 切换 `current` | 见第 4 节 |
+| `tbrain evict [--timeout]` | 手动触发 | 排障用；`doctor` 的进程项会指出还有哪些旧版本在跑 |
+
+边界：Claude/Codex 的 MCP 子进程由宿主持有，被结束后旧会话下一次工具调用会失败或由宿主自动重连；重开宿主/会话最稳妥。这也正是需要“启动即淘汰”的原因——旧进程不可能自己发现被替换。
+
+### 3.1 参考的现有做法
+
+- **固定入口（shim）**：rustup / asdf / nvm / `pyenv` 的 shim 每次都按 `current` 解析真实程序。Tbrain 的 `bin\tbrain.cmd` 就是这个模式，短命进程（hook、CLI）永远拿到新版本；但长驻守护进程不受益，必须额外清理。
+- **版本目录 + 薄启动器（Squirrel.Windows、Discord、Slack）**：安装在 `app-<版本>` 目录，更新器换链接；新版本第一次启动时先让旧实例退出，再删旧目录。Tbrain 用 `versions/<版本>` + `current.txt` 实现同一思路，淘汰逻辑放在“新版本启动时”。
+- **单实例锁（Electron `requestSingleInstanceLock`、Chrome、Windows 命名互斥体）**：单实例锁通常不带版本号，所以新旧版本会争同一把锁。Tbrain 沿用 `Local\Tbrain.Desktop` 互斥体，但先淘汰旧版本、再重新申请锁，避免旧版本“占着锁不放”。
+- **守护进程版本握手（gpg-agent、tmux、docker daemon）**：客户端连上后先问版本，不匹配就让 daemon 退出或重启。MCP 做不到——host 不替我们重启 server，server 也不能杀死宿主，所以只能在“新版本被启动”这一刻清理，并由 hook 的版本提醒告诉用户重开会话。
+- **Windows 安装器的常见组合**：进程登记 + 优雅退出信号（窗口消息/`.exit` 文件/命名事件）+ 超时强杀（`taskkill /T /F`）。Tbrain 用的是 `.exit` 文件（跨进程、可审计、失败可查）+ `taskkill`。
 
 ## 4. 升级流程
 

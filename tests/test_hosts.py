@@ -509,6 +509,11 @@ def test_render_produces_host_shapes():
     assert claude["hookSpecificOutput"]["additionalContext"] == "请保存"
     assert hosts.render("claude-code", block, "Stop") == {"decision": "block", "reason": "本轮尚未 save"}
     assert hosts.render("claude-code", HookResult(), "Stop") == {}
+    # Claude Code rejects hookSpecificOutput for PreCompact/SessionEnd; the same
+    # text is replayed by the SessionStart(compact) handler instead.
+    assert hosts.render("claude-code", context, "PreCompact") == {}
+    assert hosts.render("claude-code", context, "SessionEnd") == {}
+    assert hosts.render("claude-code", context, "SessionStart")["hookSpecificOutput"]["additionalContext"]
 
     assert hosts.render("dsh", context, "SessionStart")["additional_context"] == "请保存"
     assert hosts.render("codex", block, "Stop")["decision"] == "block"

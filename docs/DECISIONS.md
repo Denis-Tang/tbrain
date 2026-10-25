@@ -176,3 +176,12 @@
 - 完成页保留各宿主的重开／信任提示，只代表安装和配置结果；真实执行需要新会话验证。配置修改前保留 `.bak`。
 - 移除已不使用的 DSH Claude Hook 桥文件生成与模板，DSH 保持统一原生插件。
 - 验收：234 项自动化测试通过；隔离目录完成真实 EXE 首启安装、四宿主配置、开始菜单重开与连续 MCP 保存（1.34 秒、1.26 秒）。原生文件夹对话框已验证打开及取消，选择回填因自动化控件定位问题未完成；完整路径输入可用。测试后恢复本机 0.6.1，未修改真实 Agent 配置。
+
+### 0.6.2 稳定化修订（2026-10-25，用户要求）
+
+- 用户确认 0.6.2 的首次使用向导、宿主面板与项目二级页属于后来追加的范围，保留。
+- 修复 Claude Code 的 hook 输出：只有 SessionStart / UserPromptSubmit / Stop / SubagentStop / PreToolUse / PostToolUse / PostToolBatch / PostToolUseFailure / SubagentStart / UserPromptExpansion / PostModelSwitch 接受 `hookSpecificOutput.additionalContext`（docs/RESEARCH-hosts.md §1.5）。此前 PreCompact 返回 `hookSpecificOutput`，被宿主判为非法输出并整条丢弃，压缩前的用户指令也一起丢了。
+- Claude Code 压缩前的提醒改由压缩后的 `SessionStart(source=compact)` 补发：启动包之后追加“最近 5 条用户指令（压缩后补发）”，内容取自程序逐条记录的 U#，不依赖模型。其他宿主（DSH 原生插件、Codex、pi）仍在压缩前注入，行为不变。
+- 启动即淘汰：MCP server 登记后开 daemon 线程执行 `proc.evict_old_versions`，不阻塞 stdio 握手；桌面程序在单实例判断前同步淘汰（最多 3 秒），旧窗口退出后重新申请 `Local\Tbrain.Desktop` 互斥体，避免“旧窗口没了、新窗口也没开”。
+- `tbrain install` 在切换 `current` 后淘汰其他版本；新增 `tbrain evict [--timeout]` 手动触发。参考做法（固定入口 shim、Squirrel 版本目录、Electron 单实例锁、gpg-agent 版本握手）记录在 docs/UPGRADE.md §3.1。
+- 测试：238 项通过；新增 PreCompact/SessionEnd 不产生 `hookSpecificOutput`、压缩后补发指令、后台淘汰成功与异常吞掉四类用例。

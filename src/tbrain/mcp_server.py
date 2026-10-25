@@ -116,6 +116,8 @@ def run(home: Path | None = None) -> None:
 
         proc.register("mcp", service.version(), home=service.home)
         watcher = proc.start_watcher(on_exit=lambda: os._exit(0), home=service.home)
+        # 启动即淘汰：新版本一启动就通知旧版本进程退出（后台执行，不拖慢握手）。
+        proc.evict_in_background(service.version(), home=service.home)
     except Exception:
         watcher = None
     try:

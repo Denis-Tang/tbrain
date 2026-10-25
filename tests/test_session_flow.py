@@ -328,3 +328,28 @@ def test_project_prompt_through_save(env):
 def _load(service, row):
     text = service.store.read_text(service.vault_root() / row["path"])
     return handoff.parse(text), service.vault_root() / row["path"]
+
+
+def test_pre_compact_output_is_valid_for_claude_code(env):
+    """Claude Code 只接受部分事件的 hookSpecificOutput；PreCompact 不能返回它。"""
+    service, vault, work = env
+    session = "dddddddd-1111-2222-3333-444444444444"
+    prompt(service, "claude-code", session, work, "压缩后要能想起这条约束：测试只用临时目录")
+    pre = service.hook("claude-code", {"hook_event_name": "PreCompact", "session_id": session,
+                                       "cwd": str(work), "source": "auto"})
+    assert pre == {}
+    assert service.hook("claude-code", {"hook_event_name": "SessionEnd", "session_id": session,
+                                        "cwd": str(work)}) == {}
+
+
+def test_session_start_after_compact_replays_recent_user_instructions(env):
+    service, vault, work = env
+    session = "eeeeeeee-1111-2222-3333-444444444444"
+    prompt(service, "claude-code", session, work, "把启动包裁到宿主上限")
+    prompt(service, "claude-code", session, work, "另外保留压缩前的用户指令")
+    out = service.hook("claude-code", {"hook_event_name": "SessionStart", "session_id": session,
+                                       "cwd": str(work), "source": "compact"})
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "最近 5 条用户指令" in context
+    assert "另外保留压缩前的用户指令" in context

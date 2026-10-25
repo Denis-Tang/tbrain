@@ -254,6 +254,20 @@ def normalize(host: str, raw: dict) -> HookEvent:
     )
 
 
+# Events whose ``hookSpecificOutput.additionalContext`` the hook runner accepts.
+# Claude Code documents model-visible injection only for these events
+# (docs/RESEARCH-hosts.md §1.5); any other event name is rejected and the whole
+# hook output is dropped, so PreCompact/SessionEnd emit no ``hookSpecificOutput``
+# and the context is re-injected by the SessionStart(compact) handler instead.
+CONTEXT_EVENTS = {
+    "claude-code": frozenset({
+        "SessionStart", "SubagentStart", "UserPromptSubmit", "UserPromptExpansion",
+        "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch",
+        "Stop", "SubagentStop", "PostModelSwitch",
+    }),
+}
+
+
 def render(host: str, result, event: str = "") -> dict:
     """Neutral result -> the dict the host's hook runner expects on stdout."""
     key = config.canonical_host(host)
@@ -268,7 +282,10 @@ def render(host: str, result, event: str = "") -> dict:
                 "reason": reason}
     if decision == "block":
         return {"decision": "block", "reason": reason}
+    event_name = event or "UserPromptSubmit"
     if additional:
-        return {"hookSpecificOutput": {"hookEventName": event or "UserPromptSubmit",
-                                       "additionalContext": additional}}
+        allowed = CONTEXT_EVENTS.get(key)
+        if allowed is None or event_name in allowed:
+            return {"hookSpecificOutput": {"hookEventName": event_name,
+                                           "additionalContext": additional}}
     return {}

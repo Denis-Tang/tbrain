@@ -67,6 +67,9 @@ def _parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--root", type=Path, default=None, help="安装目录")
     upgrade.add_argument("--check", action="store_true", help="只检查更新，不升级")
 
+    evict = sub("evict", "让其他版本的 Tbrain 进程退出（当前版本保留）")
+    evict.add_argument("--timeout", type=float, default=5.0, help="等待优雅退出的秒数（默认 5）")
+
     sub("time", "显示当前时间（校时状态、时区）")
     sessions = sub("sessions", "列出会话总结")
     sessions.add_argument("--filter", default="all", help="状态筛选（默认 all）")
@@ -225,6 +228,13 @@ def _cmd_install(args) -> dict:
     if not version:
         raise RuntimeError("无法从安装包确定版本号，请用 --version 指定")
     result = installer.install_from_package(source, version, root=root, make_current=True)
+    try:
+        from . import proc
+
+        # 安装完成即淘汰其他版本：宿主下一次需要 MCP 时只会走固定入口拿到新版本。
+        result["evicted"] = proc.evict_old_versions(version, timeout=5.0, home=home)
+    except Exception as exc:
+        result["evicted"] = {"error": str(exc)}
     if not str(settings.install_root or "").strip():
         try:
             store.save({"install_root": str(root)})
@@ -287,6 +297,13 @@ def _cmd_upgrade(args) -> dict:
     return result
 
 
+def _cmd_evict(args) -> dict:
+    from . import proc
+
+    home = _app_home(args) or paths.app_home(None)
+    return proc.evict_old_versions(__version__, timeout=args.timeout, home=home)
+
+
 def _cmd_version(args) -> dict:
     from .settings import SettingsStore
 
@@ -314,6 +331,7 @@ def run_command(command: str, args) -> dict:
         "project": _cmd_project,
         "prompt": _cmd_prompt,
         "migrate": _cmd_migrate,
+        "evict": _cmd_evict,
         "version": _cmd_version,
     }
     return handlers[command](args)

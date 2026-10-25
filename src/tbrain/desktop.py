@@ -218,6 +218,21 @@ def run(home: Path | None = None):
         user.FindWindowW.restype = wintypes.HWND
         user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         user.SetForegroundWindow.argtypes = [wintypes.HWND]
+        # 启动即淘汰：先让其他版本的进程退出，否则旧窗口会一直占着单实例。
+        evicted: dict = {}
+        try:
+            from . import proc
+
+            evicted = proc.evict_old_versions(__version__, timeout=3.0, home=paths.app_home(home))
+        except Exception:
+            pass
+        if evicted.get("requested"):
+            # 旧版桌面退出后单实例锁才释放，这里重新申请一次，避免“淘汰了旧窗口却没有新窗口”。
+            kernel.CloseHandle(handle)
+            handle = kernel.CreateMutexW(None, False, "Local\\Tbrain.Desktop")
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            already_running = ctypes.get_last_error() == 183
         window = user.FindWindowW(None, "Tbrain")
         if already_running or window:
             if window:
@@ -232,6 +247,7 @@ def run(home: Path | None = None):
 
             proc.register("desktop", service.version(), home=service.home)
             watcher = proc.start_watcher(on_exit=stop.set, home=service.home)
+            proc.evict_in_background(service.version(), home=service.home)
         except Exception:
             watcher = None
         try:

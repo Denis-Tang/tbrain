@@ -361,6 +361,14 @@ def _version_warning(service) -> str:
         return ""
 
 
+def _recent_users_block(summary, title: str = "最近 5 条用户指令（防止压缩丢失约束）") -> str:
+    """Last five user instructions, replayed around compaction (deterministic)."""
+    lines = [f"## {title}"]
+    for item in summary.users[-5:]:
+        lines.append(f"### {item['id']}\n{item.get('text', '')}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _stop_reminder(service, summary: handoff.Summary, path: Path, host: str) -> HookResult:
     summary.header["last_activity_at"] = _utc_iso(service.now().utc)
     write_session(service, summary, path)
@@ -404,11 +412,8 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is None:
             return HookResult()
-        users = summary.users[-5:]
-        lines = ["## 压缩前重新注入的用户指令（防止压缩丢失约束）"]
-        for item in users:
-            lines.append(f"### {item['id']}\n{item.get('text', '')}")
-        lines.append("请在本轮结束前调用 save 保存最新进展。")
+        lines = [_recent_users_block(summary, "压缩前重新注入的用户指令（防止压缩丢失约束）"),
+                 "请在本轮结束前调用 save 保存最新进展。"]
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
         return HookResult(additional_context=(warning + "\n\n" if warning else "") + "\n".join(lines))
@@ -434,6 +439,10 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         _mark_active(service, summary, path)
         related = " ".join([summary.raw_command] + handoff.last_users(summary, 3)).strip()
         package = assemble_startup(service, summary, host, resume=True, related_query=related)
+        if source == "compact":
+            # Claude Code cannot inject context on PreCompact, so the reminder to
+            # save and the recent user instructions arrive here instead.
+            package += "\n\n" + _recent_users_block(summary, "最近 5 条用户指令（压缩后补发）")
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
         return HookResult(additional_context=(warning + "\n\n" if warning else "") + package)

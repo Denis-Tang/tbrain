@@ -34,7 +34,10 @@
     sessionsRequest: null,
     projects: [],
     projectsLoaded: false,
-    projectView: "",
+    projectViews: {},
+    projectViewsKey: "",
+    activeRoot: "",
+    detailsSeq: 0,
     timezones: [],
     settings: null,
     status: null,
@@ -302,7 +305,7 @@
     for (const [name, sessions] of [...groups].sort((a, b) => a[0].localeCompare(b[0], "zh-CN", {numeric: true}))) {
       const group = el("details", "session-group");
       const head = el("summary", "session-group-heading");
-      head.append(icon("chevron", ICONS.chevron), icon("group-folder", ICONS.folder), el("span", "group-name", name), el("span", "count", `${sessions.length} 个会话`));
+      head.append(icon("group-folder", ICONS.folder), el("span", "group-name", name), el("span", "count", `${sessions.length} 个会话`));
       const body = el("div", "session-group-body");
       group.append(head, body);
       group.addEventListener("toggle", () => {
@@ -493,9 +496,82 @@
 
   /* ---------- projects ---------- */
 
+  const ROOT_VIEW = "";
+  let treeObserver = null;
+  let menuTrigger = null;
+
+  function currentVaultPath() {
+    const settings = state.settings || (state.status && state.status.settings) || {};
+    return String(settings.vault_path || "");
+  }
+
+  function loadProjectViews() {
+    const key = `tbrain-project-views:${currentVaultPath()}`;
+    if (state.projectViewsKey === key) return;
+    state.projectViewsKey = key;
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || "{}");
+      state.projectViews = parsed && typeof parsed === "object" ? parsed : {};
+    } catch (error) {
+      state.projectViews = {};
+    }
+  }
+
+  function saveProjectViews() {
+    try {
+      localStorage.setItem(state.projectViewsKey, JSON.stringify(state.projectViews));
+    } catch (error) {
+      /* 本地存储不可用时只保留内存状态 */
+    }
+  }
+
+  function viewState(root = state.activeRoot) {
+    const key = root || "roots";
+    const value = state.projectViews[key];
+    if (!value || typeof value !== "object") state.projectViews[key] = {};
+    return state.projectViews[key];
+  }
+
+  function hasChildren(name) {
+    return state.projects.some(project => project && project.parent === name);
+  }
+
+  function childrenOf(name) {
+    return state.projects.filter(project => project && project.parent === name);
+  }
+
+  function expanded(name, root = state.activeRoot) {
+    const saved = viewState(root)[name];
+    return saved === undefined ? false : !!saved;
+  }
+
+  function rootProjects() {
+    return state.projects.filter(project => project && project.name
+      && (!project.parent || !state.projects.some(item => item.name === project.parent)));
+  }
+
+  function treeProjects(root = state.activeRoot) {
+    if (!root) return [];
+    const parent = state.projects.find(project => project && project.name === root);
+    return parent ? [parent, ...childrenOf(root)] : [];
+  }
+
+  // 新建的项目排在最前面：前端按创建时间倒序，同一时间按名称稳定排序。
+  function sortProjects(projects) {
+    return [...projects].sort((left, right) => {
+      const a = String((left && left.created_at) || "");
+      const b = String((right && right.created_at) || "");
+      if (a !== b) return a < b ? 1 : -1;
+      return String((left && left.name) || "").localeCompare(String((right && right.name) || ""), "zh-CN", { numeric: true });
+    });
+  }
+
   async function loadProjects(force = false) {
     if (force) state.sessionsLoaded = false;
-    if (state.projectsLoaded && !force) { renderProjects(); return; }
+    if (state.projectsLoaded && !force) {
+      renderProjects();
+      return;
+    }
     if (!hasBridge()) {
       state.projects = [];
       renderProjects();
@@ -503,8 +579,10 @@
     }
     try {
       const result = await call("projects");
-      state.projects = Array.isArray(result) ? result : Array.isArray(result.projects) ? result.projects : [];
+      const list = Array.isArray(result) ? result : Array.isArray(result.projects) ? result.projects : [];
+      state.projects = sortProjects(list);
       state.projectsLoaded = true;
+      loadProjectViews();
     } catch (error) {
       state.projects = [];
       if (!error.bridge) toast(errorText(error), true);
@@ -512,113 +590,398 @@
     renderProjects();
   }
 
-  function descendants(name) {
-    const result = new Set();
-    const queue = [name];
-    while (queue.length) {
-      const current = queue.shift();
-      for (const item of state.projects) {
-        if (!item || !item.name || item.parent !== current || result.has(item.name)) continue;
-        result.add(item.name);
-        queue.push(item.name);
-      }
-    }
-    return result;
-  }
-
   function renderProjects() {
+    closeMenu();
     const list = $("project-list");
-    const location = $("project-location");
     list.replaceChildren();
-    location.replaceChildren();
-    const parent = state.projects.find(project => project.name === state.projectView);
-    const projects = parent ? state.projects.filter(project => project.parent === parent.name)
-      : state.projects.filter(project => !project.parent || !state.projects.some(item => item.name === project.parent));
-    if (state.page === "projects") $("page-title").textContent = parent ? parent.name : PAGES.projects;
-    if (parent) {
-      const back = el("button", "button quiet project-back", "‹ 全部项目");
-      back.type = "button";
-      back.addEventListener("click", () => { state.projectView = ""; renderProjects(); document.querySelector("main").scrollTop = 0; });
-      location.append(back);
-      list.append(projectCard(parent, true));
-      const heading = el("div", "section-heading");
-      heading.append(el("h2", "", "子项目"), el("span", "count", `${projects.length} 个`));
-      list.append(heading);
-    } else {
-      state.projectView = "";
-      location.append(el("span", "count", `${projects.length} 个主项目 · ${state.projects.length} 个项目`));
+    const roots = rootProjects();
+    $("project-count").textContent = `全部项目（${roots.length}）`;
+    if (!hasBridge()) {
+      list.append(emptyState(OFFLINE));
+      refreshViewToggle(ROOT_VIEW);
+      return;
     }
-    if (!hasBridge()) { list.append(emptyState(OFFLINE)); return; }
-    if (!projects.length) list.append(emptyState(parent ? "暂无子项目" : "暂无项目"));
-    for (const project of projects) list.append(projectCard(project));
-    list.dataset.view = parent ? "detail" : "root";
+    if (!roots.length) list.append(emptyState("暂无项目"));
+    for (const project of roots) list.append(projectCard(project, ROOT_VIEW));
+    refreshViewToggle(ROOT_VIEW);
+    if (state.activeRoot && $("tree-dialog").open) renderTree();
   }
 
-  function projectCard(project, detailed = false) {
+  function refreshViewToggle(root = state.activeRoot) {
+    const visible = root ? treeProjects(root) : rootProjects();
+    const detailed = visible.length > 0 && visible.every(project => expanded(project.name, root));
+    const button = $(root ? "tree-view-toggle" : "projects-view-toggle");
+    if (!button) return;
+    button.textContent = detailed ? "简洁" : "详细";
+    button.disabled = visible.length === 0;
+  }
+
+  function applyCardState(card, open, root = state.activeRoot) {
+    card.classList.toggle("is-compact", !open);
+    const title = card.querySelector(".project-title");
+    const name = card.dataset.project || "";
+    if (title && (root || !hasChildren(name))) title.setAttribute("aria-expanded", String(!!open));
+    const details = card.querySelector(".card-details");
+    if (!details) return;
+    details.inert = !open;
+    details.setAttribute("aria-hidden", String(!open));
+  }
+
+  function projectCard(project, root) {
     const card = el("article", "project-card");
-    card.dataset.project = project.name;
-    if (!project.parent && !detailed) card.classList.add("drilldown");
-    const head = el("div", "project-head");
-    const toggle = el("button", "project-toggle");
-    toggle.type = "button";
-    if (project.parent || detailed) toggle.setAttribute("aria-expanded", "false");
+    card.dataset.project = project.name || "";
+    card.tabIndex = -1;
+    const heading = el("div", "project-heading");
+    const h2 = el("h2");
+    const title = el("button", "project-title");
+    title.type = "button";
+    title.append(icon("folder-icon", ICONS.folder));
     const info = el("span", "project-info");
     const nameLine = el("span", "project-name-line");
-    nameLine.append(el("span", "project-name", project.name || "未命名"));
-    if (project.parent) nameLine.append(el("span", "tag child", "子项目"));
-    const children = state.projects.filter(item => item.parent === project.name);
-    if (children.length) nameLine.append(el("span", "tag parent", `${children.length} 个子项目`));
+    nameLine.append(el("span", "name-text", project.name || "未命名"));
+    if (hasChildren(project.name)) {
+      const dot = el("span", "child-dot");
+      dot.setAttribute("aria-hidden", "true");
+      nameLine.append(dot);
+    }
     const paths = Array.isArray(project.paths) ? project.paths.filter((item) => typeof item === "string" && item.trim()) : [];
-    const pathText = paths.length ? (paths.length > 1 ? `${paths[0]} 等 ${paths.length} 个路径` : paths[0]) : "暂无路径";
-    const meta = el("span", "project-meta", `${Number(project.sessions) || 0} 个会话 · ${pathText}`);
-    info.append(nameLine, meta);
-    if (children.length && !detailed) info.append(el("span", "project-children", children.map(item => item.name).join(" · ")));
-    toggle.append(icon("folder-icon", ICONS.folder), info, icon("chevron project-chevron", ICONS.chevron));
+    const pathText = paths.length ? (paths.length > 1 ? `${paths[0]} 等 ${paths.length} 个路径` : paths[0]) : "未关联";
+    info.append(nameLine, el("span", "project-meta", `${Number(project.sessions) || 0} 个会话 · ${pathText}`));
+    title.append(info);
+    title.setAttribute("aria-label", hasChildren(project.name) ? `${project.name}，包含子项目` : String(project.name || ""));
+    h2.append(title);
+
+    const detailsId = `project-details-${++state.detailsSeq}`;
+    title.setAttribute("aria-controls", !root && hasChildren(project.name) ? "tree-dialog" : detailsId);
+    if (!root && hasChildren(project.name)) title.setAttribute("aria-haspopup", "dialog");
+
     const actions = el("div", "project-actions");
     const edit = el("button", "button secondary small", "编辑");
     edit.type = "button";
     edit.addEventListener("click", () => openProjectEditor(project));
-    const remove = el("button", "button quiet small", "删除");
-    remove.type = "button";
-    remove.addEventListener("click", () => askDelete(project));
-    actions.append(edit, remove);
-    head.append(toggle, actions);
+    const more = el("button", "button quiet menu-trigger", "···");
+    more.type = "button";
+    more.setAttribute("aria-label", `${project.name || ""} 更多操作`);
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false");
+    const entries = [];
+    if (!project.parent) entries.push({ label: "新建子项目", action: () => openProjectEditor(null, project) });
+    entries.push({ label: "复制名称", action: () => copyText(project.name || "") });
+    entries.push({ label: "删除项目", danger: true, action: () => askDelete(project) });
+    more.addEventListener("click", () => openMenu(more, entries));
+    card.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("button,a,input,textarea,label")) return;
+      event.preventDefault();
+      openMenu(card, entries, { x: event.clientX, y: event.clientY });
+    });
+    actions.append(edit, more);
+    heading.append(h2, actions);
 
-    const details = el("div", "project-details");
-    details.inert = true;
+    const details = el("div", "card-details");
+    details.id = detailsId;
     const inner = el("div", "details-inner");
     const body = el("div", "project-body");
-    const pathSection = el("div");
-    pathSection.append(el("div", "field-label", "工作目录"));
-    const pathList = el("div", "path-list");
+    const pathField = el("div", "project-field");
+    pathField.append(el("h3", "", "工作目录"));
     if (paths.length) {
       for (const path of paths) {
-        const row = el("div", "path-row");
+        const row = el("div", "project-path-row");
         row.append(el("span", "", path));
-        pathList.append(row);
+        const copy = el("button", "button quiet small", "复制");
+        copy.type = "button";
+        copy.addEventListener("click", () => copyText(path));
+        row.append(copy);
+        pathField.append(row);
       }
     } else {
-      pathList.append(el("p", "field-empty", "暂无路径"));
+      pathField.append(el("p", "field-empty", "未关联"));
     }
-    pathSection.append(pathList);
-    const promptSection = el("div");
-    promptSection.append(el("div", "field-label", "项目提示词"));
-    const promptContainer = el("div", "prompt-editor");
-    promptSection.append(promptContainer);
-    body.append(pathSection, promptSection);
+    body.append(pathField);
+
+    if (hasChildren(project.name) || project.allow_child) {
+      const switchRow = el("div", "switch-row");
+      const switchText = el("div", "switch-text");
+      switchText.append(el("h3", "", "允许读取子项目"));
+      const switchLabel = el("label", "switch");
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = !!project.allow_child;
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-label", "允许读取子项目");
+      toggle.addEventListener("change", () => {
+        const desired = toggle.checked;
+        withBusy(toggle, async () => {
+          try {
+            const saved = await call("project_save", project.name, project.paths || [], project.parent || "", desired, "");
+            project.allow_child = !!(saved && saved.allow_child !== undefined ? saved.allow_child : desired);
+            toast("已保存");
+          } catch (error) {
+            toggle.checked = !desired;
+            throw error;
+          }
+        });
+      });
+      switchLabel.append(toggle, el("span"));
+      switchRow.append(switchText, switchLabel);
+      body.append(switchRow);
+    }
+
+    const footer = el("div", "project-footer");
+    const prompt = el("button", "button secondary small", "项目提示词");
+    prompt.type = "button";
+    prompt.addEventListener("click", () => openProjectPrompt(project));
+    footer.append(prompt);
+    body.append(footer);
     inner.append(body);
     details.append(inner);
-    card.append(head, details);
+    card.append(heading, details);
 
-    toggle.addEventListener("click", () => {
-      if (!project.parent && !detailed) { state.projectView = project.name; renderProjects(); document.querySelector("main").scrollTop = 0; return; }
-      const open = !card.classList.contains("open");
-      card.classList.toggle("open", open);
-      details.inert = !open;
-      toggle.setAttribute("aria-expanded", String(open));
-      if (open && !promptContainer.dataset.loaded) loadProjectPrompt(project, promptContainer);
+    const activate = () => toggleCard(project, card, root);
+    title.addEventListener("click", activate);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button,a,input,textarea,label")) return;
+      if (getSelection().toString()) return;
+      activate();
     });
+    applyCardState(card, expanded(project.name, root), root);
     return card;
+  }
+
+  function toggleCard(project, card, root) {
+    if (hasChildren(project.name)) {
+      if (!root) {
+        openTree(project);
+        return;
+      }
+      if (root !== project.name) {
+        state.activeRoot = project.name;
+        renderTree();
+        return;
+      }
+    }
+    const open = !expanded(project.name, root);
+    viewState(root)[project.name] = open;
+    applyCardState(card, open, root);
+    refreshViewToggle(root);
+    saveProjectViews();
+  }
+
+  function openTree(project) {
+    state.activeRoot = project.name;
+    $("tree-dialog").showModal();
+    renderTree();
+  }
+
+  function renderTree() {
+    const board = $("tree-board");
+    const dialog = $("tree-dialog");
+    if (!board) return;
+    if (treeObserver) treeObserver.disconnect();
+    treeObserver = null;
+    board.replaceChildren();
+    const visible = treeProjects();
+    if (!visible.length) {
+      if (dialog.open) dialog.close();
+      return;
+    }
+    const frame = el("div", "tree-frame");
+    frame.classList.toggle("is-leaf", visible.length === 1);
+    const lines = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    lines.classList.add("tree-lines");
+    lines.setAttribute("aria-hidden", "true");
+    lines.append(document.createElementNS("http://www.w3.org/2000/svg", "path"));
+    const children = el("div", "tree-children");
+    for (const child of visible.slice(1)) children.append(projectCard(child, state.activeRoot));
+    frame.append(lines, projectCard(visible[0], state.activeRoot), children);
+    board.append(frame);
+    $("tree-title").textContent = visible[0].name || "";
+    refreshViewToggle(state.activeRoot);
+    if (window.ResizeObserver) {
+      treeObserver = new ResizeObserver(drawConnections);
+      treeObserver.observe(frame);
+      frame.querySelectorAll(".project-card").forEach((card) => treeObserver.observe(card));
+    }
+    requestAnimationFrame(drawConnections);
+  }
+
+  function drawConnections() {
+    const dialog = $("tree-dialog");
+    const board = $("tree-board");
+    if (!dialog || !board || !dialog.open) return;
+    const frame = board.querySelector(".tree-frame");
+    const svg = frame && frame.querySelector("svg.tree-lines");
+    const rootCard = frame && frame.querySelector(":scope > .project-card");
+    if (!frame || !svg || !rootCard) return;
+    const bounds = frame.getBoundingClientRect();
+    svg.setAttribute("viewBox", `0 0 ${bounds.width} ${bounds.height}`);
+    const path = svg.querySelector("path");
+    const root = rootCard.getBoundingClientRect();
+    const children = [...frame.querySelectorAll(".tree-children > .project-card")].map((card) => card.getBoundingClientRect());
+    if (!children.length) {
+      path.setAttribute("d", "");
+      return;
+    }
+    const x = root.right - bounds.left;
+    const y = (root.top + root.bottom) / 2 - bounds.top;
+    const middle = (root.right + children[0].left) / 2 - bounds.left;
+    const points = children.map((rect) => ({ x: rect.left - bounds.left, y: (rect.top + rect.bottom) / 2 - bounds.top }));
+    const top = Math.min(y, ...points.map((point) => point.y));
+    const bottom = Math.max(y, ...points.map((point) => point.y));
+    path.setAttribute("d", `M ${x} ${y} H ${middle} M ${middle} ${top} V ${bottom} ${points.map((point) => `M ${middle} ${point.y} H ${point.x}`).join(" ")}`);
+  }
+
+  function closeTreeDialog() {
+    const previous = state.activeRoot;
+    closeMenu();
+    state.activeRoot = "";
+    if (treeObserver) {
+      treeObserver.disconnect();
+      treeObserver = null;
+    }
+    $("tree-board").replaceChildren();
+    if (!previous) return;
+    const card = $("project-list").querySelector(`[data-project="${escapeSelector(previous)}"]`);
+    const title = card && card.querySelector(".project-title");
+    if (title) title.focus({ preventScroll: true });
+  }
+
+  function escapeSelector(value) {
+    const text = String(value || "");
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(text);
+    return text.replace(/["\\]/g, "\\$&");
+  }
+
+  function closeMenu(restoreFocus = false) {
+    const menu = $("project-menu");
+    if (!menu || menu.hidden) return;
+    const trigger = menuTrigger;
+    menu.hidden = true;
+    menu.replaceChildren();
+    menuTrigger = null;
+    if (!trigger) return;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  }
+
+  function openMenu(trigger, entries, position = null) {
+    const menu = $("project-menu");
+    if (!menu) return;
+    if (menuTrigger === trigger && !menu.hidden) {
+      closeMenu(true);
+      return;
+    }
+    closeMenu();
+    (trigger.closest("dialog") || document.body).append(menu);
+    menu.replaceChildren();
+    menuTrigger = trigger;
+    trigger.setAttribute("aria-expanded", "true");
+    for (const entry of entries) {
+      const item = el("button", "menu-item", entry.label);
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      if (entry.danger) item.classList.add("destructive");
+      item.addEventListener("click", () => {
+        closeMenu(true);
+        entry.action();
+      });
+      menu.append(item);
+    }
+    menu.hidden = false;
+    const anchor = trigger.getBoundingClientRect();
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = position ? position.x : anchor.right - width;
+    const top = position ? position.y : anchor.bottom + 7;
+    const leftClamped = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+    const topClamped = top + height > window.innerHeight - 8 ? Math.max(8, anchor.top - height - 7) : Math.max(8, top);
+    menu.style.left = `${leftClamped}px`;
+    menu.style.top = `${topClamped}px`;
+    const first = menu.firstElementChild;
+    if (first) first.focus({ preventScroll: true });
+  }
+
+  async function copyText(text) {
+    const value = String(text || "");
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast("已复制");
+    } catch (error) {
+      toast("复制失败", true);
+    }
+  }
+
+  function openProjectEditor(project, parent = null) {
+    const parentName = project ? project.parent || "" : parent ? parent.name : "";
+    state.editing = {
+      original: project ? project.name : "",
+      parent: parentName,
+      paths: project && Array.isArray(project.paths) ? [...project.paths] : [],
+    };
+    $("project-dialog-title").textContent = project ? "编辑项目" : parentName ? "新建子项目" : "新增项目";
+    const parentLabel = $("project-parent-label");
+    parentLabel.hidden = !parentName;
+    parentLabel.textContent = parentName ? `主项目：${parentName}` : "";
+    $("project-name").value = project ? project.name : "";
+    renderEditorPaths();
+    $("project-allow-child").checked = !!(project && project.allow_child);
+    $("save-project").textContent = project ? "保存修改" : "创建项目";
+    $("project-dialog").showModal();
+    $("project-name").focus();
+  }
+
+  function renderEditorPaths() {
+    const container = $("project-paths");
+    container.replaceChildren();
+    state.editing.paths.forEach((value, index) => {
+      const row = el("div", "path-edit-row");
+      const input = el("input");
+      input.type = "text";
+      input.value = value;
+      input.spellcheck = false;
+      input.autocomplete = "off";
+      input.setAttribute("aria-label", "工作目录");
+      input.addEventListener("input", () => {
+        state.editing.paths[index] = input.value;
+      });
+      const remove = el("button", "button quiet small", "移除");
+      remove.type = "button";
+      remove.setAttribute("aria-label", "移除路径");
+      remove.addEventListener("click", () => {
+        state.editing.paths.splice(index, 1);
+        renderEditorPaths();
+      });
+      row.append(input, remove);
+      container.append(row);
+    });
+    if (!state.editing.paths.length) container.append(el("p", "field-empty", "暂无路径"));
+  }
+
+  async function chooseFolder() {
+    try {
+      const result = await call("choose_vault");
+      const path = typeof result.path === "string" ? result.path : typeof result.folder === "string" ? result.folder : "";
+      return path.trim();
+    } catch (error) {
+      if (!error.bridge) toast(errorText(error), true);
+      return "";
+    }
+  }
+
+  function askDelete(project) {
+    state.deleting = project.name || "";
+    $("delete-question").textContent = `删除“${project.name || ""}”？`;
+    $("delete-dialog").showModal();
+  }
+
+  function openProjectPrompt(project) {
+    $("prompt-dialog-title").textContent = "项目提示词";
+    $("prompt-dialog-project").textContent = project.name || "";
+    const container = $("prompt-editor");
+    container.replaceChildren();
+    delete container.dataset.loaded;
+    $("prompt-dialog").showModal();
+    loadProjectPrompt(project, container);
   }
 
   async function loadProjectPrompt(project, container) {
@@ -641,7 +1004,7 @@
   function renderPromptEditor(project, container, result) {
     const sections = result.sections && typeof result.sections === "object" ? result.sections : {};
     container.replaceChildren();
-    const editor = el("div", "prompt-editor");
+    const editor = el("div", "prompt-form");
     const inputs = {};
     PROMPT_SECTIONS.forEach((section) => {
       const field = el("div", "prompt-field");
@@ -706,73 +1069,6 @@
     }
   }
 
-  function openProjectEditor(project) {
-    state.editing = {
-      original: project ? project.name : "",
-      paths: project && Array.isArray(project.paths) ? [...project.paths] : [],
-    };
-    $("project-dialog-title").textContent = project ? "编辑项目" : "新增项目";
-    $("project-name").value = project ? project.name : "";
-    renderEditorPaths();
-    const parent = $("project-parent");
-    parent.replaceChildren();
-    parent.append(new Option("无", ""));
-    const blocked = project ? descendants(project.name) : new Set();
-    for (const item of state.projects) {
-      if (!item || !item.name) continue;
-      if (project && (item.name === project.name || blocked.has(item.name))) continue;
-      parent.append(new Option(item.name, item.name));
-    }
-    parent.value = project && project.parent ? project.parent : "";
-    $("project-allow-child").checked = !!(project && project.allow_child);
-    $("save-project").textContent = project ? "保存" : "创建";
-    $("project-dialog").showModal();
-    $("project-name").focus();
-  }
-
-  function renderEditorPaths() {
-    const container = $("project-paths");
-    container.replaceChildren();
-    state.editing.paths.forEach((value, index) => {
-      const row = el("div", "path-edit-row");
-      const input = el("input");
-      input.type = "text";
-      input.value = value;
-      input.spellcheck = false;
-      input.autocomplete = "off";
-      input.setAttribute("aria-label", "工作目录");
-      input.addEventListener("input", () => {
-        state.editing.paths[index] = input.value;
-      });
-      const remove = el("button", "button quiet small", "移除");
-      remove.type = "button";
-      remove.setAttribute("aria-label", "移除路径");
-      remove.addEventListener("click", () => {
-        state.editing.paths.splice(index, 1);
-        renderEditorPaths();
-      });
-      row.append(input, remove);
-      container.append(row);
-    });
-    if (!state.editing.paths.length) container.append(el("p", "field-empty", "暂无路径"));
-  }
-
-  async function chooseFolder() {
-    try {
-      const result = await call("choose_vault");
-      const path = typeof result.path === "string" ? result.path : typeof result.folder === "string" ? result.folder : "";
-      return path.trim();
-    } catch (error) {
-      if (!error.bridge) toast(errorText(error), true);
-      return "";
-    }
-  }
-
-  function askDelete(project) {
-    state.deleting = project.name || "";
-    $("delete-question").textContent = `删除“${project.name || ""}”？`;
-    $("delete-dialog").showModal();
-  }
 
   /* ---------- settings ---------- */
 
@@ -1167,11 +1463,35 @@
         if (path && !paths.includes(path)) paths.push(path);
       }
       withBusy($("save-project"), async () => {
-        await call("project_save", name, paths, $("project-parent").value, $("project-allow-child").checked, state.editing.original);
+        await call("project_save", name, paths, state.editing.parent || "", $("project-allow-child").checked, state.editing.original);
         $("project-dialog").close();
         await loadProjects(true);
         toast("已保存");
       });
+    });
+    $("close-tree").addEventListener("click", () => $("tree-dialog").close());
+    $("tree-dialog").addEventListener("close", closeTreeDialog);
+    $("new-child").addEventListener("click", () => {
+      const root = state.projects.find(project => project.name === state.activeRoot);
+      if (root) openProjectEditor(null, root);
+    });
+    for (const [id, inTree] of [["projects-view-toggle", false], ["tree-view-toggle", true]]) {
+      $(id).addEventListener("click", () => {
+        const root = inTree ? state.activeRoot : ROOT_VIEW;
+        const visible = root ? treeProjects(root) : rootProjects();
+        const open = !visible.every(project => expanded(project.name, root));
+        for (const project of visible) viewState(root)[project.name] = open;
+        const container = inTree ? $("tree-board") : $("project-list");
+        container.querySelectorAll(".project-card").forEach(card => applyCardState(card, open, root));
+        refreshViewToggle(root);
+        saveProjectViews();
+      });
+    }
+    $("close-prompt").addEventListener("click", () => $("prompt-dialog").close());
+    $("prompt-dialog").addEventListener("close", () => {
+      const container = $("prompt-editor");
+      container.replaceChildren();
+      delete container.dataset.loaded;
     });
     $("cancel-delete").addEventListener("click", () => $("delete-dialog").close());
     $("confirm-delete").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
@@ -1180,6 +1500,19 @@
       await loadProjects(true);
       toast("已删除");
     }));
+    document.addEventListener("pointerdown", (event) => {
+      const menu = $("project-menu");
+      if (!menu || menu.hidden || menu.contains(event.target)) return;
+      if (menuTrigger && menuTrigger.contains(event.target)) return;
+      closeMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      const menu = $("project-menu");
+      if (event.key !== "Escape" || !menu || menu.hidden) return;
+      event.stopPropagation();
+      closeMenu(true);
+    }, true);
+    window.addEventListener("resize", () => closeMenu());
 
     $("settings-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1197,7 +1530,6 @@
         const result = await call("save_settings", values);
         state.sessionsLoaded = false;
         state.projectsLoaded = false;
-        state.projectView = "";
         if (result.settings && typeof result.settings === "object") state.settings = result.settings;
         toast(result.restart_required ? "已保存，需重启" : "已保存");
         try {

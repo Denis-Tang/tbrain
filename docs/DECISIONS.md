@@ -185,3 +185,14 @@
 - 启动即淘汰：MCP server 登记后开 daemon 线程执行 `proc.evict_old_versions`，不阻塞 stdio 握手；桌面程序在单实例判断前同步淘汰（最多 3 秒），旧窗口退出后重新申请 `Local\Tbrain.Desktop` 互斥体，避免“旧窗口没了、新窗口也没开”。
 - `tbrain install` 在切换 `current` 后淘汰其他版本；新增 `tbrain evict [--timeout]` 手动触发。参考做法（固定入口 shim、Squirrel 版本目录、Electron 单实例锁、gpg-agent 版本握手）记录在 docs/UPGRADE.md §3.1。
 - 测试：238 项通过；新增 PreCompact/SessionEnd 不产生 `hookSpecificOutput`、压缩后补发指令、后台淘汰成功与异常吞掉四类用例。
+
+## 8. 项目界面重做（仿 Shared Brain 0.5.2，2026-10-26）
+
+参考 `https://github.com/Denis-Tang/second-brain/releases/tag/v0.5.2` 的源码前端（`src/shared_brain/web/`），只作为界面与交互参照，不搬旧包。
+
+- 项目页只列主项目；前端读取 `projects` 接口后按 `created_at` 倒序排序（同一时间按名称稳定排序），新建项目在最上面。后端 `store.projects()`、接口与 Markdown 文件格式都不变，排序只在前端做。
+- 带子项目的卡片点击打开独立悬浮层 `tree-dialog`：根项目在左、直接子项目在右，SVG 折线从根卡片右缘连到各子卡片左缘；子项目若还有下级，点击该卡片把树根切换成它继续展开，避免深层项目不可达。
+- 卡片结构沿用 0.5.2：`编辑` + `···` 菜单（新建子项目/复制名称/删除项目），右键卡片也打开同一菜单；项目页和悬浮层各一个“简洁/详细”开关，展开状态按知识库写入 localStorage。
+- Tbrain 独有项保留：项目提示词移到独立对话框编辑；“允许读取子项目”开关在编辑对话框和卡片详情都可切换，详情里的切换直接调 `project_save` 保存。
+- 新增/编辑项目对话框去掉父项目下拉：子项目从卡片菜单“新建子项目”进入，对话框顶部显示“主项目：X”；工作目录仍可手动输入，也可用“添加文件夹”选择。
+- 本次只改前端（`app.js`、`index.html`、`style.css`）：排序、悬浮树、菜单、对话框都在页面侧完成；后端 Python 不动，以后改这些界面只需替换 web 资源，不用重打 PyInstaller 包。

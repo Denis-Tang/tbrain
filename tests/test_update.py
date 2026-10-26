@@ -129,6 +129,24 @@ def test_check_latest_degrades_to_structured_failure(tmp_path):
     assert result["latest"] == ""
 
 
+def test_fetch_latest_retries_when_proxy_bypass_list_is_malformed(monkeypatch):
+    calls = []
+
+    def fake_get(url, **options):
+        calls.append(options)
+        if len(calls) == 1:
+            raise httpx.InvalidURL("Invalid port: ':1]'")
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, request=request, json={"tag_name": "v0.6.4", "assets": [], "body": ""})
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setattr(update.httpx, "get", fake_get)
+    result = update.fetch_latest()
+    assert result["version"] == "0.6.4"
+    assert calls[1]["trust_env"] is False
+    assert calls[1]["proxy"] == "http://127.0.0.1:7890"
+
+
 def test_check_latest_keeps_stale_cache_on_failure(tmp_path):
     update.check_latest(tmp_path, force=True, fetcher=lambda timeout=8.0: release_for())
 

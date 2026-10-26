@@ -99,6 +99,29 @@ def _select_asset(payload: dict, version: str) -> dict:
     return {}
 
 
+def _environment_proxy() -> str:
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _request_latest(headers: dict, timeout: float):
+    """Request the release API, retrying without the proxy-bypass list if it is malformed."""
+    try:
+        return httpx.get(LATEST_RELEASE_API, headers=headers, timeout=timeout, follow_redirects=True)
+    except httpx.InvalidURL:
+        # Some environments list bracketed IPv6 hosts (for example ``[::1]``) in NO_PROXY;
+        # httpx parses those entries as URLs and fails before sending anything. Retry with an
+        # explicit proxy and without reading the environment again.
+        options = {"headers": headers, "timeout": timeout, "follow_redirects": True, "trust_env": False}
+        proxy = _environment_proxy()
+        if proxy:
+            options["proxy"] = proxy
+        return httpx.get(LATEST_RELEASE_API, **options)
+
+
 def fetch_latest(timeout: float = 8.0) -> dict:
     """Ask GitHub for the newest published release, raising UpdateError on any failure."""
     headers = {
@@ -107,7 +130,7 @@ def fetch_latest(timeout: float = 8.0) -> dict:
         "User-Agent": f"tbrain/{__version__}",
     }
     try:
-        response = httpx.get(LATEST_RELEASE_API, headers=headers, timeout=timeout, follow_redirects=True)
+        response = _request_latest(headers, timeout)
     except (httpx.HTTPError, httpx.InvalidURL, OSError):
         # httpx.InvalidURL is not an HTTPError and is also raised for a malformed proxy setting,
         # which would otherwise escape the "never raises" contract of check_latest.

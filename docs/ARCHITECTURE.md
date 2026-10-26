@@ -9,7 +9,7 @@
 | 版本/宿主 | `installer.py`、`update.py`、`proc.py`、`paths.py`、`hosts/*`、`cli.py`、`integrations/*`、`scripts/build.ps1` | B（hosts-versioning） | 固定入口、版本化安装、旧进程清理、connect/disconnect/doctor/upgrade、四宿主配置与 hook 适配 |
 | 存储/索引 | `clock.py`、`naming.py`、`store.py`、`index.py` | A（core-store） | 时间工具、会话命名、vault 文件读写与所有权、SQLite 索引与中文检索 |
 | 流程层 | `handoff.py`、`identity.py`、`hooks.py`、`session.py`、`service.py`、`prompt.py`、`mcp_server.py`、`desktop.py` | Lead | bootstrap/save/search/resume、hook 语义、handoff/v1、项目提示词校验、MCP 工具、桌面后端 API |
-| 前端 | `web/index.html`、`web/app.js`、`web/bridge.js`、`web/style.css` | C（frontend） | 三页 UI；按 `本地前端设计基本要求` |
+| 前端 | `web/index.html`、`web/app.js`、`web/bridge.js`、`web/style.css` | C（frontend） | 三页 UI；按本地前端设计基本要求（圆角、非线性动画、视觉对齐） |
 
 公共约定：
 - Python 3.11+，UTF-8 文本（文件读写统一 `utf-8`，写出用 `utf-8` 无 BOM）。Windows 行尾用 `\r\n` 或 `\n` 均可，但同一文件保持一致（新建文件用 `\n`）。

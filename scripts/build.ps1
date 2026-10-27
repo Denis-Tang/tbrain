@@ -117,6 +117,16 @@ if __name__ == "__main__":
     Compress-Archive -Path $packageDirectory -DestinationPath $zipPath -CompressionLevel Optimal
     $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
     Set-Content -LiteralPath "$zipPath.sha256" -Value "$hash  $(Split-Path -Leaf $zipPath)" -Encoding ascii
+    $archiveName = Split-Path -Leaf $zipPath
+    @{
+        version = $version
+        asset = @{
+            name = $archiveName
+            url = "https://github.com/Denis-Tang/tbrain/releases/download/v$version/$archiveName"
+            size = (Get-Item -LiteralPath $zipPath).Length
+            sha256 = $hash
+        }
+    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'latest.json') -Encoding utf8NoBOM
     Write-Host "Release archive: $zipPath"
     Write-Host "SHA256: $hash"
     Write-Host "Built $packageDirectory (v$version)"

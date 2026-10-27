@@ -117,7 +117,7 @@ docs/                  调研、架构、决策、升级、迁移文档
 ## Advanced Usage
 
 - **接入或断开宿主**：`tbrain.cmd connect claude-code|codex|dsh|pi` / `disconnect <host>`；修改配置前生成同目录 `.bak`。Codex 的 Hook 需要在 `/hooks` 里审核信任。
-- **升级与回退**：桌面设置页可检查更新；也可 `tbrain.cmd upgrade --from <包目录或 zip>`，`tbrain.cmd rollback` 切回上一个已安装版本。版本目录默认保留两份。
+- **升级与回退**：点击桌面左下角版本号检查更新，发现新版后选择升级或取消；更新读取 Release 附件 `latest.json`，不使用 GitHub 查询 API。也可 `tbrain.cmd upgrade --from <包目录或 zip>`，`tbrain.cmd rollback` 切回上一个已安装版本。版本目录默认保留两份。
 - **迁移旧数据**：`tbrain.cmd migrate --old-home <旧应用数据目录> --dry-run` 先看报告，确认后加 `--execute`。旧数据只读，不删除。
 - **手动检查**：`tbrain.cmd doctor` 检查安装、版本、进程与四宿主配置状态；真实执行仍以宿主新会话为准。
 - **验证脚本**：`scripts/verify/upgrade_sim.py`（隔离目录里的真实升级模拟）、`scripts/verify/real_hosts.py`（真实宿主端到端，会产生少量模型费用）。
@@ -139,7 +139,7 @@ python -m venv .venv
 pwsh scripts/build.ps1
 ```
 
-产物为 `dist/tbrain/`（可直接运行）与 `dist/tbrain-<版本>-windows-x64.zip`、同名 `.sha256`。版本号只在 `src/tbrain/__init__.py` 的 `__version__` 写一处，`pyproject.toml` 与桌面程序集都从它读取。
+产物为 `dist/tbrain/`（可直接运行）、`dist/tbrain-<版本>-windows-x64.zip`、同名 `.sha256` 和更新清单 `dist/latest.json`；发布时需上传三份附件。版本号只在 `src/tbrain/__init__.py` 的 `__version__` 写一处，`pyproject.toml` 与桌面程序集都从它读取。
 
 ## Roadmap
 

@@ -137,7 +137,7 @@ def test_fetch_latest_retries_when_proxy_bypass_list_is_malformed(monkeypatch):
         if len(calls) == 1:
             raise httpx.InvalidURL("Invalid port: ':1]'")
         request = httpx.Request("GET", url)
-        return httpx.Response(200, request=request, json={"tag_name": "v0.6.4", "assets": [], "body": ""})
+        return httpx.Response(200, request=request, json=release_for(version="0.6.4", payload=b"archive"))
 
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
     monkeypatch.setattr(update.httpx, "get", fake_get)
@@ -145,6 +145,26 @@ def test_fetch_latest_retries_when_proxy_bypass_list_is_malformed(monkeypatch):
     assert result["version"] == "0.6.4"
     assert calls[1]["trust_env"] is False
     assert calls[1]["proxy"] == "http://127.0.0.1:7890"
+
+
+@pytest.mark.parametrize("digest", ["a" * 64, "broken"])
+def test_fetch_latest_reads_static_manifest_and_requires_digest(monkeypatch, digest):
+    payload = release_for(asset={"sha256": digest})
+
+    def fake_get(url, **options):
+        assert url == "https://github.com/Denis-Tang/tbrain/releases/latest/download/latest.json"
+        assert "api.github.com" not in url
+        return httpx.Response(200, request=httpx.Request("GET", url), json=payload)
+
+    monkeypatch.setattr(update.httpx, "get", fake_get)
+    if digest == "broken":
+        with pytest.raises(update.UpdateError, match="SHA256"):
+            update.fetch_latest()
+    else:
+        result = update.fetch_latest()
+        assert result["version"] == NEXT_VERSION
+        assert result["asset"]["sha256"] == digest
+        assert result["notes"] == payload["notes"]
 
 
 def test_check_latest_keeps_stale_cache_on_failure(tmp_path):

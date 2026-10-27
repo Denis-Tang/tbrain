@@ -71,9 +71,9 @@
 
 ## 4. 升级流程
 
-`tbrain upgrade` / 桌面“检查更新并升级”：
+`tbrain upgrade` / 点击桌面左下角版本号检查、选择“升级”（也可取消）：
 
-1. **检查**：GitHub Releases（`Denis-Tang/tbrain`，匿名 API，结果缓存 6 小时，失败/限流降级为结构化结果，不抛异常）；
+1. **检查**：读取 `https://github.com/Denis-Tang/tbrain/releases/latest/download/latest.json`；不调用 GitHub REST API，不占用匿名 API 查询额度。结果缓存 6 小时，手动检查间隔至少 1 分钟；失败显示简短原因；
 2. **下载**：流式写入 `~/.tbrain/updates/<版本>/`，校验 SHA256；下载期间不碰安装目录；
 3. **校验**：检查压缩包结构（`tbrain/` 根、必需文件、`_internal/`）；
 4. **安装**：解压并复制到 `versions\<新版本>`（同卷先 staging 再 rename，半拷贝的目录永远不会被选中）；
@@ -153,7 +153,7 @@ MCP 参数为 `--home <应用数据目录> mcp`。原生插件通过固定入口
 - **升级后旧会话还在用旧版本？** 宿主按会话缓存 MCP 进程与 hook；新会话生效。重开宿主最稳。旧版本进程会被新版本通知退出/强制结束（见第 3 节）。
 - **Claude/Codex 配置里有旧 Shared Brain 条目？** 第 6 步迁移/解绑流程统一处理；`doctor` 会把 DSH 的旧 `shared-brain-mcp` / `shared-brain-lifecycle` 残留标红。
 - **想换安装目录？** 在设置里改 `install_root` 后重新 `tbrain install`，再对每个宿主重新 `connect`（宿主配置写的是安装目录绝对路径）。
-- **发布资产要求？** `update` 只接受带 SHA256 摘要的 GitHub Release 资产（资产元数据 `digest` 字段，或发布时附带 `.sha256` 校验文件供人工核对）；没有摘要的包会被拒绝下载。
+- **发布资产要求？** `scripts/build.ps1` 生成 ZIP、`.sha256` 和 `latest.json`，每个正式 Release 都要上传三份附件。`latest.json` 包含版本号和安装包的名称、固定下载地址、大小、SHA256；可填写 `notes` 作为更新说明。程序读取清单中的摘要校验下载内容；`.sha256` 供人工核对。不要仅上传安装包却遗漏清单。
 - **安装包里的版本号从哪来？** 构建时 `scripts/build.ps1` 把 `src/tbrain/__init__.py` 的版本写入包内 `VERSION` 文件（PyInstaller 目录里没有可读的 `tbrain/__init__.py`），`tbrain install/upgrade` 从该文件推断版本；源头仍是 `__version__`。
 - **升级包如何生成？** `pwsh -File scripts/build.ps1`，产物 `dist/tbrain` 直接匹配 `installer.REQUIRED_FILES`；版本号只从 `src/tbrain/__init__.py` 读取。
 

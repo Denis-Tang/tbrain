@@ -21,7 +21,7 @@
       <button type="button" class="nav-item" data-page="settings" aria-label="设置" title="设置"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4m6 0h8M3 17h8m6 0h4"/><circle cx="10" cy="7" r="3"/><circle cx="14" cy="17" r="3"/></svg></span><span class="nav-label">设置</span></button>
     </nav>
     <div class="foot">
-      <button type="button" class="foot-version" id="app-version" title="设置">v—</button>
+      <button type="button" class="foot-version" id="app-version" title="检查更新" aria-haspopup="dialog" aria-controls="update-dialog">v—</button>
       <div class="foot-status"><span class="status-dot" id="ready-dot" aria-hidden="true"></span><span id="ready-label">未连接</span></div>
     </div>
   </aside>
@@ -120,15 +120,6 @@
         </article>
       </form>
 
-      <article class="card">
-        <div class="card-heading"><h2>版本</h2><span class="version-pill" id="version-value">v—</span></div>
-        <div class="update-row">
-          <p class="update-status" id="update-status"></p>
-          <div class="row-actions"><button type="button" class="button secondary" id="check-update">检查更新</button><button type="button" class="button secondary" id="apply-update">升级</button></div>
-        </div>
-      </article>
-
-
     </section>
     <section id="agents" class="page" aria-label="Agent 管理">
       <div class="agents-heading"><div><h2>接入你的 Agent</h2><p class="page-subtitle">统一管理 Tbrain 工具与生命周期 Hook</p></div><button type="button" class="button secondary" id="refresh-doctor">刷新状态</button></div>
@@ -157,6 +148,13 @@
   </div>
   <div class="markdown" id="detail-body"></div>
 </aside>
+
+<dialog id="update-dialog" aria-labelledby="update-title">
+  <h2 id="update-title">软件更新</h2>
+  <p id="update-status" role="status" aria-live="polite"></p>
+  <div id="update-notes" class="markdown"></div>
+  <div class="form-actions"><button type="button" class="button secondary" id="cancel-update">取消</button><button type="button" class="button primary" id="apply-update" hidden>升级</button></div>
+</dialog>
 
 <dialog id="project-dialog" aria-labelledby="project-dialog-title">
   <form id="project-form">

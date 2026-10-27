@@ -1,4 +1,4 @@
-"""Version check and verified staging for the public GitHub release feed.
+"""Version check and verified staging from a public release manifest.
 
 Checking never installs or executes anything: it only asks GitHub for the newest published
 release. Downloading is a separate, explicit user action that streams the release ZIP into
@@ -25,13 +25,11 @@ from . import __version__, installer, paths, proc
 
 REPOSITORY = "Denis-Tang/tbrain"
 RELEASE_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+LATEST_MANIFEST = f"{RELEASE_PAGE}/download/latest.json"
 CACHE_NAME = "update-check.json"
-# Anonymous GitHub API calls are limited per exit IP, so a result is reused instead of
-# re-asked on every click; a forced check still waits REPEAT_SECONDS to avoid hammering.
+# Reuse recent checks; an explicit check bypasses the six-hour cache after one minute.
 CACHE_SECONDS = 6 * 3600
 REPEAT_SECONDS = 60
-ASSET_SUFFIX = "-windows-x64.zip"
 NOTES_LIMIT = 4000
 UPDATES_FOLDER = "updates"
 RECORD_NAME = "download.json"
@@ -72,29 +70,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _rate_limit_message(response) -> str:
-    reset = response.headers.get("x-ratelimit-reset", "")
-    if reset.isdigit():
-        moment = datetime.fromtimestamp(int(reset), tz=timezone.utc).astimezone()
-        return f"GitHub 接口查询次数已用完，请在 {moment:%H:%M} 之后再试。"
-    return "GitHub 接口暂时不可用（查询次数受限），请稍后再试。"
-
-
-def _select_asset(payload: dict, version: str) -> dict:
-    assets = [asset for asset in payload.get("assets") or [] if isinstance(asset, dict)]
-    named = [asset for asset in assets if str(asset.get("name") or "").endswith(ASSET_SUFFIX)]
-    preferred = [asset for asset in named if f"-{version}-" in str(asset.get("name") or "")]
-    for asset in preferred + named:
-        digest = str(asset.get("digest") or "")
-        return {
-            "name": str(asset.get("name") or ""),
-            "url": str(asset.get("browser_download_url") or ""),
-            "size": int(asset.get("size") or 0),
-            "sha256": digest.split(":", 1)[1] if digest.startswith("sha256:") else "",
-        }
-    return {}
-
-
 def _environment_proxy() -> str:
     for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
         value = str(os.environ.get(name) or "").strip()
@@ -104,9 +79,9 @@ def _environment_proxy() -> str:
 
 
 def _request_latest(headers: dict, timeout: float):
-    """Request the release API, retrying without the proxy-bypass list if it is malformed."""
+    """Read the static manifest, retaining the existing proxy-environment workaround."""
     try:
-        return httpx.get(LATEST_RELEASE_API, headers=headers, timeout=timeout, follow_redirects=True)
+        return httpx.get(LATEST_MANIFEST, headers=headers, timeout=timeout, follow_redirects=True)
     except httpx.InvalidURL:
         # Some environments list bracketed IPv6 hosts (for example ``[::1]``) in NO_PROXY;
         # httpx parses those entries as URLs and fails before sending anything. Retry with an
@@ -115,14 +90,13 @@ def _request_latest(headers: dict, timeout: float):
         proxy = _environment_proxy()
         if proxy:
             options["proxy"] = proxy
-        return httpx.get(LATEST_RELEASE_API, **options)
+        return httpx.get(LATEST_MANIFEST, **options)
 
 
 def fetch_latest(timeout: float = 8.0) -> dict:
-    """Ask GitHub for the newest published release, raising UpdateError on any failure."""
+    """Read the newest release attachment without calling GitHub's REST API."""
     headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "Accept": "application/json",
         "User-Agent": f"tbrain/{__version__}",
     }
     try:
@@ -131,10 +105,8 @@ def fetch_latest(timeout: float = 8.0) -> dict:
         # httpx.InvalidURL is not an HTTPError and is also raised for a malformed proxy setting,
         # which would otherwise escape the "never raises" contract of check_latest.
         raise UpdateError("无法连接 GitHub，请检查网络后重试。") from None
-    if response.status_code in {403, 429}:
-        raise UpdateError(_rate_limit_message(response))
     if response.status_code == 404:
-        raise UpdateError("没有找到已发布的版本记录。")
+        raise UpdateError("发布方尚未提供更新信息。")
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError:
@@ -145,19 +117,21 @@ def fetch_latest(timeout: float = 8.0) -> dict:
         raise UpdateError("GitHub 返回的内容不是有效 JSON。") from None
     if not isinstance(payload, dict):
         raise UpdateError("GitHub 返回的发布信息格式不正确。")
-    tag = str(payload.get("tag_name") or "").strip()
-    version = tag.lstrip("vV")
-    if not version:
-        raise UpdateError("发布信息缺少版本号。")
-    notes = str(payload.get("body") or "").strip()
+    version = str(payload.get("version") or "").strip()
+    asset = payload.get("asset")
+    if not parse_version(version) or not isinstance(asset, dict):
+        raise UpdateError("发布信息缺少有效的版本或安装包。")
+    if not asset.get("url") or not re.fullmatch(r"[0-9a-fA-F]{64}", str(asset.get("sha256") or "")):
+        raise UpdateError("发布信息缺少下载地址或有效的 SHA256。")
+    notes = str(payload.get("notes") or "").strip()
     return {
-        "tag": tag,
+        "tag": f"v{version}",
         "version": version,
-        "published_at": str(payload.get("published_at") or payload.get("created_at") or ""),
+        "published_at": str(payload.get("published_at") or ""),
         "notes": notes[:NOTES_LIMIT],
         "notes_truncated": len(notes) > NOTES_LIMIT,
         "page": RELEASE_PAGE,
-        "asset": _select_asset(payload, version),
+        "asset": asset,
     }
 
 
@@ -571,7 +545,7 @@ def upgrade_from_package(source, version: str = "", home: Path | None = None,
 def upgrade(home: Path | None = None, install_root: Path | None = None,
             force: bool = True, doctor=None, fetcher=None, stream=None,
             timeout: float = 5.0, prune_keep: int = 2, progress=None) -> dict:
-    """Check GitHub, download and verify the newest release, then upgrade."""
+    """Read the release manifest, download and verify its package, then upgrade."""
     home = paths.app_home(home)
     check = check_latest(home, force=force, fetcher=fetcher)
     if not check.get("newer"):

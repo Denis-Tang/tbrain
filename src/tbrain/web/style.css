@@ -252,11 +252,9 @@ h3{font-size:13px;line-height:20px;font-weight:600}
 .segmented button{border:0;border-radius:8px;padding:5px 13px;font-size:12px;line-height:18px;color:var(--muted);transition:background-color 200ms var(--curve),color 200ms var(--curve),box-shadow 200ms var(--curve)}
 .segmented button:hover{background:transparent;color:var(--text)}
 .segmented button[aria-pressed="true"]{background:var(--surface);color:var(--text);font-weight:600;box-shadow:0 1px 4px #bacce44d}
-.version-pill{font-size:12px;color:var(--muted);background:var(--surface-soft);border-radius:999px;padding:2px 10px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .update-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.update-status{font-size:12px;color:var(--muted);min-width:0;overflow-wrap:anywhere}
-.update-status:empty{display:none}
-.row-actions{display:flex;gap:8px;flex-wrap:wrap}
+#update-notes{padding:12px 0 0;max-height:40vh}
+#update-notes:empty{display:none}
 .host-list{display:grid;gap:0}
 .host-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 0;border-bottom:1px solid var(--line)}
 .host-row:last-child{border-bottom:0}

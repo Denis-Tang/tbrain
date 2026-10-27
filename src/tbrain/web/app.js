@@ -48,7 +48,6 @@
     appearance: storedAppearance(),
     editing: { original: "", paths: [] },
     deleting: "",
-    update: null,
     savedTimer: 0,
     toastTimer: 0,
     lastFocus: null,
@@ -193,7 +192,6 @@
     $("ready-label").textContent = status ? (ready ? "已就绪" : "未就绪") : "未连接";
     const version = status && status.version ? `v${status.version}` : "v—";
     $("app-version").textContent = version;
-    $("version-value").textContent = version;
     if (status && Array.isArray(status.timezones)) state.timezones = status.timezones;
   }
 
@@ -1121,8 +1119,6 @@
     $("ntp-enabled").checked = false;
     $("reminder-context-switch").checked = false;
     renderTimezoneOptions("");
-    $("version-value").textContent = "v—";
-    $("update-status").textContent = "";
     updateStatusUI(null);
     renderHosts(null);
   }
@@ -1381,7 +1377,24 @@
     document.querySelectorAll(".nav-item").forEach((button) => {
       button.addEventListener("click", () => goTo(button.dataset.page));
     });
-    $("app-version").addEventListener("click", () => goTo("settings"));
+    $("app-version").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
+      $("apply-update").hidden = true;
+      $("update-status").textContent = "正在检查更新…";
+      $("update-notes").innerHTML = "";
+      $("update-dialog").showModal();
+      try {
+        const result = await call("update_check", true);
+        $("update-status").textContent = updateMessage(result);
+        $("update-notes").innerHTML = result.newer ? renderMarkdown(result.notes || "") : "";
+        $("apply-update").hidden = !result.newer;
+      } catch (error) {
+        $("update-status").textContent = error.bridge ? OFFLINE : errorText(error);
+      }
+    }));
+    $("cancel-update").addEventListener("click", () => $("update-dialog").close());
+    $("update-dialog").addEventListener("cancel", (event) => {
+      if ($("cancel-update").disabled) event.preventDefault();
+    });
 
     $("status-filters").addEventListener("click", (event) => {
       const chip = event.target.closest("[data-filter]");
@@ -1553,19 +1566,18 @@
       applyTheme(true);
     });
 
-    $("check-update").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
-      const result = await call("update_check", true);
-      state.update = result || {};
-      const message = updateMessage(state.update);
-      $("update-status").textContent = message;
-      toast(message);
-    }));
     $("apply-update").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
-      const version = state.update && (state.update.latest || state.update.version) ? String(state.update.latest || state.update.version) : "";
-      const result = await call("update_apply");
-      const message = result.error || result.message || (result.restarting ? "升级完成，正在重启 Tbrain" : result.upgraded === false ? "已是最新版本" : "正在升级");
-      $("update-status").textContent = message;
-      toast(message, result.started === false);
+      $("cancel-update").disabled = true;
+      $("update-status").textContent = "正在下载并安装更新，请稍候…";
+      try {
+        const result = await call("update_apply");
+        $("update-status").textContent = result.message || (result.restarting ? "升级完成，正在重启 Tbrain" : "已是最新版本");
+        $("apply-update").hidden = true;
+      } catch (error) {
+        $("update-status").textContent = errorText(error);
+      } finally {
+        $("cancel-update").disabled = false;
+      }
     }));
     $("refresh-doctor").addEventListener("click", (event) => withBusy(event.currentTarget, loadDoctor));
     $("host-list").addEventListener("change", async (event) => {

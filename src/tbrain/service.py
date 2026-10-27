@@ -530,7 +530,8 @@ class TbrainService:
     def check_update(self, force: bool = True) -> dict:
         from . import update
 
-        return update.check_latest(self.home, force=force)
+        return update.check_latest(self.home, force=force,
+                                   install_root=paths.install_root(self.home, self.settings.load()))
 
     def apply_upgrade(self) -> dict:
         from . import hosts, update

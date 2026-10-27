@@ -287,14 +287,14 @@ def _cmd_upgrade(args) -> dict:
     home, settings, root = _context(args)
     doctor = _doctor_callable(home, root, settings)
     if args.check:
-        result = update.check_latest(home, force=True)
+        result = update.check_latest(home, force=True, install_root=root)
     elif args.source:
         result = update.upgrade_from_package(args.source, args.version, home=home,
                                              install_root=root, doctor=doctor)
     else:
         result = update.upgrade(home=home, install_root=root, force=True, doctor=doctor)
     if isinstance(result, dict):
-        result.setdefault("current_version", __version__)
+        result.setdefault("current_version", installer.current_version(root) or __version__)
     return result
 
 

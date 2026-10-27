@@ -103,7 +103,8 @@ def test_check_latest_reports_newer_and_caches(tmp_path):
         calls.append(timeout)
         return release_for()
 
-    result = update.check_latest(tmp_path, force=True, fetcher=fetcher)
+    result = update.check_latest(tmp_path, force=True, fetcher=fetcher,
+                                 install_root=tmp_path / "install")
     assert result["current"] == __version__
     assert result["latest"] == NEXT_VERSION
     assert result["newer"] is True
@@ -112,8 +113,9 @@ def test_check_latest_reports_newer_and_caches(tmp_path):
     assert len(calls) == 1
 
     # A forced check inside REPEAT_SECONDS reuses the cache instead of hammering GitHub.
-    again = update.check_latest(tmp_path, force=True, fetcher=lambda timeout=8.0: (_ for _ in ()).throw(
-        AssertionError("network should not be used")))
+    again = update.check_latest(tmp_path, force=True, install_root=tmp_path / "install",
+                                fetcher=lambda timeout=8.0: (_ for _ in ()).throw(
+                                    AssertionError("network should not be used")))
     assert again["cached"] is True
     assert again["latest"] == NEXT_VERSION
 
@@ -127,6 +129,21 @@ def test_check_latest_degrades_to_structured_failure(tmp_path):
     assert result["newer"] is False
     assert "无法连接 GitHub" in result["message"]
     assert result["latest"] == ""
+
+
+@pytest.mark.parametrize("installed", ["0.6.4", NEXT_VERSION, ""])
+def test_check_latest_uses_target_installation_even_with_cached_release(tmp_path, installed):
+    home, root = tmp_path / "home", tmp_path / "install"
+    if installed:
+        install_fake_version(root, tmp_path, installed)
+    fetcher = lambda timeout=8.0: release_for(__version__)
+
+    for cached in (False, True):
+        result = update.check_latest(home, force=True, fetcher=fetcher, install_root=root)
+        assert result["current"] == (installed or __version__)
+        assert result["newer"] is (installed == "0.6.4")
+        assert result["cached"] is cached
+        assert ("发现新版本" if result["newer"] else "已是最新版本") in result["message"]
 
 
 def test_fetch_latest_retries_when_proxy_bypass_list_is_malformed(monkeypatch):
@@ -305,6 +322,23 @@ def test_upgrade_via_check_and_stream(tmp_path):
     assert result["check"]["latest"] == NEXT_VERSION
     assert installer.current_version(root) == NEXT_VERSION
     assert doctor_calls == [True]
+
+
+def test_upgrade_installs_running_release_over_older_selected_version(tmp_path):
+    home, root = tmp_path / "home", tmp_path / "install"
+    install_fake_version(root, tmp_path, "0.6.4")
+    payload = zip_package(tmp_path / "release.zip", __version__)
+
+    result = update.upgrade(home=home, install_root=root,
+                            fetcher=lambda timeout=8.0: release_for(__version__, payload),
+                            stream=lambda url, timeout: FakeStream(payload))
+
+    assert result["ok"] is True
+    assert result["upgraded"] is True
+    assert result["from"] == "0.6.4"
+    assert result["to"] == __version__
+    assert result["check"]["current"] == "0.6.4"
+    assert installer.current_version(root) == __version__
 
 
 def test_upgrade_does_nothing_when_already_latest(tmp_path):

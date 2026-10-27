@@ -118,6 +118,7 @@ docs/                  调研、架构、决策、升级、迁移文档
 
 - **接入或断开宿主**：`tbrain.cmd connect claude-code|codex|dsh|pi` / `disconnect <host>`；修改配置前生成同目录 `.bak`。Codex 的 Hook 需要在 `/hooks` 里审核信任。
 - **升级与回退**：点击桌面左下角版本号检查更新，发现新版后选择升级或取消；更新读取 Release 附件 `latest.json`，不使用 GitHub 查询 API。也可 `tbrain.cmd upgrade --from <包目录或 zip>`，`tbrain.cmd rollback` 切回上一个已安装版本。版本目录默认保留两份。
+- **升级版本核对**：更新检查以目标安装目录 `current.txt` 选中的版本为准；没有安装记录时才使用运行中程序的版本。升级后用 `tbrain.cmd version` 的 `installed_version` 或 `current.txt` 核对实际版本；退出码 0 本身不表示发生了升级。
 - **迁移旧数据**：`tbrain.cmd migrate --old-home <旧应用数据目录> --dry-run` 先看报告，确认后加 `--execute`。旧数据只读，不删除。
 - **手动检查**：`tbrain.cmd doctor` 检查安装、版本、进程与四宿主配置状态；真实执行仍以宿主新会话为准。
 - **验证脚本**：`scripts/verify/upgrade_sim.py`（隔离目录里的真实升级模拟）、`scripts/verify/real_hosts.py`（真实宿主端到端，会产生少量模型费用）。

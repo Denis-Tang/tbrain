@@ -172,21 +172,21 @@ def _age_seconds(checked_at, moment: datetime):
     return max(0.0, (moment - recorded).total_seconds())
 
 
-def _result(release: dict | None, moment: datetime, checked_at: str = "", cached: bool = False, failure: str = "") -> dict:
+def _result(release: dict | None, moment: datetime, current: str, checked_at: str = "", cached: bool = False, failure: str = "") -> dict:
     release = release or {}
     version = str(release.get("version") or "")
     available = bool(version)
-    newer = available and is_newer(version, __version__)
+    newer = available and is_newer(version, current)
     if failure:
         message = failure
     elif newer:
         message = f"发现新版本 v{version}。"
     elif available:
-        message = f"已是最新版本 v{__version__}。"
+        message = f"已是最新版本 v{current}。"
     else:
         message = "暂时无法确认最新版本。"
     return {
-        "current": __version__,
+        "current": current,
         "latest": version,
         "newer": newer,
         "available": available,
@@ -202,23 +202,26 @@ def _result(release: dict | None, moment: datetime, checked_at: str = "", cached
     }
 
 
-def check_latest(home: Path, force: bool = False, timeout: float = 8.0, fetcher=None) -> dict:
+def check_latest(home: Path, force: bool = False, timeout: float = 8.0, fetcher=None,
+                 install_root: Path | None = None) -> dict:
     """Return the newest known release state without raising on network problems."""
+    root = Path(install_root) if install_root is not None else paths.install_root(home)
+    current = installer.current_version(root) or __version__
     moment = _now()
     cache = _read_cache(home)
     release = cache.get("release") if isinstance(cache.get("release"), dict) else {}
     checked_at = str(cache.get("checked_at") or "")
     age = _age_seconds(checked_at, moment) if checked_at else None
     if age is not None and (age < REPEAT_SECONDS or (age < CACHE_SECONDS and not force)):
-        return _result(release, moment, checked_at=checked_at, cached=True)
+        return _result(release, moment, current, checked_at=checked_at, cached=True)
     try:
         fresh = (fetcher or fetch_latest)(timeout)
     except UpdateError as exc:
         if release:
-            return _result(release, moment, checked_at=checked_at, cached=True, failure=str(exc))
-        return _result(None, moment, failure=str(exc))
+            return _result(release, moment, current, checked_at=checked_at, cached=True, failure=str(exc))
+        return _result(None, moment, current, failure=str(exc))
     _write_cache(home, fresh, moment)
-    return _result(fresh, moment, checked_at=moment.isoformat())
+    return _result(fresh, moment, current, checked_at=moment.isoformat())
 
 
 def updates_directory(home: Path) -> Path:
@@ -547,7 +550,7 @@ def upgrade(home: Path | None = None, install_root: Path | None = None,
             timeout: float = 5.0, prune_keep: int = 2, progress=None) -> dict:
     """Read the release manifest, download and verify its package, then upgrade."""
     home = paths.app_home(home)
-    check = check_latest(home, force=force, fetcher=fetcher)
+    check = check_latest(home, force=force, fetcher=fetcher, install_root=install_root)
     if not check.get("newer"):
         return {"ok": True, "upgraded": False, "check": check,
                 "message": check.get("message") or "已是最新版本"}

@@ -276,7 +276,8 @@ def _project_prompt_block(service, project: str) -> str:
         if rules:
             parents.insert(0, f"## 继承 {parent} 的硬规则\n{rules}")
         parent = (service.store.project(parent) or {}).get("parent")
-    return "\n\n".join(parents + [prompt_mod.render(data.get("sections") or {}, data.get("user") or "").strip()])
+    return "\n\n".join([prompt_mod.PROJECT_PROMPT_SPEC] + parents +
+                       [prompt_mod.render(data.get("sections") or {}, data.get("user") or "").strip()])
 
 
 def _attachment_block(service, project: str) -> str:
@@ -405,13 +406,20 @@ def _recent_users_block(summary, title: str = "最近 5 条用户指令（防止
 def _stop_reminder(service, summary: handoff.Summary, path: Path, host: str) -> HookResult:
     summary.header["last_activity_at"] = _utc_iso(service.now().utc)
     write_session(service, summary, path)
+    message = ("有尚未总结的用户指令或新测试结果。请调用 save 提交本轮增量；无需凑完成项。"
+               + (prompt_mod.MAINTENANCE_GUIDANCE if summary.project else "") +
+               "先写证据再引用返回编号；有 rejected 时只补交失败部分，待整理不代表通过校验。")
     if host == "pi":
-        hint = context_switch_hint(service, summary, None, None)
-        message = "本轮尚未保存。请调用 save 写入完成、决策、证据与下一步。" + (f"\n{hint}" if hint else "")
         return HookResult(additional_context=message)
     return HookResult(decision="block",
-                      reason="本轮还没有保存记录。请调用 save 提交增量（完成 D#、决策 K#、证据 E#、下一步），"
-                             "再结束本轮。已保存则忽略本提醒。")
+                      reason=message)
+
+
+def _needs_save(summary: handoff.Summary) -> bool:
+    verification = summary.header.get("last_verify") or {}
+    return (len(summary.users) > int(summary.header.get("saved_users") or 0) or
+            (verification.get("source") == "tool" and
+             verification.get("at") != summary.header.get("saved_verify_at")))
 
 
 def handle_hook(service, event: HookEvent) -> HookResult:
@@ -428,7 +436,7 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                 return HookResult(additional_context='工具结果缺少 command 或整数 exit_code，未记录验证结果。')
             summary.header["last_verify"] = {"command": str(result["command"]),
                                               "exit_code": result["exit_code"],
-                                              "at": _utc_iso(service.now().utc)}
+                                              "at": _utc_iso(service.now().utc), "source": "tool"}
             write_session(service, summary, path)
         return HookResult()
 
@@ -447,7 +455,7 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is None:
             return HookResult()
-        if len(summary.users) > int(summary.header.get("saved_users") or 0):
+        if _needs_save(summary):
             return _stop_reminder(service, summary, path, host)
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
@@ -591,7 +599,7 @@ def _parse_utc(value) -> datetime | None:
 
 
 def context_switch_hint(service, summary: handoff.Summary, tokens, window) -> str:
-    if int(summary.header.get("saved_users") or 0) < len(summary.users):
+    if _needs_save(summary):
         return ""
     settings = service.settings.load()
     if not getattr(settings, "reminder_context_switch", True):
@@ -634,7 +642,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                      "goals": [], "target": "", "next_step": "", "status": "", "env": [], "project_prompt": {}}
     rejected: list[dict] = []
     warnings: list[str] = []
-    note = ""
 
     if not isinstance(operations, list) or not operations:
         return {"ok": False, "error": "operations 必须是非空数组", "current_time": _time_block(service)}
@@ -693,6 +700,11 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                     raise ValueError("status 只允许：" + " / ".join(handoff.STATUSES))
                 if status == "已中断":
                     raise ValueError("已中断只由程序写入")
+                completing = {str(value).upper() for value in operation.get("complete_goals") or []}
+                remaining = [item["id"] for item in summary.goals()
+                             if not item.get("done") and item["id"] not in completing]
+                if status == "已完成" and remaining:
+                    raise ValueError("仍有未完成目标：" + "、".join(remaining) + "；完成后通过 complete_goals 指定编号")
                 summary.header["status"] = status
                 written["status"] = status
                 done_ids = handoff.complete_goals(summary, operation.get("complete_goals") or [])
@@ -717,7 +729,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 if not summary.project:
                     raise ValueError("独立会话没有项目提示词")
                 result = service.store.save_project_prompt(summary.project, sections or {}, summary=summary)
-                written["project_prompt"] = result.get("written") or {}
+                written["project_prompt"].update(result.get("written") or {})
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
             else:
@@ -733,26 +745,26 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     now_iso = _utc_iso(now.utc)
     summary.header["updated_at"] = now_iso
     summary.header["last_activity_at"] = now_iso
+    summary.header["git"] = service.git_info(str(summary.header.get("cwd") or ""))
+    if last_test is not None:
+        if not isinstance(last_test, dict) or not isinstance(last_test.get("command"), str) or type(last_test.get("exit_code")) is not int:
+            rejected.append({"op": "last_test", "reason": "last_test 必须包含 command 和整数 exit_code"})
+        elif summary.header.get("last_verify", {}).get("source") == "tool":
+            if any(last_test[key] != summary.header["last_verify"].get(key) for key in ("command", "exit_code")):
+                rejected.append({"op": "last_test", "reason": "last_test 不能覆盖宿主采集的测试结果；请省略补报并以实际执行结果为准。"})
+        else:
+            summary.header["last_verify"] = {"command": last_test["command"], "exit_code": last_test["exit_code"],
+                                              "at": now_iso, "source": "model"}
     if not rejected:
         summary.header["saved_users"] = len(summary.users)
-    summary.header["git"] = service.git_info(str(summary.header.get("cwd") or ""))
-    if last_test:
-        summary.header["last_verify"] = {
-            "command": str(last_test.get("command") or ""),
-            "exit_code": last_test.get("exit_code"),
-            "at": now_iso,
-        }
+        summary.header["saved_verify_at"] = summary.header.get("last_verify", {}).get("at")
     write_session(service, summary, path)
     service.index.log_access(summary.session_id, "save")
-    hint = context_switch_hint(service, summary, None, None)
-    if hint:
-        note = hint
     return {
-        "ok": not rejected or any(written.values()),
+        "ok": not rejected,
         "written": written,
         "rejected": rejected,
         "warnings": warnings,
-        "note": note,
         "user_modified": user_edited or bool(protected),
         "pending": pending_added,
         "current_time": _time_block(service),
@@ -783,27 +795,33 @@ def _append_item(service, summary, section, item, rejected, warnings):
     if section == "未走通的路":
         return _append_dead_end(service, summary, item, rejected)
     text = str(item.get("text") or "").strip()
+    if section == "决策" and "|" not in text and item.get("decision") and item.get("reason"):
+        text = f"{item['decision']} | {item['reason']}"
     if not text:
         rejected.append({"section": section, "reason": "text 不能为空", "example": _op_example("append")})
         return ""
-    if len(text) > handoff.ITEM_MAX_CHARS:
-        rejected.append({"section": section, "reason": f"单条不超过 {handoff.ITEM_MAX_CHARS} 字", "example": _op_example("append")})
-        return ""
     if section == "决策" and "|" not in text:
-        if item.get("decision") and item.get("reason"):
-            text = f"{item['decision']} | {item['reason']}"
-        else:
-            rejected.append({"section": section, "reason": "决策格式：决策 | 理由",
-                             "example": '{"text":"用 SQLite 只做索引 | Markdown 是唯一事实源"}'})
-            return ""
+        rejected.append({"section": section, "reason": "决策格式：决策 | 理由",
+                         "example": '{"text":"用 SQLite 只做索引 | Markdown 是唯一事实源"}'})
+        return ""
     if section == "已完成":
         evidence = str(item.get("evidence") or "").strip()
         if evidence and f"[证据:{evidence}]" not in text:
             text = f"{text} [证据:{evidence}]"
+    references = re.findall(r"\[证据:([^\]]*)\]", text)
+    if text.count("[证据:") != len(references) or any(
+            not re.fullmatch(r"E\d+", reference) or not summary.has_reference(reference) for reference in references):
+        rejected.append({"section": section, "reason": "证据引用无效或不存在；先保存证据并使用返回的 E#", "example": _op_example("append")})
+        return ""
+    if len(text) > handoff.ITEM_MAX_CHARS:
+        rejected.append({"section": section, "reason": f"正文连同证据引用不超过 {handoff.ITEM_MAX_CHARS} 字", "example": _op_example("append")})
+        return ""
     for candidate in summary.sections.get(section, []):
         if _same_text(candidate.get("text", ""), text):
             return f"{handoff.ITEM_PREFIXES[section]}{candidate['number']}"
     if section == "未完成目标":
+        if summary.status == "已完成":
+            summary.header["status"] = "进行中"
         return handoff.add_goal(summary, text)
     return handoff.add_item(summary, section, text)
 
@@ -970,6 +988,17 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
         seen.add(key)
         unique.append(item)
     unique = unique[:limit]
+    terms = [term.casefold() for term in service.index.bigram_terms(query)]
+    for item in unique:
+        if item["kind"] != "session":
+            continue
+        summary = handoff.parse(service.store.read_text(service.vault_root() / item["path"]))
+        candidates = [f"目标：{summary.target}", f"下一步：{summary.next_step}"]
+        candidates.extend(f"{entry['id']} {entry['text']}" for entry in summary.users)
+        for section in handoff.ITEM_PREFIXES:
+            candidates.extend(f"{entry['id']} {entry['text']}" for entry in summary.items(section))
+        matches = sorted(candidates, key=lambda text: sum(term in text.casefold() for term in terms), reverse=True)
+        item["snippet"] = _clip("\n".join(text for text in matches[:3] if any(term in text.casefold() for term in terms)), 500)
     return {"ok": True, "query": query, "results": unique, "current_time": _time_block(service)}
 
 
@@ -1120,11 +1149,9 @@ def _record_rejections(service, summary: handoff.Summary, rejected: list[dict]) 
     payload = _read_rejections(service)
     session_rejects = payload.get(summary.session_id, {})
     pending_added: list[str] = []
-    remaining = []
     seen = set()
     for item in rejected:
         if item.get("reason", "").startswith("该会话总结已被用户手改"):
-            remaining.append(item)
             continue
         raw = item["operation"]
         signature = json.dumps(raw, ensure_ascii=False, sort_keys=True)
@@ -1137,9 +1164,6 @@ def _record_rejections(service, summary: handoff.Summary, rejected: list[dict]) 
                 summary.pending.append(line)
                 pending_added.append(line)
             seen.add(signature)
-        if count < 3:
-            remaining.append(item)
-    rejected[:] = remaining
     payload[summary.session_id] = session_rejects
     _write_rejections(service, payload)
     return pending_added

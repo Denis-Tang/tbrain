@@ -335,7 +335,15 @@ class Index:
 
 检索规则：FTS5 表 `cn` 列存中文两两重叠切分（如“数据库”→“数据 据库”），查询同样切分；ASCII 词按原样；单字中文查询退回 `LIKE`；结果按 bm25 + 状态优先级 + 新近度加权；每次最多 5 条，附 `path`/`updated_at`/`project`/`status`。
 
+`session.search` 为会话结果追加 `snippet`：从目标、下一步和编号条目选取相关内容，最多 500 字；搜索不切换保存对象。
+
+保存与维护入口：`prompt.py` 的 `PROJECT_PROMPT_SPEC` 同时用于项目启动包和 MCP 工具说明，`MAINTENANCE_GUIDANCE` 也用于四宿主共用的收尾提醒；pi 工具说明给出 `project_prompt` 示例。`save.ok` 表示整批校验通过，部分写入仍通过 `written` 返回；失败转存不清空 `rejected`。测试结果的 `last_verify.source` 区分宿主采集（`tool`）和模型补报（`model`），补报只用于尚无宿主结果的会话；成功保存记录 `saved_verify_at`，与后续宿主结果比较以触发补存。
+
+相关验证：`.venv\Scripts\python.exe -m pytest -q tests/test_handoff.py tests/test_session_flow.py tests/test_host_transport.py`；全量验证运行 `.venv\Scripts\python.exe -m pytest -q`。宿主适配测试使用隔离 CLI 和模拟事件，不替代真实宿主验收。
+
 ## 7. handoff.py（Lead）
+
+正文中的二级标题及形似 U/D/K/X/E/G 编号的三级标题在写入时加反斜线，文件头以 `body_encoding: escaped-headings` 标识编码；读回只还原带标识的受管正文，旧文件及手写附注不解码，已有反斜线往返保留。历史上已被拆散的原话不自动重建，应按宿主原始记录核对后修复。
 
 ```python
 SECTIONS = ["原始命令", "用户指令", "目标", "已完成", "决策", "未走通的路", "证据", "未完成目标", "下一步", "待整理", "待用户确认", "归档"]
@@ -439,7 +447,7 @@ bootstrap 判断项目：`match_project(cwd)` 最长路径匹配；根项目默�
 save 操作（JSON 数组，每项一个 dict）：
 
 ```json
-{"op":"append","section":"done|decision|dead_end|evidence|goal|user","items":[...]}
+{"op":"append","section":"done|decision|dead_end|evidence|goal","items":[...]}
 {"op":"replace","section":"target|next_step","text":"..."}
 {"op":"set_status","status":"进行中|受阻|待验证|已完成|已放弃","complete_goals":["G1"],"supersede":["K1"]}
 {"op":"env","items":[{...公共池卡片字段...}]}
@@ -447,6 +455,8 @@ save 操作（JSON 数组，每项一个 dict）：
 ```
 
 校验（部分接受）：字段名/枚举/长度/证据格式；不合格条目退回并附允许值与一条正确示例；同一操作重试超过 2 次（按 session 记录）→ 原文写“待整理”并标“未校验”。合格条目立即写入。自动补：时间、git 分支/HEAD/改动文件数、最近验证（若 `last_test` 或宿主 hook 记录存在）。同事务更新索引。返回：写入编号 + 当前时间 + 被拒条目 + 提醒。
+
+设为“已完成”时，未完成目标必须通过 `complete_goals` 明确完成；追加新的未完成目标会将已完成会话重新置为“进行中”。操作按序生效，证据需先保存再引用返回编号。
 
 ## 11. mcp_server.py（Lead）
 

@@ -112,6 +112,15 @@ if (saved.status !== 0 || !JSON.parse(saved.stdout).ok) throw Error("CLI save fa
 tokens = 900;
 await handlers["tools/post-execute"]({agent, name: "pwsh", arguments: {command: "pytest -q"}},
   {content: [{type: "text", text: "1 passed"}]}, async () => ({kind: "continue"}));
+await handlers["tools/post-execute"]({agent, name: "pwsh", arguments: {command: "pytest -q"}},
+  {isError: true, content: [{type: "text", text: "1 failed\n[exit code: 1]"}]}, async () => ({kind: "continue"}));
+const checkpoint = spawnSync(python, ["-m", "tbrain", "--home", home, "tool", "save"], {
+  input: JSON.stringify({session_id: "dsh:native-root", operations: [{op: "replace", section: "next_step", text: "修复失败测试"}]}),
+  encoding: "utf8", windowsHide: true,
+});
+if (!JSON.parse(checkpoint.stdout).ok) throw Error("checkpoint failed");
+await handlers["tools/post-execute"]({agent, name: "pwsh", arguments: {command: "pytest -q"}},
+  {content: [{type: "text", text: "unknown exit status"}]}, async () => ({kind: "continue"}));
 const after = await handlers["agent/pre-step"]({agent, messages: []}, enter);
 if (!after.messages.some(m => m.content[0].text.includes("记录已保存"))) throw Error("missing context hint");
 await handlers["session/event"](session, {type: "compaction/start"});
@@ -129,7 +138,7 @@ console.log(JSON.stringify({stop_reminders: steered.length, precompact: injected
     assert summary.status == "已中断"
     assert summary.items("已完成")[0]["text"] == "原生链路完成"
     assert summary.header['last_verify']['command'] == 'pytest -q'
-    assert summary.header['last_verify']['exit_code'] == 0
+    assert summary.header['last_verify']['exit_code'] == 1
 
 
 @pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
@@ -150,6 +159,7 @@ const {default: extension} = await import('data:text/javascript;base64,' + Buffe
 const handlers = {}, tools = {}, messages = [];
 extension({on: (name, fn) => handlers[name] = fn, registerTool: tool => tools[tool.name] = tool,
   sendMessage: message => messages.push(message)});
+if (!tools.tbrain_save.description.includes('project_prompt') || !tools.tbrain_save.description.includes('rejected')) throw Error('missing save guidance');
 let id = 'pi-first';
 const ctx = {cwd, sessionManager: {getSessionId: () => id, getSessionFile: () => cwd + '/session.jsonl'},
   getContextUsage: () => ({tokens: 900, contextWindow: 1000})};
@@ -160,6 +170,11 @@ const saved = await tools.tbrain_save.execute('save', {operations: [{op: 'append
   items: [{text: 'pi 保存完成'}]}]}, null, null, ctx);
 if (!saved.details.ok) throw Error(JSON.stringify(saved.details));
 await handlers.tool_result({toolName: 'bash', input: {command: 'pytest -q'}, details: {exitCode: 0}}, ctx);
+const partial = await tools.tbrain_save.execute('partial', {operations: [
+  {op: 'replace', section: 'next_step', text: '继续核对'}, {op: 'append', section: 'done', items: [{text: 'x'.repeat(201)}]}
+]}, null, null, ctx);
+if (partial.details.ok || !partial.details.rejected.length || !partial.details.written.next_step) throw Error('partial result hidden');
+await tools.tbrain_save.execute('checkpoint', {operations: [{op: 'replace', section: 'next_step', text: '核对通过'}]}, null, null, ctx);
 await handlers.agent_end({}, ctx);
 if (!messages.some(message => message.content.includes('记录已保存'))) throw Error('missing context hint');
 id = 'pi-second';

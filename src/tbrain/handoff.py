@@ -8,7 +8,6 @@ Markdown 是唯一事实源：本模块只负责把 Summary 与文件文本互�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 import hashlib
 import re
 
@@ -39,6 +38,8 @@ ITEM_PREFIXES = {"已完成": "D", "决策": "K", "未走通的路": "X", "证�
 
 _ITEM_RE = re.compile(r"^###\s+([UDKXEG])(\d+)\s*$")
 _ARCHIVE_RE = re.compile(r"^-\s+([UDKXEG])(\d+)\s+(.*)$")
+_BODY_HEADING_RE = re.compile(r"^\\*(?:## |###\s+[UDKXEG]\d+\s*$)")
+_ESCAPED_SECTIONS = ("原始命令", "用户指令", "目标", *ITEM_PREFIXES, "下一步")
 
 
 @dataclass
@@ -86,12 +87,6 @@ class Summary:
         return reference in ids or any(re.match(rf"^- {re.escape(reference)}\b", line) for line in self.archive)
 
 
-def _now_iso(value: datetime | str | None) -> str:
-    if isinstance(value, datetime):
-        return value.astimezone().astimezone(tz=None).isoformat() if value.tzinfo else value.isoformat()
-    return str(value or "")
-
-
 def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: str,
                 host_record: str, started_at: str, raw_command: str,
                 status: str = "进行中", provisional: bool = False) -> Summary:
@@ -129,18 +124,23 @@ def _clip_user(text: str) -> str:
     return text[:USER_MAX_CHARS] + f"\n（已截断，原文位置：宿主会话记录；共 {len(text)} 字）"
 
 
+def _escape_headings(text: str) -> str:
+    return "\n".join("\\" + line if _BODY_HEADING_RE.match(line) else line for line in text.split("\n"))
+
+
 def render(summary: Summary) -> str:
     header = {key: summary.header.get(key) for key in HEADER_FIELDS if key != "provisional_name"}
     header.update({key: value for key, value in summary.header.items() if key not in header})
     header["provisional_name"] = bool(summary.header.get("provisional_name", False))
+    header["body_encoding"] = "escaped-headings"
     front = yaml.safe_dump(header, allow_unicode=True, sort_keys=False, default_flow_style=False).strip()
-    lines = ["---", front, "---", "", "## 原始命令", summary.raw_command or "", ""]
+    lines = ["---", front, "---", "", "## 原始命令", _escape_headings(summary.raw_command), ""]
 
     lines += ["## 用户指令"]
     for item in summary.sections.get("用户指令", []):
-        lines += [f"### U{item['number']}", item.get("text", ""), ""]
+        lines += [f"### U{item['number']}", _escape_headings(item.get("text", "")), ""]
 
-    lines += ["## 目标", summary.target or "", ""]
+    lines += ["## 目标", _escape_headings(summary.target), ""]
 
     for section in ("已完成", "决策", "未走通的路", "证据", "未完成目标"):
         prefix = ITEM_PREFIXES[section]
@@ -148,12 +148,12 @@ def render(summary: Summary) -> str:
         for item in summary.sections.get(section, []):
             lines.append(f"### {prefix}{item['number']}")
             if section == "未完成目标":
-                lines.append(("- [x] " if item.get("done") else "- [ ] ") + item.get("text", ""))
+                lines.append(_escape_headings(("- [x] " if item.get("done") else "- [ ] ") + item.get("text", "")))
             else:
-                lines.append(item.get("text", ""))
+                lines.append(_escape_headings(item.get("text", "")))
             lines.append("")
 
-    lines += ["## 下一步", summary.next_step or "", ""]
+    lines += ["## 下一步", _escape_headings(summary.next_step), ""]
     lines += ["## 待整理"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.pending] + [""]
     lines += ["## 待用户确认"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.conflicts] + [""]
     lines += ["## 归档"] + summary.archive + [""]
@@ -188,7 +188,12 @@ def parse(text: str) -> Summary:
     current_unknown = ""
     current_item: dict | None = None
     for line in body.split("\n"):
-        if line.startswith("## "):
+        escaped_heading = (header.get("body_encoding") == "escaped-headings" and
+                           current in _ESCAPED_SECTIONS and
+                           line.startswith("\\") and _BODY_HEADING_RE.match(line))
+        if escaped_heading:
+            line = line[1:]
+        if not escaped_heading and line.startswith("## "):
             current = line[3:].strip()
             current_item = None
             current_unknown = current if current not in SECTIONS else ""
@@ -199,7 +204,7 @@ def parse(text: str) -> Summary:
             existing = summary.extra.get(current_unknown, "")
             summary.extra[current_unknown] = (existing + "\n" + line) if existing else line
             continue
-        match = _ITEM_RE.match(line)
+        match = _ITEM_RE.match(line) if not escaped_heading else None
         if match and current:
             prefix, number = match.group(1), int(match.group(2))
             if current == "归档":
@@ -269,14 +274,14 @@ def add_user(summary: Summary, text: str) -> str:
 def add_item(summary: Summary, section: str, text: str) -> str:
     prefix = ITEM_PREFIXES[section]
     number = next_number(summary, section)
-    summary.sections.setdefault(section, []).append({"number": number, "text": text[:ITEM_MAX_CHARS]})
+    summary.sections.setdefault(section, []).append({"number": number, "text": text})
     _archive_overflow(summary, section)
     return f"{prefix}{number}"
 
 
 def add_goal(summary: Summary, text: str) -> str:
     number = next_number(summary, "未完成目标")
-    summary.sections.setdefault("未完成目标", []).append({"number": number, "text": text[:ITEM_MAX_CHARS], "done": False})
+    summary.sections.setdefault("未完成目标", []).append({"number": number, "text": text, "done": False})
     return f"G{number}"
 
 

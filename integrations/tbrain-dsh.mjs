@@ -126,9 +126,9 @@ export function apply(ctx, config = {}) {
 			/\b(pytest|unittest|test|check|build)\b/i.test(exec.arguments?.command || "")) {
 			const output = (result.content || []).filter(block => block.type === "text").map(block => block.text).join("");
 			const exit = /\n\[exit code: (\d+)\]\s*$/.exec(output);
-			if (!result.isError && !/\[(?:killed|stopped|shell exited|shell killed|running|background)/.test(output)) {
+			if (exit && !/\[(?:killed|stopped|shell exited|shell killed|running|background)/.test(output)) {
 				await callHook(settings, { ...payload(exec.agent, "ToolResult"),
-					last_test: { command: exec.arguments.command, exit_code: exit ? Number(exit[1]) : 0 } });
+					last_test: { command: exec.arguments.command, exit_code: Number(exit[1]) } });
 			}
 		}
 		return next();

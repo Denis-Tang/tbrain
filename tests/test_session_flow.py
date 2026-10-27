@@ -99,6 +99,7 @@ def test_save_partial_accept_and_validation_errors(env):
     session = "dddddddd-1111-2222-3333-444444444444"
     prompt(service, "claude-code", session, work, "实现 save 的逐条校验")
     result = service.save(sid("claude-code", session), [
+        {"op": "append", "section": "evidence", "items": [{"kind": "commit", "text": "4c8fa05"}]},
         {"op": "append", "section": "done", "items": [{"text": "合格条目 [证据:E1]"}, {"text": "x" * 260}]},
         {"op": "append", "section": "dead_end", "items": [{"attempt": "直接删除旧索引", "reason_kind": "未知",
                                                            "conditions": "Windows 10"}]},
@@ -106,7 +107,7 @@ def test_save_partial_accept_and_validation_errors(env):
         {"op": "set_status", "status": "已中断"},
         {"op": "append", "section": "decision", "items": [{"text": "只增不删 | 用户修改优先"}]},
     ])
-    assert result["ok"] is True
+    assert result["ok"] is False
     written = result["written"]
     assert written["done"] == ["D1"]
     assert written["decisions"] == ["K1"]
@@ -129,14 +130,16 @@ def test_repeated_bad_operations_move_to_pending(env):
     ]
     for _ in range(3):
         result = service.save(sid("claude-code", session), bad)
-    assert not result["rejected"]
+    assert not result["ok"] and result["rejected"]
     summary, _ = _load(service, service.index.session(sid("claude-code", session)))
     assert summary.pending
     assert any("未校验" in item for item in summary.pending)
     assert len(summary.pending) == 1 and "缺少理由" in summary.pending[0]
     assert "有效条目" not in summary.pending[0]
     again = service.save(sid("claude-code", session), bad)
-    assert not again["rejected"] and not again["pending"]
+    assert not again["ok"] and again["rejected"] and not again["pending"]
+    assert service.hook("claude-code", {"hook_event_name": "Stop", "session_id": session,
+                                       "cwd": str(work)})["decision"] == "block"
 
 
 def test_rejected_save_keeps_stop_reminder(env):
@@ -333,6 +336,13 @@ def test_project_prompt_through_save(env):
     assert result["ok"] is True
     assert result["written"]["project_prompt"]
     stored = service.store.project_prompt("Tbrain")
+    for host in ("claude-code", "codex", "dsh", "pi"):
+        package = service.bootstrap(f"{host}:prompt-reader", host, str(work))["package"]
+        assert "同次任务" in package and "无变化不改写" in package
+        assert stored["sections"]["当前阶段"] in package
+    original = service.store.project_prompt_path("Tbrain").read_bytes()
+    service.save(sid("claude-code", session), [{"op": "replace", "section": "next_step", "text": "跑相关测试"}])
+    assert service.store.project_prompt_path("Tbrain").read_bytes() == original
     assert "完成 Tbrain 0.6.0 最小闭环" in stored["sections"]["最终目标"]
 
 
@@ -486,3 +496,79 @@ def test_dead_end_becomes_retryable_after_dependency_change(env):
     prompt(service, 'codex', 'reader', work, '接续依赖检查')
     result = service.resume('codex:reader', 'codex:dead')
     assert '可重试' in result['handoff']
+
+
+def test_save_validates_final_references_and_decision_length(env):
+    service, _, work = env
+    prompt(service, 'codex', 'references', work, '核对证据与决策')
+    result = service.save('codex:references', [
+        {'op': 'append', 'section': 'evidence', 'items': [{'kind': 'commit', 'text': '4c8fa05'}]},
+        {'op': 'append', 'section': 'done', 'items': [
+            {'text': '不存在的证据 [证据:E999]'}, {'text': 'x' * 195, 'evidence': 'E1'},
+            {'text': '引用不完整 [证据:'}, {'text': '引用有效', 'evidence': 'E1'}]},
+        {'op': 'append', 'section': 'decision', 'items': [
+            {'decision': '使用 Markdown', 'reason': '保留唯一事实源'},
+            {'decision': 'x' * 100, 'reason': 'y' * 100}]},
+    ])
+    assert not result['ok'] and len(result['rejected']) == 4
+    summary, _ = _load(service, service.index.session('codex:references'))
+    assert [item['text'] for item in summary.items('已完成')] == ['引用有效 [证据:E1]']
+    assert [item['text'] for item in summary.items('决策')] == ['使用 Markdown | 保留唯一事实源']
+
+
+def test_tool_result_requires_new_save_and_cannot_be_overridden(env):
+    service, _, work = env
+    prompt(service, 'codex', 'facts', work, '运行测试')
+    service.save('codex:facts', [{'op': 'replace', 'section': 'next_step', 'text': '运行测试并核对'}])
+    service.hook('codex', {'hook_event_name': 'ToolResult', 'session_id': 'facts', 'cwd': str(work),
+                          'last_test': {'command': 'pytest -q', 'exit_code': 1}})
+    stop = {'hook_event_name': 'Stop', 'session_id': 'facts', 'cwd': str(work)}
+    assert service.hook('codex', stop)['decision'] == 'block'
+    result = service.save('codex:facts', [{'op': 'replace', 'section': 'next_step', 'text': '修复失败用例'}],
+                          last_test={'command': 'pytest -q', 'exit_code': 0})
+    summary, _ = _load(service, service.index.session('codex:facts'))
+    assert summary.header['last_verify']['exit_code'] == 1
+    assert not result['ok'] and result['rejected']
+    assert service.hook('codex', stop)['decision'] == 'block'
+    service.save('codex:facts', [{'op': 'replace', 'section': 'next_step', 'text': '修复失败用例'}])
+    assert service.hook('codex', stop) == {}
+
+
+def test_model_test_report_validates_boundary_and_remains_updatable(env):
+    service, _, work = env
+    prompt(service, 'codex', 'reports', work, '补报测试')
+    operations = [{'op': 'replace', 'section': 'next_step', 'text': '核对测试'}]
+    bad = service.save('codex:reports', operations, last_test={'command': 'pytest', 'exit_code': '0'})
+    assert not bad['ok'] and bad['rejected']
+    for code in (1, 0):
+        result = service.save('codex:reports', operations, last_test={'command': 'pytest', 'exit_code': code})
+        summary, _ = _load(service, service.index.session('codex:reports'))
+        assert result['ok'] and summary.header['last_verify']['exit_code'] == code
+
+
+def test_completion_requires_explicit_goal_completion(env):
+    service, _, work = env
+    prompt(service, 'codex', 'goals', work, '完成目标')
+    result = service.save('codex:goals', [
+        {'op': 'append', 'section': 'goal', 'items': [{'text': '跑通回归'}]},
+        {'op': 'set_status', 'status': '已完成'},
+    ])
+    summary, _ = _load(service, service.index.session('codex:goals'))
+    assert not result['ok'] and summary.status == '进行中' and handoff.has_open_goals(summary)
+    result = service.save('codex:goals', [{'op': 'set_status', 'status': '已完成', 'complete_goals': ['G1']}])
+    summary, _ = _load(service, service.index.session('codex:goals'))
+    assert result['ok'] and summary.status == '已完成' and not handoff.has_open_goals(summary)
+    result = service.save('codex:goals', [{'op': 'append', 'section': 'goal', 'items': [{'text': '新增验收要求'}]}])
+    summary, _ = _load(service, service.index.session('codex:goals'))
+    assert result['ok'] and summary.status == '进行中' and handoff.has_open_goals(summary)
+
+
+def test_search_returns_matching_numbered_memory(env):
+    service, _, work = env
+    prompt(service, 'codex', 'snippet', work, '修复中文索引')
+    service.save('codex:snippet', [{'op': 'append', 'section': 'decision', 'items': [
+        {'text': '保留中文分词 | 中文索引需要支持二字查询'}]}])
+    result = service.search('二字查询', 'codex:snippet')
+    hit = next(item for item in result['results'] if item.get('session_id') == 'codex:snippet')
+    assert 'K1 保留中文分词' in hit['snippet'] and '二字查询' in hit['snippet']
+    assert len(hit['snippet']) <= 500

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from . import __version__
+from . import __version__, prompt
 from .service import TbrainService
 
 WRITING_SPEC = """\
@@ -25,6 +25,9 @@ WRITING_SPEC = """\
   环境/权限限制、时间不够、证据不足、已证实不可行；结论强度只允许 已排除（必须附证据）或 暂缓。
 - 下一步只能 1 条（≤150 字），写成“动作 + 怎么验证”；目标 ≤200 字。
 - 单条 ≤200 字；D#/K# 各超过 30 条会自动移入归档。
+- operations 按顺序执行：先保存证据，再用返回的 E# 引用；只补交 rejected 中失败的部分。
+- ok=true 表示全部通过；ok=false 时 written 仍列出已保存内容，待整理不代表校验通过。
+- last_test 仅在没有宿主采集结果时补报，不能覆盖宿主记录。
 """
 
 SAVE_TEMPLATE = """\
@@ -42,17 +45,6 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
    "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
-"""
-
-PROJECT_PROMPT_SPEC = """\
-项目提示词规范（project_prompt 操作，程序按此检查，不合格的节退回并说明原因）：
-- 只允许四节且顺序固定：最终目标（≤3 行，每行 ≤80 字）、硬规则（≤12 条，每条 ≤80 字）、
-  当前阶段（≤5 行，每行 ≤80 字）、关键路径和命令（≤10 条，每条 ≤100 字）；全文 ≤4000 字。
-- 硬规则每条必须带来源：（来源：[[会话名]]#U3 或 U3 / E4）。没有来源的不收。
-- 只写长期有效内容（3 个会话后仍成立），不写过程/尝试经过/某次会话做了什么；
-  不写时间词与评价语气词；主语写全称。
-- 关键时刻只说“阶段名：完成标准”；关键路径写成“用途：路径或命令”，程序会检查路径是否存在。
-- 整节替换；被替换的旧内容由程序写入变更日志。用户补充区（用户手写）不可改。
 """
 
 
@@ -93,7 +85,7 @@ def create_server(home: Path | None = None, *, service=None) -> FastMCP:
         return _with_meta(service, service.search(query=query, session_id=session_id, limit=limit))
 
     @server.tool(description=("把本轮增量写入当前会话总结。只提交变化的部分，不要重写整篇。\n\n"
-                              + WRITING_SPEC + "\n" + SAVE_TEMPLATE + "\n" + PROJECT_PROMPT_SPEC))
+                              + WRITING_SPEC + "\n" + SAVE_TEMPLATE + "\n" + prompt.PROJECT_PROMPT_SPEC))
     def save(session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
         return _with_meta(service, service.save(session_id=session_id, operations=operations, last_test=last_test))
 

@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from tbrain import handoff
 
 
@@ -108,3 +106,31 @@ def test_open_goals_helper():
     assert handoff.has_open_goals(summary) is True
     handoff.complete_goals(summary, ["G1"])
     assert handoff.has_open_goals(summary) is False
+
+
+def test_markdown_headings_and_escaped_headings_roundtrip():
+    summary = _summary()
+    message = "查看报告\n## 目标\n### U99\n\\## 附件\n\\\\## 原文\n```markdown\n## 用户指令\n```"
+    summary.raw_command = message
+    summary.sections["用户指令"][0]["text"] = message
+    summary.target = "目标\n## 下一步\n正文"
+    summary.extra["手写附注"] = "\\## 保留反斜线"
+    handoff.add_item(summary, "已完成", "处理完成\n### E88\n## 决策\n详情")
+    parsed = handoff.parse(handoff.render(summary))
+    assert parsed.raw_command == message
+    assert parsed.users[0]["text"] == message
+    assert parsed.target == summary.target
+    assert parsed.items("已完成")[0]["text"] == summary.items("已完成")[0]["text"]
+    assert not parsed.items("证据")
+    assert parsed.extra["手写附注"].strip() == summary.extra["手写附注"]
+    assert handoff.render(handoff.parse(handoff.render(parsed))) == handoff.render(parsed)
+
+
+def test_legacy_backslashes_survive_read_and_rewrite():
+    text = "## 原始命令\n\\## 普通标题\n\n## 用户指令\n### U1\n\\## 用户原话\n\n## 手写附注\n\\## 附注内容\n"
+    summary = handoff.parse(text)
+    for _ in range(2):
+        assert summary.raw_command == "\\## 普通标题"
+        assert summary.users[0]["text"] == "\\## 用户原话"
+        assert summary.extra["手写附注"].strip() == "\\## 附注内容"
+        summary = handoff.parse(handoff.render(summary))

@@ -72,8 +72,8 @@ def test_scenario3_after_stage_save_resume_has_done_evidence_next(brain):
     work = brain.workdir("proj3")
     claude.first_message("sc3-session-1", work, "实现 Tbrain 的 handoff/v1 文档模型")
     brain.service.save("claude-code:sc3-session-1", [
-        {"op": "append", "section": "done", "items": [{"text": "解析与渲染函数完成 [证据:E1]"}]},
         {"op": "append", "section": "evidence", "items": [{"kind": "file", "text": "src/tbrain/handoff.py:1"}]},
+        {"op": "append", "section": "done", "items": [{"text": "解析与渲染函数完成 [证据:E1]"}]},
         {"op": "replace", "section": "next_step", "text": "跑 handoff 测试并验证中文编号"},
     ])
     claude.end("sc3-session-1", work)

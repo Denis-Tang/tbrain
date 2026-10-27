@@ -216,12 +216,11 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		name: "tbrain_bootstrap",
 		label: "Tbrain Bootstrap",
 		description:
-			"加载 Tbrain 启动包：全局提示词、项目提示词、公共池、附件与最近会话。任务明确后调用一次。",
+			"加载 Tbrain 启动包。有 Hook 时已自动完成；仅无 Hook 或需要刷新项目提示词时调用。",
 		parameters: Type.Object({
 			cwd: Type.Optional(Type.String({ description: "工作目录，默认当前会话目录" })),
 			host_record: Type.Optional(Type.String({ description: "宿主会话记录地址（可为空）" })),
 			project: Type.Optional(Type.String({ description: "项目名；留空按工作目录匹配" })),
-			task: Type.Optional(Type.String({ description: "不超过 500 字的当前任务描述" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("bootstrap", {
@@ -230,7 +229,6 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 				cwd: String(params?.cwd || cwdOf(ctx)),
 				host_record: String(params?.host_record || ""),
 				project: String(params?.project || ""),
-				task: String(params?.task || ""),
 			});
 			return { content: [{ type: "text", text: toolText(result) }], details: result };
 		},
@@ -259,10 +257,15 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		label: "Tbrain Save",
 		description:
 			"保存会话总结与进度。operations 为 JSON 数组，元素形如 " +
-			'{"op":"append","section":"done","items":[...]} 或 {"op":"replace","section":"next_step","text":"..."}。',
+			'{"op":"append","section":"decision","items":[{"text":"决定 | 理由"}]}、' +
+			'{"op":"replace","section":"next_step","text":"动作 + 验证"} 或 ' +
+			'{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"}}。' +
+			"按启动包规范维护项目提示词：目标或长期规则、阶段、关键路径命令变化及旧内容失效时更新，无变化不改。" +
+			"操作顺序执行，先存证据再引用返回的 E#；正文连引用最多200字。ok=true表示全部通过，" +
+			"ok=false时written仍是已保存部分，只补交rejected，不重复整批。",
 		parameters: Type.Object({
 			operations: Type.Array(Type.Any(), { description: "save 操作数组" }),
-			last_test: Type.Optional(Type.Any({ description: "最近一次验证：{command, exit_code, at}" })),
+			last_test: Type.Optional(Type.Any({ description: "仅无宿主采集结果时补报：{command, exit_code}" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const result = callTool("save", {

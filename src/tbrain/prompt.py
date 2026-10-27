@@ -53,23 +53,6 @@ EXAMPLE = {
     "关键路径和命令": "格式：`用途：路径或命令`，最多 10 条，每条 <=100 字。例如：\n- 测试命令：.venv\\Scripts\\python.exe -m pytest -q",
 }
 
-TEMPLATE = f"""{USER_START}
-## 用户补充
-（用户手写区，程序和模型都不改）
-{USER_END}
-
-{MODEL_START}
-## 最终目标
-
-## 硬规则
-
-## 当前阶段
-
-## 关键路径和命令
-{MODEL_END}
-"""
-
-
 def empty_sections() -> dict:
     return {name: "" for name in SECTION_ORDER}
 

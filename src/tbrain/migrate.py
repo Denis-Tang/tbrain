@@ -60,10 +60,6 @@ def _old_host(agent: str) -> str:
     return HOST_MAP.get(str(agent or "").strip().lower(), "unknown")
 
 
-def _norm_host(agent: str) -> str:
-    return _old_host(agent)
-
-
 def _read_front(text: str) -> dict:
     if not text.startswith("---", 0):
         return {}
@@ -463,7 +459,6 @@ def execute(service, old_home: Path, new_vault: Path | None = None) -> dict:
     # 4) 全局提示词
     if old["global_prompt"]:
         current = service.store.global_prompt()
-        has_user_text = "用户补充" not in current or len(current.strip()) > 0
         user_block = ""
         if "<!-- owner:user -->" in current:
             start = current.find("<!-- owner:user -->") + len("<!-- owner:user -->")

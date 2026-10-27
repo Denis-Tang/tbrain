@@ -30,7 +30,6 @@ from . import paths
 PACKAGE_ROOT = "tbrain"
 REQUIRED_FILES = ("tbrain.exe", "desktop/Tbrain.Desktop.exe", "runtime/node.exe")
 REQUIRED_DIRS = ("_internal",)
-ENTRY_FILE = "tbrain.cmd"
 _VERSION_RE = re.compile(r"^[0-9][0-9A-Za-z._+-]*$")
 
 # Pure cmd.exe, ASCII only.  ``%~dp0`` always ends with a backslash.
@@ -205,7 +204,6 @@ def _is_junction(path: Path) -> bool:
         return False
     try:
         import ctypes
-        from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         attrs = kernel32.GetFileAttributesW(str(path))

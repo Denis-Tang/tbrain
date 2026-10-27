@@ -93,22 +93,5 @@ def integrations_dir(home: Path | None = None) -> Path:
     return app_home(home) / "integrations"
 
 
-def settings_file(home: Path | None = None) -> Path:
-    return app_home(home) / "settings.json"
-
-
-def updates_dir(home: Path | None = None) -> Path:
-    return app_home(home) / "updates"
-
-
 def update_state_file(home: Path | None = None) -> Path:
     return app_home(home) / "update-state.json"
-
-
-def connect_state_file(home: Path | None = None) -> Path:
-    """Small record of what the last ``connect`` wrote (used by doctor)."""
-    return app_home(home) / "connect-state.json"
-
-
-def logs_dir(home: Path | None = None) -> Path:
-    return app_home(home) / "logs"

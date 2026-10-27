@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
-
 import pytest
 
 from tbrain import handoff
@@ -317,6 +315,90 @@ def test_long_startup_prompt_keeps_identity_and_time(env):
     assert "session_id: claude-code:long-startup" in result["package"]
     assert "## 当前时间" in result["package"]
     assert len(result["package"]) <= 9000
+
+
+@pytest.mark.parametrize("host", ["claude-code", "codex", "dsh", "pi"])
+def test_restored_id_keeps_saved_progress_and_followup_events(env, host):
+    service, _, work = env
+    prompt(service, host, "old", work, "保留恢复会话的存储进度")
+    service.save(sid(host, "old"), [{"op": "replace", "section": "target", "text": "已保存的目标"}])
+    result = service.hook(host, {"hook_event_name": "SessionStart", "source": "resume",
+                                "session_id": "restored", "parent_session_id": sid(host, "old"),
+                                "cwd": str(work)})
+    assert sid(host, "old") in str(result)
+    assert service.index.get_session_link(host, "restored")["session_id"] == sid(host, "old")
+    prompt(service, host, "restored", work, "恢复后的新要求")
+    assert service.index.session(sid(host, "restored")) is None
+    summary, _ = _load(service, service.index.session(sid(host, "old")))
+    assert summary.users[-1]["text"] == "恢复后的新要求" and summary.target == "已保存的目标"
+    assert service.bootstrap(sid(host, "restored"), host, str(work))["session_id"] == sid(host, "old")
+    saved = service.save(sid(host, "restored"), [{"op": "replace", "section": "next_step", "text": "验证原总结"}])
+    assert saved["ok"] and saved["session"]["session_id"] == sid(host, "old")
+    service.hook(host, {"hook_event_name": "SessionEnd", "session_id": "restored", "cwd": str(work)})
+    assert _load(service, service.index.session(sid(host, "old")))[0].status == "已中断"
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_same_opening_does_not_merge_independent_sessions(env, saved):
+    service, _, work = env
+    text = "同目录下独立核对索引实现"
+    prompt(service, "codex", "first", work, text)
+    if saved:
+        service.save("codex:first", [{"op": "replace", "section": "target", "text": "已有进度"}])
+    original, path = _load(service, service.index.session("codex:first"))
+    original_bytes = path.read_bytes()
+    prompt(service, "codex", "second", work, text)
+    second = service.index.session("codex:second")
+    assert second and second["path"] != service.index.session(original.session_id)["path"]
+    assert path.read_bytes() == original_bytes
+
+
+def test_agent_log_records_committed_changes_to_existing_fields(env):
+    service, _, work = env
+    prompt(service, "codex", "log", work, "记录已有内容的真实修改")
+    service.save("codex:log", [
+        {"op": "replace", "section": "target", "text": "旧目标"},
+        {"op": "replace", "section": "next_step", "text": "旧下一步"},
+        {"op": "append", "section": "goal", "items": [{"text": "验证保存"}]},
+        {"op": "append", "section": "decision", "items": [{"text": "使用旧方案 | 验证接口"}]},
+    ])
+    log = service.home / "agent-changes.jsonl"
+    initial_count = len(log.read_text(encoding="utf-8").splitlines())
+    operations = [
+        {"op": "replace", "section": "target", "text": "新目标"},
+        {"op": "replace", "section": "next_step", "text": "新下一步"},
+        {"op": "set_status", "status": "已完成", "complete_goals": ["G1"], "supersede": ["K1"]},
+    ]
+    result = service.save("codex:log", operations + [{"op": "replace", "section": "next_step", "text": ""}])
+    assert not result["ok"]
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()][initial_count:]
+    fields = {entry["field"]: entry for entry in records}
+    assert set(fields) == {"target", "next_step", "status", "G1", "K1"}
+    assert all(entry["revision"] == result["revision"] for entry in records)
+    assert fields["target"]["old"] == "旧目标" and fields["target"]["new"] == "新目标"
+    assert not fields["G1"]["old"].get("done") and fields["G1"]["new"]["done"]
+    assert "被取代" in fields["K1"]["new"]["text"]
+    saved_log = log.read_bytes()
+    assert service.save("codex:log", operations)["ok"]
+    assert log.read_bytes() == saved_log
+
+
+def test_failed_summary_write_does_not_create_change_log(env, monkeypatch):
+    from tbrain import session as flow
+
+    service, _, work = env
+    prompt(service, "codex", "failed-write", work, "核对写入失败不记录成功变更")
+    _, path = _load(service, service.index.session("codex:failed-write"))
+    original = path.read_bytes()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("模拟磁盘写入失败")
+
+    monkeypatch.setattr(flow, "write_session", fail_write)
+    with pytest.raises(OSError, match="模拟磁盘写入失败"):
+        service.save("codex:failed-write", [{"op": "replace", "section": "target", "text": "未写入的目标"}])
+    assert path.read_bytes() == original
+    assert not (service.home / "agent-changes.jsonl").exists()
 
 
 def test_project_prompt_through_save(env):

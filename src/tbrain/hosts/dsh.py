@@ -199,7 +199,7 @@ def doctor(host: str = HOST, app_home: Path | None = None,
     item.update(mcp='tbrain-mcp' in ids, hooks='tbrain-native' in ids, enabled=bool(tbrain_ids))
     if not tbrain_ids:
         item.update(status="yellow",
-                    detail=f"未接入 DSH（profile patch 中没有 Tbrain 条目）；运行 tbrain connect dsh。")
+                    detail="未接入 DSH（profile patch 中没有 Tbrain 条目）；运行 tbrain connect dsh。")
         return item
     missing = [name for name in REQUIRED_IDS if name not in ids]
     if re.search(r"shared[-_]brain", text, re.IGNORECASE):

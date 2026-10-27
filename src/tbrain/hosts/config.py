@@ -222,22 +222,6 @@ def has_toml_section(text: str, header: str) -> bool:
 # YAML markers
 # ---------------------------------------------------------------------------
 
-def strip_yaml_block(text: str) -> str:
-    lines = text.splitlines()
-    output: list[str] = []
-    inside = False
-    for line in lines:
-        if line.strip() == YAML_MARK_START:
-            inside = True
-            continue
-        if inside:
-            if line.strip() == YAML_MARK_END:
-                inside = False
-            continue
-        output.append(line)
-    return "\n".join(output).rstrip("\n") + "\n" if output else ""
-
-
 def append_yaml_block(text: str, block: str) -> str:
     body = text.rstrip("\n")
     managed = f"{YAML_MARK_START}\n{block.rstrip()}\n{YAML_MARK_END}"

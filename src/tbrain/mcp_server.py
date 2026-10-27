@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
-
 from . import __version__, prompt
 from .service import TbrainService
 
@@ -59,7 +57,9 @@ def _with_meta(service: TbrainService, result: dict) -> dict:
     return result
 
 
-def create_server(home: Path | None = None, *, service=None) -> FastMCP:
+def create_server(home: Path | None = None, *, service=None):
+    from mcp.server.fastmcp import FastMCP
+
     service = service or TbrainService(home)
     server = FastMCP("Tbrain")
     server._mcp_server.version = __version__

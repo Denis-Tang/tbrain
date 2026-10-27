@@ -19,7 +19,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import yaml
 
@@ -1157,11 +1157,6 @@ class Store:
 
 # ---------------------------------------------------------------------------
 # 模块级辅助
-
-
-def _block_body(text: str, block: str) -> str:
-    blocks = parse_blocks(text)
-    return str((blocks.get(block) or {}).get("body") or "")
 
 
 def _parse_sections(model_body: str) -> dict[str, str]:

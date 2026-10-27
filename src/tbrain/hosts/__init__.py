@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import claude, codex, config, dsh, pi
+from . import claude, codex, dsh, pi
 from .base import (HOST_EVENTS, HOST_SPECS, HostSpec, entry_for, hook_command,
                    host_spec, normalize, render)
 from .config import (HOST_ALIASES, SUPPORTED_HOSTS, HostError, canonical_host,

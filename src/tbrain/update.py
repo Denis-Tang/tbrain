@@ -68,10 +68,6 @@ def is_newer(candidate: str, current: str) -> bool:
     return remote > local
 
 
-def release_page() -> str:
-    return RELEASE_PAGE
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 

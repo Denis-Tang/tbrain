@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import installer, paths
-from ..hooks import HookEvent, HookResult
+from ..hooks import HookEvent
 from . import config
 
 HOST_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd")

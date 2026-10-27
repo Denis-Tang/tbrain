@@ -38,10 +38,6 @@ class DesktopAPI:
     def status(self):
         return self._call(self._service.status)
 
-    def quit(self):
-        self._quit_requested = True
-        return {"ok": True}
-
     def setup_info(self):
         return self._call(self._setup_info)
 

@@ -236,11 +236,14 @@ class TbrainService:
             return info
         try:
             branch = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             head = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"],
-                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             status = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
-                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3)
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if branch.returncode == 0:
                 info["branch"] = branch.stdout.strip()
             if head.returncode == 0:

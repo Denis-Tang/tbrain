@@ -26,21 +26,6 @@ except ImportError:  # pragma: no cover - defensive
 FALLBACK_TIMEZONE = "Asia/Shanghai"
 
 
-def default_home() -> Path:
-    """The application data directory (kept for backwards-compatible imports)."""
-    from .paths import app_home
-
-    return app_home()
-
-
-def default_vault_path() -> Path:
-    """Default knowledge-base location; the user can change it in settings."""
-    configured = os.environ.get("TBRAIN_VAULT", "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / "TbrainVault"
-
-
 def available_timezones_list() -> list[str]:
     """Sorted IANA names for the settings page drop-down."""
     return sorted(available_timezones())
@@ -95,10 +80,6 @@ class Settings:
     reminder_context_switch: bool = True
     install_root: str = ""
 
-    @property
-    def resolved_timezone(self) -> str:
-        return self.timezone or system_timezone()
-
     def as_dict(self) -> dict:
         return asdict(self)
 
@@ -151,10 +132,6 @@ def settings_from(values: dict) -> Settings:
     """Build Settings from a raw JSON dict, ignoring unknown/legacy keys."""
     merged = normalize({key: values[key] for key in KNOWN_KEYS if key in values})
     return Settings(**merged)
-
-
-def load_settings(home: Path | None = None) -> Settings:
-    return SettingsStore(home).load()
 
 
 def save_settings(home: Path | None, values: dict) -> Settings:

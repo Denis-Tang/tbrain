@@ -16,7 +16,6 @@ jieba 在首次需要分词时才加载（测试可 monkeypatch ``_JIEBA`` / ``_
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Iterable, Sequence
 

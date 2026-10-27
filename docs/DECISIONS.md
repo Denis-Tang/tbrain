@@ -77,7 +77,7 @@
 ### 4.3 会话身份与 hook 注入
 - 会话 ID 形如 `<宿主名>:<宿主会话ID>`（宿主名 claude-code/codex/dsh/pi；别名做归一化）。
 - 启动注入包与每次 bootstrap 返回都带 `## 当前会话 session_id: …`，模型之后调用 search/save/resume 必须原样传；缺失/未知时返回明确修复提示。
-- 还原会话拿到新 ID 时：同一 cwd 下“原始命令 == 首条用户消息”完全相同（sha256 规范化比对）视为同一会话，写 session_links 记录新旧映射。
+- 还原会话拿到新 ID 时：仅接受已有 session_links 映射，或 SessionStart 的 source=resume/compact 且 parent_session_id 明确指向同宿主旧会话；不用目录、开场文字或是否保存进度猜测身份。分支优先建立独立记录，不沿用旧别名。
 
 ### 4.4 hook 生成方式
 - `app_home/hooks.json` 只给 DSH 桥（`configPath` 指向它，命令 `tbrain hook --host dsh`）。

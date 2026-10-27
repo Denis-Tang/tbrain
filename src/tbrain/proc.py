@@ -25,7 +25,6 @@ from . import __version__, paths
 
 DEFAULT_INTERVAL = 0.5
 DEFAULT_TIMEOUT = 5.0
-ROLES = ("desktop", "mcp", "hook", "cli", "test")
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +246,6 @@ def live_versions(home: Path | None = None, alive=None) -> list[str]:
 # exit requests and eviction
 # ---------------------------------------------------------------------------
 
-def read_exit_request(pid: int | None = None, home: Path | None = None) -> dict | None:
-    return _read_json(_exit_path(int(pid or os.getpid()), home))
-
-
 def request_exit(pid: int, home: Path | None = None, requester: int | None = None,
                  reason: str = "", current_version: str = "") -> dict:
     """Create ``<pid>.exit`` asking that process to stop gracefully."""
@@ -415,10 +410,6 @@ class ProcessWatcher:
 
     def join(self, timeout: float | None = None) -> None:
         self._thread.join(timeout)
-
-    @property
-    def stopped(self) -> bool:
-        return self._stop.is_set()
 
     def is_running(self) -> bool:
         return self._started and self._thread.is_alive()

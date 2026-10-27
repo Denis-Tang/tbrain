@@ -9,8 +9,6 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 import json
 import re
-import subprocess
-import time
 import sys
 import platform
 from importlib import metadata
@@ -78,6 +76,11 @@ def _same_text(left: str, right: str) -> bool:
 def _session_row(service, session_id: str) -> dict | None:
     service.refresh_index()
     row = service.index.session(session_id)
+    if not row:
+        parts = identity.split_session_id(session_id)
+        link = service.index.get_session_link(*parts) if parts else None
+        if link:
+            row = service.index.session(link["session_id"])
     if not row:
         return None
     path = service.vault_root() / row["path"]
@@ -203,7 +206,7 @@ def create_summary(service, *, host: str, host_session_id: str, cwd: str,
 
 def resolve_session(service, host: str, host_session_id: str, cwd: str,
                     first_message: str = "", host_record: str = "") -> tuple[handoff.Summary, Path, bool]:
-    """只按宿主身份复用；不同 ID（包括分支）分别保存，通过 resume 显式接续。"""
+    """按宿主 ID 或明确登记的映射复用，不用开场文字猜测会话身份。"""
     session_id = identity.build_session_id(host, host_session_id)
     row = _session_row(service, session_id)
     if row:
@@ -483,6 +486,10 @@ def handle_hook(service, event: HookEvent) -> HookResult:
     if event.kind == "session-start":
         source = (event.source or "startup").lower()
         if source == "fork":
+            # 分支必须有自己的身份，不能沿用旧版本猜出的别名。
+            if not service.index.session(identity.build_session_id(host, event.host_session_id)):
+                create_summary(service, host=host, host_session_id=event.host_session_id, cwd=event.cwd,
+                               host_record=event.extra.get("host_record", ""))
             parent = event.extra.get("parent_session_id", "")
             if parent and parent != identity.build_session_id(host, event.host_session_id):
                 current = bootstrap(service, identity.build_session_id(host, event.host_session_id), host,
@@ -496,6 +503,14 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         if source == "startup":
             return HookResult()
         existing = _load_or_none(service, host, event.host_session_id)
+        parent = event.extra.get("parent_session_id", "")
+        if existing[0] is None and source in ("resume", "compact") and parent:
+            row = _session_row(service, parent)
+            if row and row["agent"] == host:
+                summary, path = load_session(service, row)
+                service.index.register_link(host, event.host_session_id, summary.session_id, event.cwd,
+                                            identity.first_message_hash(summary.raw_command))
+                existing = summary, path
         if existing[0] is None:
             # 未知会话（例如首次被 Tbrain 接管的历史会话）：等第一条用户消息再立项。
             return HookResult()
@@ -759,6 +774,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         summary.header["saved_users"] = len(summary.users)
         summary.header["saved_verify_at"] = summary.header.get("last_verify", {}).get("at")
     write_session(service, summary, path)
+    _log_agent_changes(service, handoff.parse(raw_text), summary)
     service.index.log_access(summary.session_id, "save")
     return {
         "ok": not rejected,
@@ -1124,6 +1140,28 @@ def session_detail(service, session_id: str) -> dict:
 
 def _rejection_file(service) -> Path:
     return service.home / "rejections.json"
+
+
+def _log_agent_changes(service, before, summary) -> None:
+    """只记录保存成功的已有字段变更；新增条目由会话版本保留。"""
+    previous, current = (
+        {"target": item.target, "next_step": item.next_step, "status": item.status,
+         **{entry["id"]: entry for section in ("决策", "未完成目标") for entry in item.items(section)}}
+        for item in (before, summary)
+    )
+    changes = [field for field in previous if field in current and previous[field] != current[field]]
+    if not changes:
+        return
+    try:
+        with (service.home / "agent-changes.jsonl").open("a", encoding="utf-8") as handle:
+            for field in changes:
+                record = {"at": _utc_iso(service.now().utc), "session_id": summary.session_id,
+                          "revision": summary.header["revision"],
+                          "op": "replace" if field in ("target", "next_step") else "set_status",
+                          "field": field, "old": previous[field], "new": current[field]}
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _read_rejections(service) -> dict:

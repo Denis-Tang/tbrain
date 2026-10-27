@@ -484,9 +484,3 @@ def utc_now(app_home: Path | None = None) -> datetime:
         offset = float(cache.get("offset_seconds") or 0.0)  # type: ignore[union-attr]
         return _epoch_to_utc(sys_ts + offset)
     return _epoch_to_utc(sys_ts)
-
-
-def time_info(app_home: Path | None, settings: Any = None) -> dict:
-    """桌面 ``time()`` 用的便捷包装（不触发额外校时）。"""
-    current = now(app_home, settings)
-    return current.as_dict()

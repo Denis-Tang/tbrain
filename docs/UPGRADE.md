@@ -12,7 +12,7 @@
 %LOCALAPPDATA%\Programs\Tbrain\
   bin\tbrain.cmd            # 稳定入口：读 current.txt → versions\<ver>\tbrain.exe %*
   current.txt               # 当前版本号（原子写）
-  current\                  # 可选 junction → versions\<ver>（兼容旧式引用；创建失败会跳过）
+  current\                  # junction → versions\<ver>；快捷方式经它跟随升级
   versions\0.6.0\...        # 每个版本一份完整程序
   versions\0.6.1\...
 ```
@@ -39,6 +39,8 @@
 2. 原子改写 `current.txt`（并尽力更新 `current` junction）。
 
 因此 **Claude Code / Codex / DSH 的 hook 与 MCP 配置、pi 的扩展文件都不需要重新写**，新会话（或 DSH 的 MCP 热重连、pi 的 `/reload`）即使用新版本。
+
+桌面、开始菜单、任务栏固定的 Tbrain 快捷方式都指向 `<安装目录>\current\...`（junction），所以同一个图标在升级或回退后自动启动新版本。早期版本创建的、仍指向 `versions\<版本>\...` 的快捷方式，会在下次切版本时自动改写到 `current`（原快捷方式保留一份 `.bak`）；快捷方式里没有参数时，窗口宿主也会读 `current.txt` 启动当前版本。
 
 ## 3. 进程登记与旧版本淘汰
 
@@ -78,7 +80,7 @@
 3. **校验**：检查压缩包结构（`tbrain/` 根、必需文件、`_internal/`）；
 4. **安装**：解压并复制到 `versions\<新版本>`（同卷先 staging 再 rename，半拷贝的目录永远不会被选中）；
 5. **停旧进程**：见第 3 节；
-6. **切版本**：原子写 `current.txt` + 更新 junction；
+6. **切版本**：原子写 `current.txt` + 更新 junction，并把仍指向 `versions\<版本>\...` 的桌面、开始菜单、任务栏快捷方式改写到 `current`；
 7. **跑 doctor**：把检查结果附在升级结果里（doctor 失败不会撤销已完成的升级）；
 8. **保留版本**：`prune_versions(keep=2)` 保留当前与最近一个版本，删除更旧的。
 

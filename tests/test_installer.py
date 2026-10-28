@@ -4,6 +4,7 @@ Everything runs inside ``tmp_path`` with a fake package (real executables are no
 needed); the tests never read or write a real installation.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -177,3 +178,44 @@ def test_entry_script_is_ascii_and_reads_current(tmp_path):
     # a manual switch is picked up by the same entry, no rewrite needed
     installer.switch_current("0.6.0", root=root)
     assert installer.current_version(root) == "0.6.0"
+
+
+def _shortcut_target(path: Path) -> str:
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{str(path).replace(chr(39), chr(39) * 2)}');$s.TargetPath"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    return completed.stdout.strip()
+
+
+def _make_shortcut(path: Path, target: Path) -> None:
+    command = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{str(path).replace(chr(39), chr(39) * 2)}');"
+               f"$s.TargetPath='{str(target).replace(chr(39), chr(39) * 2)}';$s.Save()")
+    subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="快捷方式是 Windows 功能")
+def test_retarget_shortcuts_follows_current_version(_isolate_shortcuts, tmp_path):
+    root = tmp_path / "install"
+    installer.install_from_dir(make_package(tmp_path, "0.6.0"), "0.6.0", root=root)
+    links = tmp_path / "links"
+    links.mkdir()
+    link = links / "Tbrain.lnk"
+    _make_shortcut(link, root / "versions" / "0.6.0" / "desktop" / "Tbrain.Desktop.exe")
+
+    result = _isolate_shortcuts(root, directories=[links])
+
+    assert result["ok"] is True
+    assert result["changed"] == [str(link)]
+    target = _shortcut_target(link).lower()
+    assert target.endswith(r"current\desktop\tbrain.desktop.exe")
+    assert Path(str(link) + ".bak").is_file()
+    # nothing left to rewrite on the next upgrade
+    assert _isolate_shortcuts(root, directories=[links])["changed"] == []
+
+
+def test_retarget_shortcuts_without_current_is_a_noop(_isolate_shortcuts, tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    assert _isolate_shortcuts(root)["skipped"] in {"no-current", "not-windows"}

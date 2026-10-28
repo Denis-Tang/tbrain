@@ -18,13 +18,34 @@ using Forms = System.Windows.Forms;
 
 internal static class Program
 {
+    /// <summary>Find the launcher of the selected version, falling back to this copy.</summary>
+    private static string ResolveLauncher()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var depth = 0; depth < 4 && directory != null; depth++, directory = directory.Parent)
+        {
+            var currentFile = Path.Combine(directory.FullName, "current.txt");
+            if (!File.Exists(currentFile)) continue;
+            string version;
+            try { version = File.ReadAllText(currentFile).Trim(); } catch (IOException) { continue; }
+            if (version.Length == 0) continue;
+            var stable = Path.Combine(directory.FullName, "current", "tbrain.exe");
+            if (File.Exists(stable)) return stable;
+            var installed = Path.Combine(directory.FullName, "versions", version, "tbrain.exe");
+            if (File.Exists(installed)) return installed;
+        }
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "tbrain.exe"));
+    }
+
     [STAThread]
     public static void Main(string[] args)
     {
         // Taskbar pins launch the window host without the parent's bridge arguments.
+        // Follow current.txt so a pin that still lives in an older version folder
+        // starts the selected version instead of that stale copy.
         if (args.Length == 0)
         {
-            var launcher = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "tbrain.exe"));
+            var launcher = ResolveLauncher();
             Process.Start(new ProcessStartInfo(launcher) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(launcher)! });
             return;
         }

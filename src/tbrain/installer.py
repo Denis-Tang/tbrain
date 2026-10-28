@@ -15,6 +15,8 @@ ever being selectable.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import shutil
@@ -43,6 +45,54 @@ if not defined TBRAIN_VERSION (
 )
 "%~dp0..\\versions\\%TBRAIN_VERSION%\\tbrain.exe" %*
 exit /b %ERRORLEVEL%
+"""
+
+# Rewrite shortcuts that still point into ``versions/<ver>/`` so they follow the
+# ``current`` junction.  Reads TBRAIN_INSTALL_ROOT / TBRAIN_SHORTCUT_DIRS; an
+# empty TBRAIN_SHORTCUT_DIRS means "ask Windows for the usual places".
+SHORTCUT_SCRIPT = r"""
+$ErrorActionPreference = 'Continue'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$base = $env:TBRAIN_INSTALL_ROOT.TrimEnd('\')
+$from = $base + '\versions\'
+$to = $base + '\current\'
+if ($env:TBRAIN_SHORTCUT_DIRS) {
+    $dirs = @($env:TBRAIN_SHORTCUT_DIRS -split ';')
+} else {
+    $dirs = @(
+        [Environment]::GetFolderPath('Desktop'),
+        [Environment]::GetFolderPath('CommonDesktopDirectory'),
+        [Environment]::GetFolderPath('Programs'),
+        [Environment]::GetFolderPath('CommonPrograms'),
+        (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
+    )
+}
+$shell = New-Object -ComObject WScript.Shell
+$changed = @()
+foreach ($dir in $dirs) {
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
+        try {
+            $link = $shell.CreateShortcut($file.FullName)
+            $target = $link.TargetPath
+            if (-not $target -or -not $target.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $relative = $target.Substring($from.Length)
+            $split = $relative.IndexOf('\')
+            if ($split -lt 1) { continue }
+            Copy-Item -LiteralPath $file.FullName -Destination ($file.FullName + '.bak') -Force
+            $link.TargetPath = $to + $relative.Substring($split + 1)
+            $working = $link.WorkingDirectory
+            if ($working -and $working.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) {
+                $workRelative = $working.Substring($from.Length)
+                $workSplit = $workRelative.IndexOf('\')
+                if ($workSplit -ge 0) { $link.WorkingDirectory = $to + $workRelative.Substring($workSplit + 1) }
+            }
+            $link.Save()
+            $changed += $file.FullName
+        } catch { }
+    }
+}
+ConvertTo-Json -InputObject @($changed) -Compress
 """
 
 
@@ -252,6 +302,46 @@ def _update_junction(root: Path, version: str) -> str:
 # install / switch / prune / rollback / uninstall
 # ---------------------------------------------------------------------------
 
+def retarget_shortcuts(root: Path | None = None, directories: list[Path] | None = None,
+                       timeout: float = 20.0) -> dict:
+    """Point existing Tbrain shortcuts at the stable ``current`` entry.
+
+    Shortcuts created by an older build (or pinned to the taskbar by hand) may
+    target ``versions/<version>/...``; once that version is pruned they break.
+    Rewriting them to ``current/...`` makes the same icon follow every upgrade.
+    Windows only; never raises, upgrade must not fail because of a shortcut.
+    """
+    if os.name != "nt":
+        return {"ok": True, "changed": [], "skipped": "not-windows"}
+    base = Path(root) if root is not None else paths.install_root()
+    if directories is not None and not directories:
+        return {"ok": True, "changed": [], "skipped": "no-directories"}
+    if not paths.current_dir(base).is_dir():
+        return {"ok": True, "changed": [], "skipped": "no-current"}
+    environment = dict(os.environ, TBRAIN_INSTALL_ROOT=str(base))
+    if directories is not None:
+        environment["TBRAIN_SHORTCUT_DIRS"] = ";".join(str(path) for path in directories)
+    encoded = base64.b64encode(SHORTCUT_SCRIPT.encode("utf-16-le")).decode("ascii")
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=environment, timeout=timeout, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "changed": [], "error": str(exc) or "无法调用 PowerShell"}
+    raw = (completed.stdout or "").strip()
+    changed: list[str] = []
+    if raw:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {"ok": False, "changed": [], "error": "无法读取快捷方式结果"}
+        changed = [data] if isinstance(data, str) else [str(item) for item in data]
+    return {"ok": completed.returncode == 0, "changed": changed}
+
+
 def switch_current(version: str, root: Path | None = None) -> dict:
     """Select an installed version: atomic current.txt write plus junction update."""
     base = Path(root) if root is not None else paths.install_root()
@@ -261,8 +351,9 @@ def switch_current(version: str, root: Path | None = None) -> dict:
     _write_atomic(paths.current_file(base), selected + "\n")
     junction = _update_junction(base, selected)
     verify = verify_layout(selected, base)
+    shortcuts = retarget_shortcuts(base)
     return {"ok": verify["ok"], "version": selected, "entry": entry_command(base),
-            "junction": junction, "missing": verify["missing"]}
+            "junction": junction, "shortcuts": shortcuts, "missing": verify["missing"]}
 
 
 def install_from_dir(source: Path, version: str, root: Path | None = None,

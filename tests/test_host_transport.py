@@ -163,7 +163,11 @@ if (!tools.tbrain_save.description.includes('project_prompt') || !tools.tbrain_s
 let id = 'pi-first';
 const ctx = {cwd, sessionManager: {getSessionId: () => id, getSessionFile: () => cwd + '/session.jsonl'},
   getContextUsage: () => ({tokens: 900, contextWindow: 1000})};
+let ticks = 0;
+const heartbeat = setInterval(() => ticks++, 10);
 await handlers.input({text: '验证 pi 的真实保存链路'}, ctx);
+clearInterval(heartbeat);
+if (!ticks) throw Error('Tbrain CLI blocked the host event loop');
 const startup = await handlers.before_agent_start();
 if (!startup?.message?.content.includes('pi:pi-first')) throw Error('missing startup');
 const saved = await tools.tbrain_save.execute('save', {operations: [{op: 'append', section: 'done',

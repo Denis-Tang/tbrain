@@ -56,6 +56,8 @@ Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定�
 
 ### pi 扩展
 
+Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程；返回顺序和原有超时保持不变。
+
 `pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`；pi 没有 Stop-block 等价事件，因此“请保存”提醒降级为下一轮提示（不强制续跑）。
 
 ## 升级后旧进程

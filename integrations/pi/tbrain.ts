@@ -13,7 +13,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { Type } from "typebox";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,21 +37,24 @@ function entryPath(): string {
 }
 
 /** Run the fixed entry with JSON on stdin and return its stdout. */
-function callTbrain(args: string[], input: unknown, timeout: number): string {
+function callTbrain(args: string[], input: unknown, timeout: number): Promise<string> {
 	const entry = entryPath();
 	const serialized = JSON.stringify(input ?? {});
 	const options = {
-		input: serialized,
 		encoding: "utf8" as const,
 		timeout,
 		windowsHide: true,
 		maxBuffer: 16 * 1024 * 1024,
 	};
-	if (process.platform === "win32") {
-		// cmd.exe is a real executable; a .cmd file cannot be spawned directly.
-		return execFileSync("cmd.exe", ["/d", "/c", entry, ...args], options);
-	}
-	return execFileSync(entry, args, options);
+	return new Promise((resolve, reject) => {
+		// A .cmd entry needs cmd.exe; keep JSON on stdin and the host event loop free.
+		const windows = process.platform === "win32";
+		const child = execFile(windows ? "cmd.exe" : entry,
+			windows ? ["/d", "/c", entry, ...args] : args, options,
+			(error, stdout) => error ? reject(error) : resolve(stdout));
+		child.stdin!.on("error", reject);
+		child.stdin!.end(serialized);
+	});
 }
 
 function parseJson(text: string): any {
@@ -105,9 +108,9 @@ const PI_SOURCE: Record<string, string> = {
 	clear: "clear",
 };
 
-function hookEvent(eventName: string, payload: Record<string, unknown>): Record<string, any> {
+async function hookEvent(eventName: string, payload: Record<string, unknown>): Promise<Record<string, any>> {
 	try {
-		const raw = callTbrain(["hook", "--host", HOST], { hook_event_name: eventName, ...payload }, HOOK_TIMEOUT_MS);
+		const raw = await callTbrain(["hook", "--host", HOST], { hook_event_name: eventName, ...payload }, HOOK_TIMEOUT_MS);
 		return parseJson(raw);
 	} catch {
 		// Hook I/O is a host boundary: never break the pi turn because Tbrain is unavailable.
@@ -124,9 +127,9 @@ function toolText(result: any): string {
 }
 
 /** Call one Tbrain tool; failures become a model-readable error instead of a throw. */
-function callTool(name: string, payload: Record<string, unknown>): any {
+async function callTool(name: string, payload: Record<string, unknown>): Promise<any> {
 	try {
-		return parseJson(callTbrain(["tool", name], payload, TOOL_TIMEOUT_MS));
+		return parseJson(await callTbrain(["tool", name], payload, TOOL_TIMEOUT_MS));
 	} catch (error) {
 		return { ok: false, error: `Tbrain 不可用（${name}）：${String(error)}` };
 	}
@@ -155,13 +158,13 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	// --- lifecycle hooks -------------------------------------------------
 	pi.on("session_start", async (event: any, ctx: any) => {
 		const source = PI_SOURCE[String(event?.reason || "startup")] || "startup";
-		remember(hookEvent("SessionStart", eventPayload({ source }, ctx)));
+		remember(await hookEvent("SessionStart", eventPayload({ source }, ctx)));
 	});
 
 	pi.on("input", async (event: any, ctx: any) => {
 		const text = typeof event?.text === "string" ? event.text : "";
 		if (text.trim()) {
-			remember(hookEvent("UserPromptSubmit", eventPayload({ prompt: text }, ctx)));
+			remember(await hookEvent("UserPromptSubmit", eventPayload({ prompt: text }, ctx)));
 		}
 	});
 
@@ -177,8 +180,8 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (_event: any, ctx: any) => {
-		const response = hookEvent("Stop", eventPayload({ stop_hook_active: false }, ctx));
-		const hint = hookEvent("Context", eventPayload({}, ctx));
+		const response = await hookEvent("Stop", eventPayload({ stop_hook_active: false }, ctx));
+		const hint = await hookEvent("Context", eventPayload({}, ctx));
 		const reminder = [response?.additional_context || response?.reason, hint?.additional_context].filter(Boolean).join("\n");
 		if (!reminder.trim()) return;
 		try {
@@ -193,22 +196,22 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_before_compact", async (_event: any, ctx: any) => {
-		remember(hookEvent("PreCompact", eventPayload({}, ctx)));
+		remember(await hookEvent("PreCompact", eventPayload({}, ctx)));
 	});
 	pi.on("session_compact", async (_event: any, ctx: any) => {
-		remember(hookEvent("SessionStart", eventPayload({ source: "compact" }, ctx)));
+		remember(await hookEvent("SessionStart", eventPayload({ source: "compact" }, ctx)));
 	});
 	pi.on("tool_result", async (event: any, ctx: any) => {
 		if (event.toolName === "bash" && /\b(pytest|unittest|test|check|build)\b/i.test(event.input?.command || "") &&
 			typeof event.details?.exitCode === "number") {
-			hookEvent("ToolResult", eventPayload({ last_test: {
+			await hookEvent("ToolResult", eventPayload({ last_test: {
 				command: event.input.command, exit_code: event.details.exitCode,
 			} }, ctx));
 		}
 	});
 
 	pi.on("session_shutdown", async (event: any, ctx: any) => {
-		hookEvent("SessionEnd", eventPayload({ reason: String(event?.reason || "quit") }, ctx));
+		await hookEvent("SessionEnd", eventPayload({ reason: String(event?.reason || "quit") }, ctx));
 	});
 
 	// --- tools -----------------------------------------------------------
@@ -223,7 +226,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 			project: Type.Optional(Type.String({ description: "项目名；留空按工作目录匹配" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = callTool("bootstrap", {
+			const result = await callTool("bootstrap", {
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				agent: HOST,
 				cwd: String(params?.cwd || cwdOf(ctx)),
@@ -243,7 +246,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 			limit: Type.Optional(Type.Number({ description: "最多返回条数，默认 5" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = callTool("search", {
+			const result = await callTool("search", {
 				query: String(params?.query || ""),
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				limit: Number(params?.limit || 5),
@@ -268,7 +271,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 			last_test: Type.Optional(Type.Any({ description: "仅无宿主采集结果时补报：{command, exit_code}" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = callTool("save", {
+			const result = await callTool("save", {
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				operations: Array.isArray(params?.operations) ? params.operations : [],
 				last_test: params?.last_test ?? null,
@@ -287,7 +290,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 			fork_revision: Type.Optional(Type.String({ description: "精确分叉保存版本，取自 save/bootstrap 返回值" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = callTool("resume", {
+			const result = await callTool("resume", {
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				target: String(params?.target || ""),
 				fork_user_count: params?.fork_user_count,

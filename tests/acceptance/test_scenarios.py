@@ -93,21 +93,15 @@ import sys
 import time
 from pathlib import Path
 from tbrain.service import TbrainService
-from tbrain import session as flow
 
 home, vault, cwd, session = sys.argv[1:5]
 service = TbrainService(Path(home), vault=Path(vault))
-next_sequence = flow.next_sequence
-def simultaneous_sequence(*args):
-    sequence = next_sequence(*args)
-    (Path(home) / (session + ".ready")).touch()
-    deadline = time.monotonic() + 15
-    while len(list(Path(home).glob("*.ready"))) < 2:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("另一会话没有到达命名位置")
-        time.sleep(0.01)
-    return sequence
-flow.next_sequence = simultaneous_sequence
+(Path(home) / (session + ".ready")).touch()
+deadline = time.monotonic() + 15
+while len(list(Path(home).glob("*.ready"))) < 2:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("另一会话没有准备好")
+    time.sleep(0.01)
 service.hook("codex", {"hook_event_name": "UserPromptSubmit", "session_id": session,
                        "cwd": cwd, "prompt": "并发写入验收。同一项目两个会话同时保存 " + session})
 for index in range(12):

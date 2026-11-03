@@ -23,7 +23,7 @@ PACKAGE_FILES = [
     "tbrain/_internal/tbrain/__init__.py",
     "tbrain/_internal/tbrain/web/app.js",
 ]
-_major, _minor, _patch = __version__.split(".")
+_major, _minor, _patch = __version__.split("-", 1)[0].split(".")
 NEXT_VERSION = f"{_major}.{_minor}.{int(_patch) + 1}"
 
 

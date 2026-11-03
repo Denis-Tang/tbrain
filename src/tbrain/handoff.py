@@ -20,7 +20,6 @@ STRENGTHS = ("已排除", "暂缓")
 ITEM_MAX_CHARS = 200
 TARGET_MAX_CHARS = 200
 NEXT_MAX_CHARS = 150
-USER_MAX_CHARS = 2000
 ARCHIVE_THRESHOLD = 30
 
 HEADER_FIELDS = (
@@ -39,7 +38,7 @@ ITEM_PREFIXES = {"已完成": "D", "决策": "K", "未走通的路": "X", "证�
 _ITEM_RE = re.compile(r"^###\s+([UDKXEG])(\d+)\s*$")
 _ARCHIVE_RE = re.compile(r"^-\s+([UDKXEG])(\d+)\s+(.*)$")
 _BODY_HEADING_RE = re.compile(r"^\\*(?:## |###\s+[UDKXEG]\d+\s*$)")
-_ESCAPED_SECTIONS = ("原始命令", "用户指令", "目标", *ITEM_PREFIXES, "下一步")
+_ESCAPED_SECTIONS = ("原始命令", "用户指令", "目标", *ITEM_PREFIXES, "下一步", "归档")
 
 
 @dataclass
@@ -83,8 +82,25 @@ class Summary:
         return [{**item, "id": f"G{item['number']}"} for item in self.sections.get("未完成目标", [])]
 
     def has_reference(self, reference: str) -> bool:
-        ids = {item['id'] for item in self.users + self.items('证据')}
-        return reference in ids or any(re.match(rf"^- {re.escape(reference)}\b", line) for line in self.archive)
+        ids = {item['id'] for item in self.users}
+        ids.update(item['id'] for section in ITEM_PREFIXES for item in self.all_items(section))
+        return reference in ids
+
+    def all_items(self, section: str) -> list[dict]:
+        """归档只改变展示位置，不改变条目身份或可读取性。"""
+        archived = []
+        for line in self.archive:
+            match = _ARCHIVE_RE.match(line)
+            if match:
+                archived.append({"id": match[1] + match[2], "number": int(match[2]),
+                                 "text": match[3], "prefix": match[1]})
+            elif archived:
+                archived[-1]["text"] += "\n" + line
+        prefix = ITEM_PREFIXES[section]
+        return [item for item in archived if item['prefix'] == prefix] + self.items(section)
+
+    def active_decisions(self) -> list[dict]:
+        return [item for item in self.all_items('决策') if decision_active(item['text'])]
 
 
 def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: str,
@@ -111,17 +127,16 @@ def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: st
     }
     summary.raw_command = raw_command
     summary.sections = {
-        "用户指令": ([{"number": 1, "text": _clip_user(raw_command)}] if str(raw_command or "").strip() else []),
+        "用户指令": ([{"number": 1, "text": raw_command}] if str(raw_command or "").strip() else []),
         "已完成": [], "决策": [], "未走通的路": [], "证据": [], "未完成目标": [],
     }
     return summary
 
 
-def _clip_user(text: str) -> str:
-    text = str(text or "")
-    if len(text) <= USER_MAX_CHARS:
-        return text
-    return text[:USER_MAX_CHARS] + f"\n（已截断，原文位置：宿主会话记录；共 {len(text)} 字）"
+def decision_active(text: str) -> bool:
+    # 只认显式失效/建议标记，不根据词句相似度或保存时间猜测生效关系。
+    marker = r"(?:被取代|已被取代|已废止|已废弃|已作废|已失效|建议(?:[，,、 ]*(?:待用户确认|待确认|未确认))?|待用户确认|待确认|未确认)"
+    return not re.search(rf"[（(]{marker}[）)]\s*$|(?:^|[；;|])\s*{marker}\s*$|^(?:建议|待确认|未确认)[：:]", text)
 
 
 def _escape_headings(text: str) -> str:
@@ -156,7 +171,7 @@ def render(summary: Summary) -> str:
     lines += ["## 下一步", _escape_headings(summary.next_step), ""]
     lines += ["## 待整理"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.pending] + [""]
     lines += ["## 待用户确认"] + [(item if item.startswith("- ") else f"- {item}") for item in summary.conflicts] + [""]
-    lines += ["## 归档"] + summary.archive + [""]
+    lines += ["## 归档"] + [_escape_headings(line) for line in summary.archive] + [""]
     for name, body in summary.extra.items():
         if name in SECTIONS:
             continue
@@ -219,7 +234,7 @@ def parse(text: str) -> Summary:
             current_item = None
             continue
         if current_item is not None and current:
-            current_item["text"] = (current_item["text"] + "\n" + line).strip("\n")
+            current_item["text"] += "\n" + line
             continue
         if not current:
             continue
@@ -237,7 +252,7 @@ def parse(text: str) -> Summary:
             summary.archive.append(line)
 
     for item in summary.sections.get("未完成目标", []):
-        text_value = item.get("text", "")
+        text_value = item.get("text", "").strip()
         if text_value.startswith("- [x]"):
             item["done"] = True
             item["text"] = text_value[5:].strip()
@@ -267,7 +282,7 @@ def next_number(summary: Summary, section: str) -> int:
 
 def add_user(summary: Summary, text: str) -> str:
     number = max((int(item["number"]) for item in summary.sections.get("用户指令", [])), default=0) + 1
-    summary.sections.setdefault("用户指令", []).append({"number": number, "text": _clip_user(text)})
+    summary.sections.setdefault("用户指令", []).append({"number": number, "text": str(text or "")})
     return f"U{number}"
 
 
@@ -311,12 +326,23 @@ def complete_goals(summary: Summary, ids: list[str]) -> list[str]:
 
 def supersede_decisions(summary: Summary, ids: list[str]) -> list[str]:
     wanted = {str(item).strip().upper() for item in ids or []}
+    known = {item['id'] for item in summary.all_items('决策')}
+    if wanted - known:
+        raise ValueError("决策编号不存在：" + "、".join(sorted(wanted - known)))
     marked: list[str] = []
     for item in summary.sections.get("决策", []):
         identifier = f"K{item['number']}"
-        if identifier in wanted and "被取代" not in item.get("text", ""):
+        if identifier in wanted and not item.get("text", "").endswith("（被取代）"):
             item["text"] = f"{item['text']}（被取代）"
             marked.append(identifier)
+    starts = [index for index, line in enumerate(summary.archive) if _ARCHIVE_RE.match(line)]
+    for index, stop in zip(starts, starts[1:] + [len(summary.archive)]):
+        line = summary.archive[index]
+        match = _ARCHIVE_RE.match(line)
+        tail = stop - 1
+        if match[1] + match[2] in wanted and not summary.archive[tail].endswith("（被取代）"):
+            summary.archive[tail] += "（被取代）"
+            marked.append(match[1] + match[2])
     return marked
 
 

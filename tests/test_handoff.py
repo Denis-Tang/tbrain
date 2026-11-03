@@ -77,13 +77,34 @@ def test_done_and_decision_overflow_to_archive():
     assert len(parsed.archive) == 3
 
 
-def test_long_user_message_is_clipped_with_note():
+def test_long_user_message_is_preserved_in_markdown():
     summary = handoff.new_summary(
         name="n", project="", session_id="x:y", agent="pi", cwd="/tmp",
         host_record="", started_at="2026-10-24T00:00:00Z", raw_command="x" * 5000,
     )
-    assert len(summary.users[0]["text"]) < 5000
-    assert "原文位置" in summary.users[0]["text"]
+    assert summary.users[0]["text"] == "x" * 5000
+    assert handoff.parse(handoff.render(summary)).users[0]["text"] == "x" * 5000
+
+
+def test_archived_decisions_keep_identity_and_explicit_invalidation():
+    summary = _summary()
+    handoff.add_item(summary, '决策', '旧约定 | 理由\n## 原文标题\n保留详情')
+    for number in range(handoff.ARCHIVE_THRESHOLD):
+        handoff.add_item(summary, '决策', f'约定{number} | 理由')
+    summary = handoff.parse(handoff.render(summary))
+    assert summary.has_reference('K1')
+    assert '## 原文标题' in summary.all_items('决策')[0]['text']
+    assert handoff.supersede_decisions(summary, ['K1']) == ['K1']
+    restored = handoff.parse(handoff.render(summary))
+    assert 'K1' not in {item['id'] for item in restored.active_decisions()}
+    assert restored.all_items('决策')[0]['text'].endswith('（被取代）')
+
+
+def test_only_explicit_decision_markers_change_effectiveness():
+    for text in ('旧约定 | 理由（被取代）', '候选方案 | 理由；建议，待用户确认',
+                 '候选方案 | 理由（建议，未确认）', '候选方案 | 待确认', '候选方案 | 理由（建议）'):
+        assert not handoff.decision_active(text)
+    assert handoff.decision_active('不要恢复被取代的方案 | 用户要求')
 
 
 def test_fingerprint_ignores_trailing_whitespace_and_newlines():
@@ -110,7 +131,7 @@ def test_open_goals_helper():
 
 def test_markdown_headings_and_escaped_headings_roundtrip():
     summary = _summary()
-    message = "查看报告\n## 目标\n### U99\n\\## 附件\n\\\\## 原文\n```markdown\n## 用户指令\n```"
+    message = "查看报告\n\n\n## 目标\n### U99\n\\## 附件\n\\\\## 原文\n```markdown\n\n## 用户指令\n```"
     summary.raw_command = message
     summary.sections["用户指令"][0]["text"] = message
     summary.target = "目标\n## 下一步\n正文"

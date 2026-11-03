@@ -422,6 +422,10 @@ class Index:
                     produced.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
             elif kind == "word":
                 produced.append(chunk.lower())
+                # 保留完整标识符，同时召回 camelCase、HTTPServer 与 snake_case 的组成词。
+                split = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', chunk)
+                split = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', split)
+                produced.extend(part.lower() for part in re.split(r'[_\s]+', split) if part)
             for term in produced:
                 if term and term not in seen:
                     seen.add(term)
@@ -736,6 +740,9 @@ class Index:
         text_body = str(body or "")
         cn = " ".join(self.bigram_terms(f"{kind}\n{name}\n{text_body}"))
         with self.connect() as conn:
+            if path:
+                conn.execute('DELETE FROM public_fts WHERE id IN (SELECT id FROM public_cards WHERE path=? AND id<>?)', (path, card_id))
+                conn.execute('DELETE FROM public_cards WHERE path=? AND id<>?', (path, card_id))
             conn.execute(
                 "INSERT INTO public_cards(id, kind, name, state, path, body, updated_at) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?) "
@@ -815,7 +822,7 @@ class Index:
             return {}
         placeholders = ", ".join("?" for _ in values)
         rows = conn.execute(
-            f"SELECT * FROM public_cards WHERE id IN ({placeholders})", values
+            f"SELECT * FROM public_cards WHERE id IN ({placeholders}) AND state = '生效'", values
         ).fetchall()
         return {str(row["id"]): dict(row) for row in rows}
 

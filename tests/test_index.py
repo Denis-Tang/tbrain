@@ -105,6 +105,14 @@ def test_bigram_terms_dedupes_in_order(index: Index):
     assert index.bigram_terms("ab ab") == ["ab"]
 
 
+def test_code_identifiers_recall_with_separate_words(index: Index):
+    add_session(index, 'codex:camel', '定位 src/cache/HTTPServer.py 中 refreshIndex 的异常栈')
+    add_session(index, 'codex:snake', '检查 save_project_prompt 的覆盖问题')
+    assert index.search_sessions('refresh index', ['P1'])[0]['session_id'] == 'codex:camel'
+    assert index.search_sessions('save project prompt', ['P1'])[0]['session_id'] == 'codex:snake'
+    assert {'httpserver', 'http', 'server'} <= set(index.bigram_terms('HTTPServer'))
+
+
 # ---------------------------------------------------------------------------
 # 会话写入、查询与中文召回
 

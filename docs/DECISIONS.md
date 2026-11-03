@@ -88,7 +88,7 @@
 ### 4.5 保存语义
 - 操作：append（done/decision/dead_end/evidence/goal）、replace（target/next_step）、set_status、env、project_prompt；逐条校验、部分接受、退回附示例。
 - 单条 ≤200 字；target ≤200；next_step ≤150 且只能 1 条；D#/K# 各 30 条后移入归档。
-- 去重：规范化空白后相同或相似度 ≥0.92 视为同一条，返回已有编号。
+- 去重：仅正文去除首尾空白后完全相同才返回已有编号，内部空格、数字和否定词变化分别保存。
 - 重试：同一不合格操作按会话累计 2 次后，原文写入“待整理”并标“未校验”，不再打回。
 - 自动补齐：时间、git 分支/HEAD/改动文件数；最近验证只在宿主/调用方提供 `last_test` 时写入（Claude/Codex hook 拿不到工具结果，DSH 原生插件可抓）。
 - 用户手改保护：用索引里的文件哈希与当前文件比较；发现用户改过时，replace 类（target/next_step/项目提示词/全局提示词/公共池卡片）不覆盖，生成“待用户确认”；append 类只追加不改已有内容。
@@ -97,7 +97,7 @@
 ### 4.6 时间 / 命名 / 上下文提醒
 - 时间：UTC 存储；显示时区取设置（默认系统时区，回退 Asia/Shanghai）；SNTP 1.5s（多服务器轮询）+ HTTPS Date 3s 兜底；缓存 6 小时；关闭或失败标“未校准”。
 - 命名：`<提炼名> YYYY-MM-DD-N`；低信息首条消息用 `未命名 YYYY-MM-DD-N`；resume 未接续时用第二条消息定名，接续后改 `<旧名> 续 YYYY-MM-DD-N`；用户可手动改名并同步 wikilink。
-- 宿主注入预算：claude-code 9000、codex 8000、dsh 12000、pi 12000 字符；超限裁剪并提示可调用 bootstrap/search。
+- 宿主注入预算：claude-code 9000、codex 8000、dsh 12000、pi 12000 字符；有效历史决定预留展示空间；超限用 search/resume 定位原文，重复 bootstrap 不会展开。
 - 换会话提醒：仅 DSH（原生 tokenMeter）与 pi（getContextUsage），阈值 65% 上下文占用，估算节省 10%~50%，可在设置关闭。
 
 ### 4.7 版本与发布占位
@@ -203,3 +203,19 @@
 - README 按公开项目架构重写：Features / Quick Start / Usage / How It Works / Architecture / Configuration / Advanced Usage / Development / Roadmap / FAQ / License；没有截图与贡献指南，对应章节不写。
 - 发布前脱敏：文档里的个人目录、邮箱与旧版本地路径改为 `%USERPROFILE%` / `%LOCALAPPDATA%` 等占位；提交历史一并改写，公开仓库不含本机路径与个人邮箱。
 - 版本保持 0.6.4，不升号；重新打包并校验 SHA256 后发布到 GitHub Releases。
+
+## 10. 0.7 待接续决定交接包
+
+- 目的：换会话、换 Agent 接手时，先看到本项目有效历史决定及来源，不以会话是否完成判定决定失效。数据仍是 Markdown 会话总结，不新增存储。
+- `Store.handoff_items(project, limit)`：按会话更新时间读取有效 K（含归档），不以会话结束判定决定失效，返回 `session/id/text/at/source/verified/git_head`。`source` 定位到 `[[会话名]]#K编号`；`verified` 仅表示会话最近一次验证退出码为 0，不证明每条决定已验证；`git_head` 用于核对实现现状。
+- `TbrainService.handoff_pack(project, limit)`：项目不存在返回 `ok=false`；成功返回 `{ok, project, items}`。
+- `tbrain bridge show --project P [--limit N]`：输出同一份 JSON；项目不存在时退出码 1。
+- bootstrap 启动包为 `## 待接续决定` 单独预留空间，最多 3 条、每条正文截 200 字；无内容时整节省略。
+- 不做：跨 Agent 原生记忆的自动读写、签名自动比对、后台同步。原因：格式漂移与误判成本高于收益，先验证"决定级"桥是否够用。
+
+### 0.7 修订：按项目树聚合，服务 super-agent 的 Router
+
+- `Store.handoff_items` 接受项目名或项目列表；每条结果带 `project`。
+- `Service.handoff_pack` 返回 `scope`（根项目 + 直接子项目，受根项目 `allow_child` 控制）。
+- 这样常驻 Router（或任何接手机制）一次调用就能拿到整个项目树里"别人留下、还没被接走"的决定；不引入 A2A 协议栈、不做后台同步、不改 Markdown 事实源。
+- 跨实例（不同机器/不同人）仍靠 Git 或文件同步同一个 vault；决定自带的 `source/at/verified/git_head/project` 用于判断来源与时效。

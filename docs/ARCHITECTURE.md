@@ -172,7 +172,7 @@ status: 进行中
 
 ## 用户指令
 ### U1
-（逐字；超过 2000 字只存前 2000 字 + 原文位置说明）
+（完整保留原话和内部空行；启动注入单独按预算裁剪，并给出完整原话编号）
 
 ## 目标
 （≤200 字）
@@ -426,6 +426,7 @@ class TbrainService:
     def __init__(self, home: Path | None = None): ...
     def bootstrap(self, host, host_session_id, cwd, host_record="", project=None) -> dict
     def search(self, query, session_id="", limit=5) -> dict
+    def handoff_pack(self, project: str, limit: int = 3) -> dict   # 项目树内有效历史决定，带 project/来源/时间/verified/git_head
     def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict
     def resume(self, session_id: str, target: str) -> dict
     def status(self) -> dict
@@ -440,7 +441,7 @@ class TbrainService:
     def time(self) -> dict
 ```
 
-启动包拼接顺序（bootstrap/session-start 注入）：全局提示词用户区 → 项目提示词 → 公共池 L1 → 附件卡片 → 接续视图前 5 条 → 当前时间。按宿主上限裁剪（字符预算：claude-code 9000、codex 8000、dsh 12000、pi 12000；超出时尾部提示“可调用 bootstrap/search 获取”）。
+启动包先安排项目提示词、全局提示词用户区、公共池 L1、附件卡片和接续视图；有效历史决定（含归档，最多 3 条）与时间、会话身份单独预留空间，会话完成不作废 K。明确的建议/待确认/被取代/已废止 K 不进入有效决定交接；代码现状不能作废用户要求。按宿主字符上限裁剪（claude-code 9000、codex 8000、dsh/pi 12000），更多内容通过 search/resume 读取，重复 bootstrap 不会展开。
 
 bootstrap 判断项目：`match_project(cwd)` 最长路径匹配；根项目默认不读子项目内容；根项目 `allow_child=true` 时接续视图附子项目进行中条目并标注来源。
 
@@ -449,12 +450,12 @@ save 操作（JSON 数组，每项一个 dict）：
 ```json
 {"op":"append","section":"done|decision|dead_end|evidence|goal","items":[...]}
 {"op":"replace","section":"target|next_step","text":"..."}
-{"op":"set_status","status":"进行中|受阻|待验证|已完成|已放弃","complete_goals":["G1"],"supersede":["K1"]}
+{"op":"set_status","status":"进行中|受阻|待验证|已完成|已放弃","complete_goals":["G1"],"supersede":["K1","[[同项目旧会话名]]#K2"]}
 {"op":"env","items":[{...公共池卡片字段...}]}
 {"op":"project_prompt","sections":{"最终目标":"...","硬规则":"...","当前阶段":"...","关键路径和命令":"..."}}
 ```
 
-校验（部分接受）：字段名/枚举/长度/证据格式；不合格条目退回并附允许值与一条正确示例；同一操作重试超过 2 次（按 session 记录）→ 原文写“待整理”并标“未校验”。合格条目立即写入。自动补：时间、git 分支/HEAD/改动文件数、最近验证（若 `last_test` 或宿主 hook 记录存在）。同事务更新索引。返回：写入编号 + 当前时间 + 被拒条目 + 提醒。
+校验（部分接受）：字段名/枚举/长度/证据格式；不合格条目退回并附允许值与一条正确示例；同一操作重试超过 2 次（按 session 记录）→ 原文写“待整理”并标“未校验”。合格条目立即写入。自动补：时间、git 分支/HEAD/改动文件数、最近验证（若 `last_test` 或宿主 hook 记录存在）。先原子写 Markdown，再更新派生索引；不是跨文件/SQLite 事务，索引可由文件重建。返回：写入编号 + 当前时间 + 被拒条目 + 提醒。
 
 设为“已完成”时，未完成目标必须通过 `complete_goals` 明确完成；追加新的未完成目标会将已完成会话重新置为“进行中”。操作按序生效，证据需先保存再引用返回编号。
 

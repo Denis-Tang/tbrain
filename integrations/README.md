@@ -36,6 +36,18 @@ MCP 命令形如：
 
 ## 四宿主对照
 
+### 新建项目联动
+
+Tbrain 的桌面和 CLI 项目创建入口会读取 `connect-state.json`，向已接入的宿主登记项目，创建结果附在 `workspace_sync` 中，桌面保存提示显示各宿主结果。仅新建项目触发联动。
+
+- Codex 使用 `app-server --stdio` 的 `project/list`、`project/create`，一个项目保留全部关联目录。需要 PATH 中的 Codex 支持这两个接口。同名且目录集合相同的项目直接复用。
+- DSH 通过 Tbrain 原生插件调用 `workspaceController`，支持一个目录。更新接入插件后启动 DSH，插件在本机回环地址提供创建入口，端口保存在 Tbrain 应用目录的 `dsh-workspace-port`。已有目录登记直接复用。
+- Pi Desktop 的已核查实现把项目根目录保存在界面 localStorage 中，缺少可用的外部项目登记接口，多目录项目也不受支持，因此显示未同步原因。
+
+DSH 多目录、未启动或未更新插件，以及宿主接口失败时，Tbrain 项目仍保存，页面显示对应原因。联动只登记项目，目录应由用户事先准备。已有项目的修改、改名和删除不向宿主传播，失败任务不自动重试。
+
+验收使用隔离的 Codex 数据目录及 DSH 插件 HTTP 链路。正在运行的宿主侧栏即时刷新需要安装后验收。
+
 | 宿主 | 写入的配置 | 生效时机 | 备注 |
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` 的 `hooks`（SessionStart / UserPromptSubmit / Stop / PreCompact / SessionEnd，`shell: powershell`）；`~/.claude.json` 顶层 `mcpServers.tbrain` | 新开会话 | Windows 上必须用全引号 PowerShell 形式，exec 形式会退化 |
@@ -58,7 +70,7 @@ Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定�
 
 Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程；返回顺序和原有超时保持不变。
 
-`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`；pi 没有 Stop-block 等价事件，因此“请保存”提醒降级为下一轮提示（不强制续跑）。
+`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功保存后重置计数；重载扩展也会重置计数，shell 的其他文件修改不会被识别。
 
 ## 升级后旧进程
 
@@ -86,4 +98,4 @@ tbrain disconnect <host>           # 只移除 Tbrain 条目
 | `tbrain-dsh.mjs` | DSH 原生 cordis 插件（PreCompact / SessionEnd / 上下文提醒） |
 | `pi/tbrain.ts` | pi 扩展（生命周期 hook + 四个工具） |
 
-所有适配只保存“作为模型可读的会话记忆”所需的信息：不读取宿主完整会话记录、不收集工具原始输出、不写入任何凭据。
+会话记忆适配保存模型接续所需的信息，项目联动另向宿主登记项目名称和工作目录。适配不读取宿主完整会话记录、不收集工具原始输出、不写入任何凭据。

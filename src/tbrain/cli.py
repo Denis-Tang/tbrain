@@ -85,6 +85,10 @@ def _parser() -> argparse.ArgumentParser:
     prompt.add_argument("scope", nargs="?", default="global", choices=["global", "project"])
     prompt.add_argument("--name", default="", help="项目名（scope=project 时）")
     prompt.add_argument("--save", default=None, help="把文件内容保存为提示词（项目用 JSON sections）")
+    bridge = sub("bridge", "列出项目内未完成会话最近的决策，供接手时对齐")
+    bridge.add_argument("action", nargs="?", default="show", choices=["show"])
+    bridge.add_argument("--project", default="", help="项目名")
+    bridge.add_argument("--limit", type=int, default=3, help="最多几条（默认 3）")
     migrate = sub("migrate", "旧版数据迁移（默认 dry-run；--execute 正式写入新 vault）")
     migrate.add_argument("--old-home", required=True, help="旧版应用数据目录（如 ~/.shared-brain）")
     migrate.add_argument("--dry-run", action="store_true", default=False, help="只报告，不写入")
@@ -192,6 +196,12 @@ def _cmd_prompt(args) -> dict:
             sections = {"最终目标": text}
         return service.save_project_prompt(args.name, sections)
     return service.project_prompt(args.name)
+
+
+def _cmd_bridge(args) -> dict:
+    if not args.project:
+        raise RuntimeError("请用 --project 指定项目名")
+    return _service(_app_home(args)).handoff_pack(args.project, args.limit)
 
 
 def _cmd_time(args) -> dict:
@@ -331,6 +341,7 @@ def run_command(command: str, args) -> dict:
         "sessions": _cmd_sessions,
         "project": _cmd_project,
         "prompt": _cmd_prompt,
+        "bridge": _cmd_bridge,
         "migrate": _cmd_migrate,
         "evict": _cmd_evict,
         "version": _cmd_version,
@@ -356,6 +367,8 @@ def main(argv=None) -> int:
         result = run_command(command, args)
         compact = command in ("hook", "tool")
         _print(result, indent=None if compact else 2)
+        if command == "bridge" and isinstance(result, dict) and result.get("ok") is False:
+            return 1
         return 0
     except KeyboardInterrupt:
         return 130

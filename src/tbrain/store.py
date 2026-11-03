@@ -12,11 +12,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import time
 import uuid
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,6 +29,17 @@ import yaml
 
 from . import clock, naming
 from .index import Index
+
+_WRITE_LOCK = threading.RLock()
+_WRITE_LOCAL = threading.local()
+
+
+def serialized(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with self.write_lock():
+            return method(self, *args, **kwargs)
+    return run
 
 # 目录与固定文件名
 GLOBAL_PROMPT_FILE = "全局提示词.md"
@@ -193,6 +208,38 @@ class Store:
         self.app_home = Path(app_home)
         self.index = Index(self.app_home, now_fn=now_fn)
         self._now_fn = now_fn
+
+    @contextmanager
+    def write_lock(self):
+        """跨宿主串行化 Markdown 读改写；同线程的嵌套保存复用锁。"""
+        path = (self.vault / INTERNAL_DIR / 'write.lock').resolve()
+        with _WRITE_LOCK:
+            held = getattr(_WRITE_LOCAL, 'held', set())
+            if path in held:
+                yield
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('a+b') as stream:
+                if not path.stat().st_size:
+                    stream.write(b'\0')
+                    stream.flush()
+                stream.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                _WRITE_LOCAL.held = held | {path}
+                try:
+                    yield
+                finally:
+                    _WRITE_LOCAL.held = held
+                    stream.seek(0)
+                    if os.name == 'nt':
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     # -- 时间 ---------------------------------------------------------------
 
@@ -414,6 +461,7 @@ class Store:
             )
         return True
 
+    @serialized
     def set_block(self, path: Path, block: str, owner: str, text: str) -> bool:
         """只写程序区块；返回 False 表示该区块已归用户所有（不覆盖，文件也不改）。"""
         path = Path(path)
@@ -451,6 +499,7 @@ class Store:
             return str(blocks["user"].get("body") or "").strip()
         return text.strip()
 
+    @serialized
     def save_global_prompt(self, text: str) -> dict:
         """用户显式保存全局提示词：写【用户区】，model 区原样不动（Lead 决定 2026-10-24）。
 
@@ -719,6 +768,7 @@ class Store:
         user = re.sub(r"^##\s*用户补充\s*", "", user).strip()
         return {"sections": sections, "user": user}
 
+    @serialized
     def save_project_prompt(self, name: str, sections: dict, *, summary=None) -> dict:
         value = str(name or '').strip()
         if self.project(value) is None:
@@ -764,19 +814,31 @@ class Store:
 
     def _validate_prompt_sections(self, project_name: str, sections: dict, summary=None):
         from . import prompt
+        if summary and isinstance(sections, dict) and isinstance(sections.get('硬规则'), str):
+            def qualify(match):
+                parts = re.split(r'(\[\[[^\]]+\]\]#[UEDKXG]\d+)', match[1])
+                for index in range(0, len(parts), 2):
+                    parts[index] = re.sub(r'#?\b([UEDKXG]\d+)\b',
+                                          lambda ref: f'[[{summary.name}]]#{ref[1]}', parts[index])
+                return '（来源：' + ''.join(parts) + '）'
+            sections = {**sections, '硬规则': prompt._SOURCE_RE.sub(qualify, sections['硬规则'])}
         result = prompt.validate(sections, resolve_source=self._prompt_resolver(project_name, summary),
                                  path_exists=_path_exists)
         return result['written'], result['rejected'], result['warnings']
 
     def _prompt_resolver(self, project_name: str, summary=None):
         from . import handoff
+        def usable(source, reference):
+            if reference.startswith('K'):
+                return reference in {item['id'] for item in source.active_decisions()}
+            return source.has_reference(reference)
         def resolve(session_name: str, reference: str) -> bool:
             if not session_name or (summary is not None and session_name == summary.name):
-                return summary is not None and summary.has_reference(reference)
+                return summary is not None and usable(summary, reference)
             matches = [row for row in self.index.sessions() if row['name'] == session_name]
             if len(matches) != 1:
                 return False
-            return handoff.parse(self.read_text(self.vault / matches[0]['path'])).has_reference(reference)
+            return usable(handoff.parse(self.read_text(self.vault / matches[0]['path'])), reference)
         return resolve
 
     def record_conflict(self, project: str, title: str, proposed: str) -> str:
@@ -792,6 +854,50 @@ class Store:
         return '\n\n'.join(['## 待用户确认'] + [text for text in contents if text]) if any(contents) else ''
 
     # -- 公共池 ------------------------------------------------------------
+
+    def handoff_items(self, project_name: str | list[str], limit: int = 3) -> list[dict]:
+        """有效历史决定，供 bootstrap 与 CLI 交接；会话结束不代表决定失效。
+
+        传入项目列表时用于项目树（根项目 + 子项目），每条结果带 ``project``，
+        便于跨实例/Router 判断决定属于谁。
+        """
+        from . import handoff
+
+        limit = max(1, min(int(limit or 3), 10))
+        rows = self.index.sessions(project_name)
+        rows.sort(key=lambda row: (str(row.get("updated_at") or ""), float(row.get("file_mtime") or 0)),
+                  reverse=True)
+        items: list[dict] = []
+        for row in rows:
+            if len(items) >= limit:
+                break
+            path = self.vault / str(row.get("path") or "")
+            try:
+                summary = handoff.parse(self.read_text(path))
+            except OSError:
+                continue
+            decisions = summary.active_decisions()
+            if not decisions:
+                continue
+            name = summary.name or str(row.get("name") or "")
+            try:
+                verify = json.loads(str(row.get("last_verify") or "{}"))
+            except ValueError:
+                verify = {}
+            for decision in reversed(decisions):
+                if len(items) >= limit:
+                    break
+                items.append({
+                    "session": name,
+                    "id": decision.get("id", ""),
+                    "text": str(decision.get("text") or ""),
+                    "at": str(row.get("updated_at") or row.get("last_activity_at") or ""),
+                    "source": f"[[{name}]]#{decision['id']}",
+                    "project": str(row.get("project") or ""),
+                    "verified": bool(verify) and verify.get("exit_code") == 0,
+                    "git_head": str(row.get("git_head") or ""),
+                })
+        return items
 
     def _public_kind_dir(self, kind: str) -> Path:
         return self.vault / PUBLIC_DIR / str(kind)
@@ -827,6 +933,7 @@ class Store:
         cards.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("name") or "")))
         return cards
 
+    @serialized
     def save_public_card(
         self,
         kind: str,
@@ -957,7 +1064,7 @@ class Store:
 
     def public_l1(self, max_lines: int = 40) -> str:
         """公共池 L1 索引（程序生成，≤40 行）：每类一行 + 热点事实。"""
-        cards = self.public_cards()
+        cards = [card for card in self.public_cards() if card.get('state') == '生效']
         by_kind: dict[str, list[dict]] = {}
         for card in cards:
             by_kind.setdefault(str(card.get("kind") or ""), []).append(card)
@@ -984,14 +1091,6 @@ class Store:
             )
             suffix = f"：{detail}" if detail else ""
             lines.append(f"- {card.get('kind')}·{card.get('name')}{suffix}")
-        projects = self.projects()
-        if projects:
-            lines.append("")
-            lines.append("## 工作区路径")
-            for project in projects:
-                paths = project.get("paths") or []
-                if paths:
-                    lines.append(f"- {project['name']}：{paths[0]}")
         if len(lines) > max_lines:
             lines = lines[: max(0, max_lines - 1)] + ["（更多内容请调用 search 查询）"]
         return "\n".join(lines)

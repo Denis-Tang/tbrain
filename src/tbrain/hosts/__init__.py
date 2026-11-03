@@ -10,8 +10,9 @@ entries and back up every modified file.
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
-from . import claude, codex, dsh, pi
+from . import claude, codex, config, dsh, pi
 from .base import (HOST_EVENTS, HOST_SPECS, HostSpec, entry_for, hook_command,
                    host_spec, normalize, render)
 from .config import (HOST_ALIASES, SUPPORTED_HOSTS, HostError, canonical_host,
@@ -25,6 +26,26 @@ def list_hosts() -> list[dict]:
     return [{"key": spec.key, "display": spec.display,
              "supports_context": spec.supports_context, "notes": spec.notes}
             for spec in HOST_SPECS.values()]
+
+
+def create_workspaces(project: dict, app_home: Path) -> list[str]:
+    results = []
+    for host, connection in config.read_connect_state(app_home).items():
+        if not connection.get("enabled") or host not in ("codex", "dsh", "pi"):
+            continue
+        try:
+            if host == "pi":
+                detail = "未同步：Pi Desktop 暂无项目登记接口，且不支持多目录项目"
+            elif not project["paths"]:
+                detail = "未同步：项目未关联工作目录"
+            elif host == "codex":
+                detail = codex.create_workspace(project)
+            else:
+                detail = dsh.create_workspace(project, app_home)
+        except (OSError, ValueError, KeyError, HostError, subprocess.SubprocessError) as error:
+            detail = f"同步失败：{error}"
+        results.append(f"{HOST_SPECS[host].display}：{detail}")
+    return results
 
 
 def connect(host: str, app_home: Path | None = None, install_root: Path | None = None,

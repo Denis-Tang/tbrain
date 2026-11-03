@@ -20,7 +20,7 @@ from tbrain.hosts import config
 from tbrain.settings import SettingsStore
 
 HOST = "claude-code"
-_major, _minor, _patch = __version__.split(".")
+_major, _minor, _patch = __version__.split("-", 1)[0].split(".")
 UPGRADE_VERSION = f"{_major}.{_minor}.{int(_patch) + 1}"
 LATER_VERSION = f"{_major}.{_minor}.{int(_patch) + 2}"
 

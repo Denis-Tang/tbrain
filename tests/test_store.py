@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import re
 import time
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -348,7 +350,7 @@ def test_project_prompt_sections_round_trip(store: Store):
     assert result["rejected"] == []
     sections = store.project_prompt("P1")["sections"]
     assert sections["最终目标"] == "完成最小闭环"
-    assert "（来源：#U3）" in sections["硬规则"]
+    assert "（来源：[[来源会话]]#U3）" in sections["硬规则"]
     assert sections["当前阶段"] == "第 4 步"
     assert sections["关键路径和命令"] == ""
 
@@ -376,6 +378,35 @@ def test_project_prompt_changelog_records_old_content(store: Store):
     changelog = store.project_changelog_path("P1").read_text(encoding="utf-8")
     assert "旧目标" in changelog
     assert "最终目标" in changelog
+
+
+def test_concurrent_project_sections_survive_across_processes_and_homes(store: Store):
+    store.save_project('P1', [r'D:\p1'])
+    code = '''
+import sys, time
+from pathlib import Path
+from tbrain.store import Store
+s = Store(Path(sys.argv[1]), Path(sys.argv[2]))
+original = s.read_text
+def slow_read(path):
+    text = original(path)
+    if path == s.project_prompt_path('P1'):
+        time.sleep(0.3)
+    return text
+s.read_text = slow_read
+result = s.save_project_prompt('P1', {sys.argv[3]: sys.argv[4]})
+assert not result['rejected'], result
+'''
+    children = [subprocess.Popen([sys.executable, '-c', code, str(store.vault),
+                                 str(store.app_home / str(number)), section, value],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for number, (section, value) in enumerate([('最终目标', '完整保留目标'), ('当前阶段', '回归阶段：检查并发')])]
+    for child in children:
+        out, err = child.communicate(timeout=20)
+        assert child.returncode == 0, out + err
+    sections = store.project_prompt('P1')['sections']
+    assert sections['最终目标'] == '完整保留目标'
+    assert sections['当前阶段'] == '回归阶段：检查并发'
 
 
 def test_project_prompt_preserves_user_area_and_protects_hand_edited_model(store: Store):
@@ -460,7 +491,7 @@ def test_public_l1_contains_kind_lines_and_hot_facts(store: Store):
     assert "安装：1 条" in text
     assert "代理：1 条" in text
     assert "python" in text
-    assert "工作区路径" in text and "P1" in text
+    assert "工作区路径" not in text and r'D:\work\p1' not in text
     assert len(text.splitlines()) <= 40
 
 

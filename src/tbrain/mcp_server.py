@@ -38,7 +38,8 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
 5. 未完成目标：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
 6. 目标：  {"op":"replace","section":"target","text":"……（≤200 字）"}
 7. 下一步：{"op":"replace","section":"next_step","text":"跑 pytest -q，确认中文检索用例全绿"}
-8. 状态：  {"op":"set_status","status":"已完成","complete_goals":["G1"]}
+8. 状态：  {"op":"set_status","status":"已完成","complete_goals":["G1"],"supersede":["K1","[[旧会话名]]#K2"]}
+   supersede 只用于明确作废的决定，支持本会话或同项目来源；归档条目仍可引用，未确认建议不作为有效规则来源。
 9. 环境变更：{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv",
    "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",

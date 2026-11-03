@@ -1476,10 +1476,11 @@
         if (path && !paths.includes(path)) paths.push(path);
       }
       withBusy($("save-project"), async () => {
-        await call("project_save", name, paths, state.editing.parent || "", $("project-allow-child").checked, state.editing.original);
+        const saved = await call("project_save", name, paths, state.editing.parent || "", $("project-allow-child").checked, state.editing.original);
         $("project-dialog").close();
         await loadProjects(true);
-        toast("已保存");
+        const sync = saved.workspace_sync || [];
+        toast(["已保存", ...sync].join("；"), sync.some(item => /未同步|同步失败/.test(item)));
       });
     });
     $("close-tree").addEventListener("click", () => $("tree-dialog").close());

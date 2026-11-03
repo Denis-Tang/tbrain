@@ -10,7 +10,14 @@ yellow until the user approves the hooks with Codex's native ``/hooks`` command.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import queue
+import shutil
+import subprocess
+import threading
 import time
+from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +25,72 @@ from . import base, config
 
 HOST = "codex"
 EVENT_SNAKES = ("session_start", "user_prompt_submit", "stop", "pre_compact", "session_end")
+
+
+def create_workspace(project: dict) -> str:
+    executable = shutil.which("codex.exe") or shutil.which("codex")
+    if not executable:
+        raise config.HostError("找不到 Codex 可执行文件")
+    replies = queue.Queue()
+    with subprocess.Popen(
+        [executable, "app-server", "--stdio"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ) as process:
+        def read_replies():
+            try:
+                for line in process.stdout:
+                    replies.put(json.loads(line))
+            except ValueError:
+                pass
+            finally:
+                replies.put(None)
+
+        threading.Thread(target=read_replies, daemon=True).start()
+        request_id = 0
+
+        def request(method, params):
+            nonlocal request_id
+            request_id += 1
+            process.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
+            process.stdin.flush()
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    reply = replies.get(timeout=max(0, deadline - time.monotonic()))
+                except queue.Empty:
+                    raise config.HostError("Codex 项目接口响应超时") from None
+                if reply is None:
+                    raise config.HostError("Codex 项目接口已退出")
+                if reply.get("id") != request_id:
+                    continue
+                if "error" in reply:
+                    raise config.HostError(str(reply["error"].get("message", "Codex 项目接口失败")))
+                return reply["result"]
+
+        try:
+            request("initialize", {"clientInfo": {"name": "tbrain", "version": "1"},
+                                   "capabilities": {"experimentalApi": True}})
+            process.stdin.write('{"method":"initialized"}\n')
+            process.stdin.flush()
+            roots = [{"path": str(Path(path).resolve())} for path in project["paths"]]
+            wanted = {os.path.normcase(os.path.normpath(root["path"])) for root in roots}
+            cursor = None
+            while True:
+                page = request("project/list", {"cursor": cursor})
+                for existing in page["data"]:
+                    actual = {os.path.normcase(os.path.normpath(root["path"])) for root in existing["roots"]}
+                    if actual == wanted and existing["name"] == project["name"]:
+                        return "项目已存在"
+                cursor = page.get("nextCursor")
+                if not cursor:
+                    break
+            request("project/create", {"idempotencyKey": str(uuid4()),
+                                       "name": project["name"], "roots": roots})
+            return "已创建项目"
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 def _entry(app_home: Path | None, install_root: Path | None, settings) -> tuple[Path, Path, str]:

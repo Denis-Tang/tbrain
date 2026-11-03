@@ -137,6 +137,9 @@ async function callTool(name: string, payload: Record<string, unknown>): Promise
 
 export default function tbrainExtension(pi: ExtensionAPI): void {
 	let pendingContext = "";
+	let roundsSinceSave = 0;
+	let changedOrTested = false;
+	let compactNeedsContinuation = false;
 
 	const remember = (response: any) => {
 		const context = String(response?.additional_context || "");
@@ -164,11 +167,13 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event: any, ctx: any) => {
 		const text = typeof event?.text === "string" ? event.text : "";
 		if (text.trim()) {
+			roundsSinceSave++;
 			remember(await hookEvent("UserPromptSubmit", eventPayload({ prompt: text }, ctx)));
 		}
 	});
 
 	pi.on("before_agent_start", async () => {
+		compactNeedsContinuation = false;
 		if (!pendingContext.trim()) return undefined;
 		const message = {
 			customType: "tbrain",
@@ -182,7 +187,8 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	pi.on("agent_end", async (_event: any, ctx: any) => {
 		const response = await hookEvent("Stop", eventPayload({ stop_hook_active: false }, ctx));
 		const hint = await hookEvent("Context", eventPayload({}, ctx));
-		const reminder = [response?.additional_context || response?.reason, hint?.additional_context].filter(Boolean).join("\n");
+		const saveReminder = changedOrTested || roundsSinceSave >= 3 ? response?.additional_context || response?.reason : "";
+		const reminder = [saveReminder, hint?.additional_context].filter(Boolean).join("\n");
 		if (!reminder.trim()) return;
 		try {
 			// pi has no Stop-block equivalent: degrade to a next-turn reminder (design D5).
@@ -198,14 +204,33 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	pi.on("session_before_compact", async (_event: any, ctx: any) => {
 		remember(await hookEvent("PreCompact", eventPayload({}, ctx)));
 	});
-	pi.on("session_compact", async (_event: any, ctx: any) => {
+	pi.on("session_compact", async (event: any, ctx: any) => {
+		const beforeCompact = pendingContext;
 		remember(await hookEvent("SessionStart", eventPayload({ source: "compact" }, ctx)));
+		if (beforeCompact) pendingContext = [pendingContext, beforeCompact].filter(Boolean).join("\n\n");
+		if (!beforeCompact || event?.willRetry) return;
+		if (event?.reason === "manual") {
+			setTimeout(() => pi.sendMessage(
+				{ customType: "tbrain", content: "压缩已完成，请根据提醒保存进展。", display: true },
+				{ triggerTurn: true },
+			), 0);
+		} else {
+			compactNeedsContinuation = true;
+		}
+	});
+	pi.on("agent_before_settle", async (event: any) => {
+		if (!compactNeedsContinuation || event.outcome !== "completed") return;
+		compactNeedsContinuation = false;
+		return { entries: [{ type: "custom_message", customType: "tbrain", content: "压缩已完成，请根据提醒保存进展。", display: true }], continue: true };
 	});
 	pi.on("tool_result", async (event: any, ctx: any) => {
-		if (event.toolName === "bash" && /\b(pytest|unittest|test|check|build)\b/i.test(event.input?.command || "") &&
+		const command = event.input?.command || "";
+		const ranTest = ["bash", "powershell"].includes(event.toolName) && /\b(pytest|unittest|test|check|build)\b/i.test(command);
+		if ((["edit", "write"].includes(event.toolName) && !event.isError) || ranTest) changedOrTested = true;
+		if (ranTest &&
 			typeof event.details?.exitCode === "number") {
 			await hookEvent("ToolResult", eventPayload({ last_test: {
-				command: event.input.command, exit_code: event.details.exitCode,
+				command, exit_code: event.details.exitCode,
 			} }, ctx));
 		}
 	});
@@ -276,6 +301,10 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 				operations: Array.isArray(params?.operations) ? params.operations : [],
 				last_test: params?.last_test ?? null,
 			});
+			if (result.ok) {
+				roundsSinceSave = 0;
+				changedOrTested = false;
+			}
 			return { content: [{ type: "text", text: toolText(result) }], details: result };
 		},
 	});

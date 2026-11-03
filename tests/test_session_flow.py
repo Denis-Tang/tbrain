@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import json
 import pytest
 
@@ -32,6 +33,85 @@ def prompt(service, host, session, cwd, text, event="UserPromptSubmit"):
 
 def sid(host, session):
     return f"{host}:{session}"
+
+
+def test_save_keeps_negation_numbers_and_code_whitespace_distinct(env):
+    service, _, work = env
+    prompt(service, 'codex', 'distinct', work, '验证记忆不能误合并')
+    base = 'Tbrain 保存测试结果后' + '必须遵守用户原始约定' * 4
+    texts = [base + '允许覆盖 | 原因', base + '禁止覆盖 | 原因',
+             base + '预算100 | 原因', base + '预算101 | 原因',
+             'SQL 保留 SELECT a b | 空格有意义', 'SQL 保留 SELECT ab | 标识符不同']
+    result = service.save('codex:distinct', [{'op': 'append', 'section': 'decision',
+                                            'items': [{'text': text} for text in texts + [texts[0]]]}])
+    assert result['ok']
+    assert result['written']['decisions'] == ['K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K1']
+
+
+def test_refresh_detects_same_metadata_edits_and_deleted_public_cards(env):
+    import os
+
+    service, vault, work = env
+    prompt(service, 'codex', 'edit', work, '验证青苹果召回')
+    row = service.index.session('codex:edit')
+    path = vault / row['path']
+    service.refresh_index()
+    stat = path.stat()
+    path.write_text(path.read_text(encoding='utf-8').replace('青苹果', '红苹果'), encoding='utf-8', newline='\n')
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert service.search('红苹果', 'codex:edit')['results']
+    card = service.store.save_public_card('工具', '已移除卡', {'body': '幽灵卡片关键词'})
+    service.refresh_index()
+    assert service.search('幽灵卡片关键词')['results']
+    card_path = Path(card['path'])
+    card_path.write_text(card_path.read_text(encoding='utf-8').replace('id: 工具-已移除卡', 'id: 工具-新编号'), encoding='utf-8')
+    assert len(service.search('幽灵卡片关键词')['results']) == 1
+    card_path.write_text(card_path.read_text(encoding='utf-8').replace('state: 生效', 'state: 已废止'), encoding='utf-8')
+    assert not service.search('幽灵卡片关键词')['results']
+    assert '已移除卡' not in service.store.public_l1()
+    Path(card['path']).unlink()
+    assert not service.search('幽灵卡片关键词')['results']
+    with service.index.connect() as con:
+        assert con.execute('SELECT COUNT(*) FROM public_cards').fetchone()[0] == 0
+
+
+def test_archived_match_has_snippet_and_inactive_decision_is_not_resumed(env):
+    service, _, work = env
+    prompt(service, 'codex', 'archive', work, '归档检索验证')
+    service.save('codex:archive', [{'op': 'append', 'section': 'decision', 'items': [
+        {'text': '归档专有词 | 仍需查阅'},
+        *({'text': f'规则{number} | 约定'} for number in range(handoff.ARCHIVE_THRESHOLD))]}])
+    result = service.search('归档专有词', 'codex:archive')
+    assert 'K1 归档专有词' in result['results'][0]['snippet']
+    assert service.save('codex:archive', [{'op': 'set_status', 'status': '已完成', 'supersede': ['K1']}])['ok']
+    prompt(service, 'codex', 'reader', work, '接续记录')
+    assert '归档专有词' not in service.resume('codex:reader', 'codex:archive')['handoff']
+
+
+def test_explicit_cross_session_supersede_and_rule_sources(env):
+    service, _, work = env
+    service.configure_project('P1', [str(work)])
+    prompt(service, 'codex', 'old-rule', work, '保存项目约定')
+    service.save('codex:old-rule', [{'op': 'append', 'section': 'decision', 'items': [
+        {'text': '保持本地存储 | 用户要求'}, {'text': '采用远程服务 | 理由；建议，待用户确认'}]}])
+    old = service.index.session('codex:old-rule')['name']
+    local = service.save('codex:old-rule', [{'op': 'project_prompt', 'sections': {
+        '硬规则': '- 保持本地存储（来源：K1）'}}])
+    assert f'[[{old}]]#K1' in local['written']['project_prompt']['硬规则']
+    prompt(service, 'codex', 'new-rule', work, '调整项目约定')
+    good = service.save('codex:new-rule', [{'op': 'project_prompt', 'sections': {
+        '硬规则': f'- 保持本地存储（来源：[[{old}]]#K1）'}}])
+    assert good['ok']
+    rejected = service.save('codex:new-rule', [{'op': 'project_prompt', 'sections': {
+        '硬规则': f'- 采用远程服务（来源：[[{old}]]#K2）'}}])
+    assert rejected['rejected']
+    bad = service.save('codex:new-rule', [{'op': 'set_status', 'status': '已完成', 'supersede': [f'[[{old}]]#K99']}])
+    assert bad['rejected']
+    assert service.index.session('codex:new-rule')['status'] == '进行中'
+    result = service.save('codex:new-rule', [{'op': 'set_status', 'status': '已完成', 'supersede': [f'[[{old}]]#K1']}])
+    assert result['ok']
+    assert not service.handoff_pack('P1')['items']
+    assert '保持本地存储' not in service.bootstrap('codex:rule-reader', 'codex', str(work))['package']
 
 
 def test_first_message_creates_summary_and_startup_package(env):
@@ -327,6 +407,10 @@ def test_restored_id_keeps_saved_progress_and_followup_events(env, host):
                                 "cwd": str(work)})
     assert sid(host, "old") in str(result)
     assert service.index.get_session_link(host, "restored")["session_id"] == sid(host, "old")
+    rebuilt = TbrainService(service.home / 'rebuilt', vault=service.vault_root())
+    rebuilt.settings.update({'vault_path': str(service.vault_root()), 'ntp_enabled': False})
+    rebuilt.refresh_index()
+    assert rebuilt.index.get_session_link(host, 'restored')['session_id'] == sid(host, 'old')
     prompt(service, host, "restored", work, "恢复后的新要求")
     assert service.index.session(sid(host, "restored")) is None
     summary, _ = _load(service, service.index.session(sid(host, "old")))

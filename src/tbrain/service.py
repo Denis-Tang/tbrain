@@ -136,10 +136,18 @@ class TbrainService:
         vault = self.vault_root()
         if not str(vault) or not vault.is_dir():
             return
+        with self.store.write_lock():
+            self._refresh_index()
+
+    def _refresh_index(self) -> None:
+        vault = self.vault_root()
         store = self.store
         store.ensure_layout()
         index = self.index
         states = index.file_states()
+        reindex_terms = index.get_meta('tokenizer_version') != '2'
+        if reindex_terms:
+            states = {}
         changed_projects = set()
         session_root = (vault / "会话总结")
         if session_root.is_dir():
@@ -158,8 +166,18 @@ class TbrainService:
             if not path or not path.is_file():
                 index.remove_session(row["session_id"])
                 changed_projects.add(row["project"])
+        with index.connect() as con:
+            for row in con.execute('SELECT id, path FROM public_cards').fetchall():
+                if not (vault / row['path']).is_file():
+                    con.execute('DELETE FROM public_cards WHERE id=?', (row['id'],))
+                    con.execute('DELETE FROM public_fts WHERE id=?', (row['id'],))
+            for relative in index.file_states():
+                if not (vault / relative).is_file():
+                    con.execute('DELETE FROM files WHERE path=?', (relative,))
         for project in changed_projects:
             self.sync_session_index(project)
+        if reindex_terms:
+            index.set_meta('tokenizer_version', '2')
 
     def sync_session_index(self, project: str) -> None:
         # 读索引和发布 Markdown 共用写事务，较早的快照不能后写覆盖较新的索引。
@@ -180,10 +198,10 @@ class TbrainService:
             return
         relative = path.relative_to(vault).as_posix()
         state = states.get(relative)
-        if state and float(state.get("mtime") or 0) == stat.st_mtime and int(state.get("size") or 0) == stat.st_size:
-            return
         text = self.store.read_text(path)
         digest = handoff.fingerprint(text)
+        if state and state.get('hash') == digest:
+            return
         if kind == "session":
             try:
                 summary = handoff.parse(text)
@@ -191,7 +209,12 @@ class TbrainService:
                 return
             if not summary.session_id:
                 return
-            index.upsert_session(self._row_from_summary(summary, relative), text)
+            index.upsert_session({**self._row_from_summary(summary, relative), 'file_mtime': stat.st_mtime}, text)
+            for alias in [summary.session_id, *summary.header.get('session_aliases', [])]:
+                parts = identity.split_session_id(alias)
+                if parts:
+                    index.register_link(*parts, summary.session_id, str(summary.header.get('cwd') or ''),
+                                        identity.first_message_hash(summary.raw_command))
         else:
             front, body = _split_front(text)
             identifier = _public_id(relative, front)
@@ -285,7 +308,8 @@ class TbrainService:
 
         raw = raw or {}
         event = hosts.normalize(host, raw)
-        result = hooks.handle(event, self)
+        with self.store.write_lock():
+            result = hooks.handle(event, self)
         raw_event = str(raw.get("hook_event_name") or raw.get("event") or "")
         return hosts.render(host, result, raw_event)
 
@@ -303,17 +327,29 @@ class TbrainService:
                   project: str | None = None) -> dict:
         agent = agent or (identity.split_session_id(session_id) or ("unknown", ""))[0]
         cwd = cwd or os.getcwd()
-        return self._agent_disabled(session_id) or flow.bootstrap(self, session_id=session_id, agent=agent, cwd=cwd,
-                              host_record=host_record, project=project)
+        with self.store.write_lock():
+            return self._agent_disabled(session_id) or flow.bootstrap(self, session_id=session_id, agent=agent, cwd=cwd,
+                                  host_record=host_record, project=project)
 
     def search(self, query: str, session_id: str = "", limit: int = 5) -> dict:
         return self._agent_disabled(session_id) or flow.search(self, query, session_id, limit)
 
+    def handoff_pack(self, project: str, limit: int = 3) -> dict:
+        name = str(project or "").strip()
+        if not name or not self.store.project(name):
+            return {"ok": False, "error": "项目不存在"}
+        self.refresh_index()
+        scope = [name] + self.child_projects(name)
+        return {"ok": True, "project": name, "scope": scope,
+                "items": self.store.handoff_items(scope, limit)}
+
     def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
-        return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
+        with self.store.write_lock():
+            return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
 
     def resume(self, session_id: str, target: str, fork_user_count: int | None = None, fork_revision: str = "") -> dict:
-        return self._agent_disabled(session_id) or flow.resume(self, session_id, target, fork_user_count=fork_user_count, fork_revision=fork_revision)
+        with self.store.write_lock():
+            return self._agent_disabled(session_id) or flow.resume(self, session_id, target, fork_user_count=fork_user_count, fork_revision=fork_revision)
 
     def tool(self, name: str, arguments: dict | None = None) -> dict:
         arguments = arguments or {}
@@ -463,9 +499,13 @@ class TbrainService:
 
     def configure_project(self, name: str, paths_list: list[str], parent: str = "",
                           allow_child: bool = False, rename_from: str = "") -> dict:
+        from .hosts import create_workspaces
+        is_new = not self.store.project(str(rename_from or name).strip())
         result = self.store.save_project(name, paths_list, parent=parent,
                                            allow_child=allow_child, rename_from=rename_from)
         self.refresh_index()
+        if is_new:
+            result["workspace_sync"] = create_workspaces(result, self.home)
         return result
 
     def delete_project(self, name: str) -> dict:

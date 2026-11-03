@@ -4,9 +4,11 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import { mkdir, writeFile, unlink } from "node:fs/promises";
 
 export const name = "tbrain-native";
-export const inject = ["agents", "tokenMeter", "sessionProjections"];
+export const inject = { required: ["agents", "tokenMeter", "sessionProjections"], optional: ["workspaceController"] };
 
 const HOOK_TIMEOUT_MS = 10000;
 const CONTEXT_RATIO = 0.65;
@@ -111,6 +113,50 @@ function sourceOf(value) {
 
 export function apply(ctx, config = {}) {
 	const settings = resolveSettings(config);
+	if (ctx.workspaceController) {
+		const portFile = join(settings.home, "dsh-workspace-port");
+		const server = createServer(async (request, response) => {
+			response.setHeader("Content-Type", "application/json");
+			try {
+				if (request.method !== "POST" || request.url !== "/projects" ||
+					request.headers["content-type"] !== "application/json") {
+					response.writeHead(400).end();
+					return;
+				}
+				let body = "";
+				for await (const chunk of request) body += chunk;
+				const project = JSON.parse(body);
+				if (typeof project.path !== "string" || typeof project.name !== "string" || !project.name.trim()) {
+					throw new Error("项目名称和目录不能为空");
+				}
+				const result = await ctx.workspaceController.create({ path: project.path });
+				if (result.created) {
+					try {
+						await ctx.workspaceController.rename({ workspaceId: result.workspace.id, title: project.name });
+					} catch (error) {
+						await ctx.workspaceController.delete({ workspaceId: result.workspace.id });
+						throw error;
+					}
+				}
+				response.end(JSON.stringify({ ok: true, created: result.created }));
+			} catch (error) {
+				response.end(JSON.stringify({ ok: false, error: String(error.message || error) }));
+			}
+		});
+		server.on("error", error => console.error(error));
+		server.listen(0, "127.0.0.1", async () => {
+			try {
+				await mkdir(settings.home, { recursive: true });
+				await writeFile(portFile, String(server.address().port));
+			} catch (error) {
+				console.error(error);
+			}
+		});
+		ctx.on("dispose", async () => {
+			server.close();
+			await unlink(portFile).catch(error => { if (error.code !== "ENOENT") throw error; });
+		});
+	}
 	const trackedRoots = new Set();
 	const reminded = new Set();
 	const lastHint = new Map();

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import json
+from urllib.request import Request, urlopen
 
 import yaml
 from pathlib import Path
@@ -15,6 +16,23 @@ HOST = "dsh"
 MCP_CLIENT_PACKAGE = "@deepseek-ai/dsh-mcp-client"
 REQUIRED_IDS = ("tbrain-mcp", "tbrain-native")
 NATIVE_NAME = "tbrain-dsh.mjs"
+
+
+def create_workspace(project: dict, app_home: Path) -> str:
+    if len(project["paths"]) != 1:
+        return "未同步：DSH 工作区只支持一个目录"
+    port_file = app_home / "dsh-workspace-port"
+    if not port_file.is_file():
+        return "未同步：请更新 Tbrain 接入插件并启动 DSH"
+    port = int(port_file.read_text(encoding="utf-8"))
+    request = Request(f"http://127.0.0.1:{port}/projects", method="POST",
+                      data=json.dumps({"name": project["name"], "path": project["paths"][0]}).encode(),
+                      headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=15) as response:
+        result = json.load(response)
+    if not result.get("ok"):
+        raise config.HostError(result.get("error", "DSH 项目接口失败"))
+    return "已创建项目" if result["created"] else "项目已存在"
 
 
 def _context(app_home: Path | None, install_root: Path | None, settings):

@@ -24,6 +24,7 @@ try {
     $versionMatch = Select-String -LiteralPath $initFile -Pattern '__version__\s*=\s*"([^"]+)"'
     if (-not $versionMatch) { throw "无法从 tbrain/__init__.py 读取版本号" }
     $version = $versionMatch.Matches[0].Groups[1].Value
+    $fileVersion = ($version -split '[-+]')[0]
     Write-Host "Tbrain version: $version"
 
     $python = Join-Path $projectRoot '.venv/Scripts/python.exe'
@@ -32,7 +33,7 @@ try {
     # --- desktop host (WPF/WebView2) ------------------------------------
     dotnet publish desktop/Tbrain.Desktop.csproj -c Release -r win-x64 `
         --self-contained true -o build/desktop --nologo -v:q `
-        -p:Version=$version -p:FileVersion=$version -p:InformationalVersion=$version
+        -p:Version=$version -p:FileVersion=$fileVersion -p:InformationalVersion=$version
     if ($LASTEXITCODE -ne 0) { throw "Desktop host build failed with exit code $LASTEXITCODE" }
 
     # --- launcher (reconnects stdio for windowed PyInstaller) -----------

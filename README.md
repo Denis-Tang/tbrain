@@ -30,16 +30,12 @@ Tbrain 面向在 Windows 上使用 Claude Code、Codex、DeepSeek Harness（DSH�
 
 2026 年 11 月的隔离评测比较了 DSH、Pi Desktop 各自的原生记忆、Tbrain 实验兼容版和 Basic Memory。每组一条五阶段工程链，包含五次新会话检查；模型为 `deepseek-v4.1-flash`，medium thinking。
 
-![DSH 与 Pi Desktop 六组记忆检查结果，每条件一条开发链、69 次检查](docs/images/memory-checks.png)
-
 | 宿主 | 原生记忆检查 | Tbrain 检查 | Basic Memory 检查 | Tbrain 接续答题输入相对原生 |
 |---|---:|---:|---:|---:|
 | DSH | 69/69 | 67/69 | 67/69 | 减少 26.2% |
 | Pi Desktop | 68/69 | 69/69 | 66/69 | 减少 20.8% |
 
 DSH 的五次接续答题总输入从 8,426,194 降至 6,214,688 Token，统一价格估算费用减少 28.0%，同时少通过两次检查。Pi 的估算费用减少 17.1%，但累计答题耗时更长：1,627.728 秒，原生为 688.903 秒，且有一次控制器干预。
-
-![六组五次接续答题的累计输入 Token 与统一峰时价格估算费用，包含失败检查点](docs/images/continuation-costs.png)
 
 这些数字来自实验版 `0.7.0-beta.1+lab.1`，不是 0.7.0 的重新横评。0.7.0 纳入了该实验版的快照兼容修复。每个条件只有一条独立链，检查包含重复事实；结果不能推广为普遍准确率、完整开发任务的费用节省或整体提速。原话采集和旧决定退役还有缺口，见 [评测方法、完整对照与失分说明](docs/BENCHMARK.md)。
 

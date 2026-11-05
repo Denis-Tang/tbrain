@@ -275,7 +275,10 @@ def _prepare_installation(service: TbrainService) -> None:
         return
     root = paths.install_root(service.home, service.settings.load())
     current = installer.current_version(root)
-    if current and installer._version_key(current) < installer._version_key(__version__):
+    if current == __version__:
+        # Older updaters only migrated shortcut targets, leaving old icons and working directories.
+        installer.retarget_shortcuts(root)
+    elif current and installer._version_key(current) < installer._version_key(__version__):
         installer.install_from_dir(Path(sys.executable).parent, __version__, root)
 
 

@@ -290,7 +290,7 @@ def test_background_upgrade_can_be_cancelled(api, monkeypatch):
     assert not desktop._quit_requested
 
 
-@pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('99.0.0', False)])
+@pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('99.0.0', False), (__version__, False)])
 def test_packaged_desktop_selects_new_version_before_host_reconnect(api, monkeypatch, installed, should_install):
     from tbrain import desktop, installer
 
@@ -302,6 +302,9 @@ def test_packaged_desktop_selects_new_version_before_host_reconnect(api, monkeyp
     monkeypatch.setattr(desktop.sys, 'frozen', True, raising=False)
     monkeypatch.setattr(desktop.sys, 'executable', str(executable))
     copied = []
+    repaired = []
     monkeypatch.setattr(installer, 'install_from_dir', lambda *args: copied.append(args))
+    monkeypatch.setattr(installer, 'retarget_shortcuts', lambda root: repaired.append(root))
     desktop._prepare_installation(service)
     assert copied == ([(executable.parent, __version__, root)] if should_install else [])
+    assert repaired == ([root] if installed == __version__ else [])

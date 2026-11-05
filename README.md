@@ -256,7 +256,7 @@ python -m venv .venv
 pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/0.7.1
 ```
 
-版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.1 的本地全量回归为 **300 项通过**，覆盖更新下载、取消续传、后台检查与旧快捷方式修正等行为。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
+版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.1 的本地全量回归为 **301 项通过**，覆盖更新下载、取消续传、后台检查与旧快捷方式修正等行为。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
 
 ## Roadmap | 开发计划
 

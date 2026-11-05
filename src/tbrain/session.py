@@ -110,8 +110,11 @@ def write_session(service, summary: handoff.Summary, path: Path, *, create: bool
     service.index.upsert_session(_row_from_summary(service, summary, path), body)
     service.sync_session_index(summary.project)
     folder = service.vault_root() / ".tbrain" / "会话版本" / handoff.fingerprint(summary.session_id)
+    snapshot_path = folder / (revision + ".md")
+    if snapshot_path.is_file():
+        return
     try:
-        service.store.write_text(folder / (revision + ".md"), body, create=True)
+        service.store.write_text(snapshot_path, body, create=True)
     except FileExistsError:
         pass  # 心跳没有改变交接内容时复用同一个版本。
 

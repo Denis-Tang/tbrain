@@ -35,6 +35,25 @@ def sid(host, session):
     return f"{host}:{session}"
 
 
+def test_existing_snapshot_does_not_require_another_hardlink(env, monkeypatch):
+    import os
+
+    service, _, work = env
+    prompt(service, 'codex', 'snapshot', work, '保存项目进度')
+    operations = [{'op': 'replace', 'section': 'next_step', 'text': '继续核对验收结果'}]
+    assert service.save('codex:snapshot', operations)['ok']
+    original_link = os.link
+
+    def sandbox_link(source, target):
+        if Path(target).exists():
+            raise OSError(22, 'Sandboxie reports an existing hardlink target as invalid')
+        return original_link(source, target)
+
+    monkeypatch.setattr(os, 'link', sandbox_link)
+    assert service.bootstrap('codex:snapshot', 'codex', str(work))['ok']
+    assert service.save('codex:snapshot', operations)['ok']
+
+
 def test_save_keeps_negation_numbers_and_code_whitespace_distinct(env):
     service, _, work = env
     prompt(service, 'codex', 'distinct', work, '验证记忆不能误合并')

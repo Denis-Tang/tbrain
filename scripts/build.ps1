@@ -6,7 +6,7 @@
 #   runtime/node.exe
 #   _internal/                 (PyInstaller onedir payload)
 #   integrations/              (DSH native plugin, pi extension)
-#   README.md, LICENSE, THIRD-PARTY-NOTICES.txt
+#   README.md, docs/, LICENSE, THIRD-PARTY-NOTICES.txt
 #
 # The version is read from src/tbrain/__init__.py only. No network access: the
 # Node license file is copied from the local Node installation when available.
@@ -75,6 +75,7 @@ if __name__ == "__main__":
     Copy-Item -LiteralPath @('README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') -Destination $packageDirectory -Force
     Copy-Item -LiteralPath 'build/desktop' -Destination $packageDirectory -Recurse -Force
     Copy-Item -LiteralPath 'integrations' -Destination $packageDirectory -Recurse -Force
+    Copy-Item -LiteralPath 'docs' -Destination $packageDirectory -Recurse -Force
 
     $nodeExecutable = @(Get-Command node -CommandType Application)[0].Source
     $nodeVersion = & $nodeExecutable --version

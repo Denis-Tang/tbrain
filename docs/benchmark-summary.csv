@@ -1,0 +1,7 @@
+﻿agent,condition,independent_chains,core_pass,core_total,facts_pass,facts_total,unknown_pass,unknown_total,recovered_and_executed,unassisted_recovered_and_executed,externally_resumed_handoffs,chain_had_controller_assistance,next_action_executed,handoff_total,final_state_recovered,probe_uncached_input,probe_cached_input,probe_total_input,probe_output,probe_peak_cny,probe_sum_seconds,probe_median_seconds,probe_tool_calls
+dsh,native,1,69,69,59,59,10,10,4,4,0,0,4,4,1,500050,7926144,8426194,102781,2.139394,1234.077,284.928,196
+dsh,tbrain-formal,1,67,69,57,59,10,10,3,3,0,0,4,4,1,315296,5899392,6214688,84298,1.540952,1035.149,172.169,173
+dsh,basic-memory,1,67,69,57,59,10,10,4,3,1,1,4,4,1,409199,8645376,9054575,95469,1.927965,1175.738,195.432,205
+pi,native,1,68,69,59,59,9,10,4,3,1,1,4,4,1,252100,3320704,3572804,50808,1.043492,688.903,87.765,143
+pi,tbrain-formal,1,69,69,59,59,10,10,4,3,1,1,4,4,1,220741,2608640,2829381,39872,0.864804,1627.728,208.161,119
+pi,basic-memory,1,66,69,56,59,10,10,4,4,0,0,4,4,1,233312,2418560,2651872,38931,0.874814,543.69,87.556,119

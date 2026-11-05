@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -205,17 +206,88 @@ def test_update_check_failure_degrades(api, monkeypatch):
 
     monkeypatch.setattr(update, "check_latest", broken)
     result = brain.update_check(False)
+    assert result["checking"]
+    brain._update_check_thread.join(2)
+    result = brain.update_check_status()
+    assert not result["checking"]
     assert result.get("ok") is False or "error" in result
+
+
+def test_update_check_does_not_block_desktop(api, monkeypatch):
+    desktop, service, _, _ = api
+    ready, finish = threading.Event(), threading.Event()
+    calls = []
+
+    def check(force):
+        calls.append(force)
+        ready.set()
+        assert finish.wait(2)
+        return {"newer": True, "latest": "0.7.1"}
+
+    monkeypatch.setattr(service, "check_update", check)
+    assert desktop.update_check(False)["checking"]
+    assert ready.wait(2)
+    assert desktop.update_check_status()["checking"]
+    assert desktop.status()["ready"]
+    assert desktop.update_check(False)["checking"]
+    assert calls == [False]
+    finish.set()
+    desktop._update_check_thread.join(2)
+    assert desktop.update_check_status() == {"checking": False, "newer": True, "latest": "0.7.1"}
 
 
 def test_upgrade_requests_restart_after_reply(api, monkeypatch):
     desktop, service, vault, _ = api
     root = vault.parent / 'install'
-    monkeypatch.setattr(service, 'apply_upgrade', lambda: {
-        'ok': True, 'upgraded': True, 'install_root': str(root), 'to': '0.6.4'})
-    result = desktop.update_apply()
+    ready, finish = threading.Event(), threading.Event()
+    calls = []
+
+    def upgrade(progress, cancelled, on_install):
+        calls.append(True)
+        progress(512, 1024)
+        ready.set()
+        assert finish.wait(2)
+        on_install()
+        assert desktop.update_status()["installing"]
+        assert not desktop.update_cancel()["requested"]
+        return {'ok': True, 'upgraded': True, 'install_root': str(root), 'to': '0.6.4'}
+
+    monkeypatch.setattr(service, 'apply_upgrade', upgrade)
+    assert desktop.update_apply()["running"]
+    assert ready.wait(2)
+    assert desktop.update_status()["received"] == 512
+    assert desktop.update_apply()["running"]
+    assert calls == [True]
+    assert not desktop._quit_requested
+    finish.set()
+    desktop._update_thread.join(2)
+    result = desktop.update_status()
+    assert not result["running"]
     assert result['restarting'] and desktop._quit_requested
     assert desktop._restart_executable == root / 'versions' / '0.6.4' / 'tbrain.exe'
+
+
+def test_background_upgrade_can_be_cancelled(api, monkeypatch):
+    from tbrain.update import UpdateError
+
+    desktop, service, _, _ = api
+    ready = threading.Event()
+
+    def upgrade(progress, cancelled, on_install):
+        progress(512, 1024)
+        ready.set()
+        assert cancelled.wait(2)
+        raise UpdateError("下载已取消。")
+
+    monkeypatch.setattr(service, "apply_upgrade", upgrade)
+    assert desktop.update_apply()["running"]
+    assert ready.wait(2)
+    assert desktop.update_cancel()["requested"]
+    desktop._update_thread.join(2)
+    result = desktop.update_status()
+    assert result["error"] == "下载已取消。"
+    assert not result["running"]
+    assert not desktop._quit_requested
 
 
 @pytest.mark.parametrize('installed,should_install', [('0.6.2', True), ('99.0.0', False)])

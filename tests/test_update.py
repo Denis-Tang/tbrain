@@ -7,6 +7,7 @@ upgrade work happens in ``tmp_path`` only.
 import hashlib
 import json
 import time
+import threading
 import zipfile
 from pathlib import Path
 
@@ -55,10 +56,11 @@ def zip_package(target: Path, version: str = NEXT_VERSION) -> bytes:
 class FakeStream:
     """Stands in for httpx's streaming response context manager."""
 
-    def __init__(self, payload: bytes, status_code: int = 200, chunk: int = 4096):
+    def __init__(self, payload: bytes, status_code: int = 200, chunk: int = 4096, headers=None):
         self.payload = payload
         self.status_code = status_code
         self.chunk = chunk
+        self.response_headers = headers or {}
 
     def __enter__(self):
         return self
@@ -68,7 +70,7 @@ class FakeStream:
 
     @property
     def headers(self):
-        return {"content-length": str(len(self.payload))}
+        return {"content-length": str(len(self.payload)), **self.response_headers}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -235,6 +237,70 @@ def test_download_release_rejects_bad_sha(tmp_path):
     assert leftovers == []
 
 
+@pytest.mark.parametrize("interruption", ["network", "cancel"])
+def test_download_release_resumes_interrupted_download(tmp_path, monkeypatch, interruption):
+    payload = zip_package(tmp_path / "release.zip")
+    release = release_for(payload=payload)
+    cancelled = threading.Event()
+    offset = len(payload) // 2
+
+    class InterruptedStream(FakeStream):
+        def iter_bytes(self, size=0):
+            yield payload[:offset]
+            if interruption == "network":
+                raise httpx.ReadTimeout("connection stalled")
+            cancelled.set()
+            yield payload[offset:]
+
+    with pytest.raises(update.UpdateError):
+        update.download_release(tmp_path, release, cancelled=cancelled,
+                                stream=lambda url, timeout: InterruptedStream(payload))
+    target = update.staged_archive(tmp_path, NEXT_VERSION, release["asset"]["name"])
+    part = target.with_name(target.name + ".part")
+    assert part.read_bytes() == payload[:offset]
+    cancelled.clear()
+    progress = []
+
+    def stream(method, url, **options):
+        assert options["headers"]["Range"] == f"bytes={offset}-"
+        return FakeStream(payload[offset:], status_code=206, headers={
+            "content-range": f"bytes {offset}-{len(payload) - 1}/{len(payload)}"})
+
+    monkeypatch.setattr(update.httpx, "stream", stream)
+    result = update.download_release(tmp_path, release, cancelled=cancelled,
+                                     progress=lambda received, total: progress.append((received, total)))
+    assert Path(result["path"]).read_bytes() == payload
+    assert progress[0] == (offset, len(payload))
+    assert progress[-1] == (len(payload), len(payload))
+    assert not part.exists()
+
+
+@pytest.mark.parametrize("response", ["ignored", "invalid", "complete"])
+def test_download_release_handles_resume_response(tmp_path, response):
+    payload = zip_package(tmp_path / "release.zip")
+    release = release_for(payload=payload)
+    target = update.staged_archive(tmp_path, NEXT_VERSION, release["asset"]["name"])
+    target.parent.mkdir(parents=True)
+    part = target.with_name(target.name + ".part")
+    offset = len(payload) if response == "complete" else len(payload) // 2
+    part.write_bytes(payload[:offset])
+
+    def stream(url, timeout, offset):
+        assert response != "complete", "a complete part must be verified without downloading again"
+        if response == "ignored":
+            return FakeStream(payload)
+        return FakeStream(payload[offset:], status_code=206, headers={
+            "content-range": f"bytes {offset + 1}-{len(payload) - 1}/{len(payload)}"})
+
+    if response == "invalid":
+        with pytest.raises(update.UpdateError, match="续传位置"):
+            update.download_release(tmp_path, release, stream=stream)
+        assert not part.exists()
+    else:
+        result = update.download_release(tmp_path, release, stream=stream)
+        assert Path(result["path"]).read_bytes() == payload
+
+
 def test_download_requires_published_digest(tmp_path):
     release = release_for()
     release["asset"]["sha256"] = ""
@@ -313,15 +379,18 @@ def test_upgrade_via_check_and_stream(tmp_path):
     payload = zip_package(tmp_path / "release.zip")
     fetcher = lambda timeout=8.0: release_for(payload=payload)
     doctor_calls = []
+    install_calls = []
 
     result = update.upgrade(home=home, install_root=root, fetcher=fetcher,
                             stream=lambda url, timeout: FakeStream(payload),
+                            on_install=lambda: install_calls.append(True),
                             doctor=lambda: doctor_calls.append(True) or {"ok": True, "items": []})
     assert result["ok"] is True
     assert result["upgraded"] is True
     assert result["check"]["latest"] == NEXT_VERSION
     assert installer.current_version(root) == NEXT_VERSION
     assert doctor_calls == [True]
+    assert install_calls == [True]
 
 
 def test_upgrade_installs_running_release_over_older_selected_version(tmp_path):

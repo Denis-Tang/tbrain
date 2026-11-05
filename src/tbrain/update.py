@@ -1,12 +1,4 @@
-"""Version check and verified staging from a public release manifest.
-
-Checking never installs or executes anything: it only asks GitHub for the newest published
-release. Downloading is a separate, explicit user action that streams the release ZIP into
-the application data directory, verifies its SHA256 against the published asset digest and
-checks the archive layout — it never touches the running installation. The network is only
-touched on an explicit user action, results are cached, and every failure degrades to a
-short message instead of an exception.
-"""
+"""Release checks, resumable verified downloads and versioned installation."""
 
 from __future__ import annotations
 
@@ -301,9 +293,13 @@ def verified_archive(home: Path, version: str) -> dict:
     return {**record, "path": str(path)}
 
 
-def _open_download(url: str, timeout: float):
+def _open_download(url: str, timeout: float, offset: int = 0):
+    headers = {"User-Agent": f"tbrain/{__version__}"}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    # httpx limits time without network activity, not the whole download duration.
     return httpx.stream("GET", url, follow_redirects=True, timeout=timeout,
-                        headers={"User-Agent": f"tbrain/{__version__}"})
+                        headers=headers)
 
 
 def download_release(home: Path, release: dict, progress=None, cancelled=None, stream=None,
@@ -327,43 +323,60 @@ def download_release(home: Path, release: dict, progress=None, cancelled=None, s
         return {**existing, "reused": True}
     target = staged_archive(home, version, str(asset.get("name") or ""))
     target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    received = part.stat().st_size if part.exists() else 0
+    if size and received > size:
+        part.unlink()
+        received = 0
     if size > 0:
         free = shutil.disk_usage(target.parent).free
-        if free < size + FREE_SPACE_MARGIN:
+        if free < size - received + FREE_SPACE_MARGIN:
             raise UpdateError(f"磁盘空间不足：还需要约 {size / (1024 * 1024):.0f} MB，"
                               f"当前可用 {free / (1024 * 1024):.0f} MB。")
-    part = target.with_name(target.name + ".part")
-    part.unlink(missing_ok=True)
-    hasher = hashlib.sha256()
-    received = 0
+    if cancelled is not None and cancelled.is_set():
+        raise UpdateError("下载已取消。")
+    if progress is not None:
+        progress(received, size)
     try:
-        with (stream or _open_download)(url, timeout) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length") or size or 0)
-            with part.open("wb") as handle:
-                for chunk in response.iter_bytes(CHUNK_BYTES):
-                    if cancelled is not None and cancelled.is_set():
-                        raise UpdateError("下载已取消。")
-                    handle.write(chunk)
-                    hasher.update(chunk)
-                    received += len(chunk)
-                    if progress is not None:
-                        progress(received, total)
-                handle.flush()
-                os.fsync(handle.fileno())
-    except UpdateError:
-        part.unlink(missing_ok=True)
-        raise
+        if not size or received != size:
+            options = {"offset": received} if received else {}
+            with (stream or _open_download)(url, timeout, **options) as response:
+                response.raise_for_status()
+                if response.status_code == 206:
+                    content_range = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
+                                                 response.headers.get("content-range", ""))
+                    if (not content_range or int(content_range[1]) != received
+                            or (size and int(content_range[3]) != size)):
+                        part.unlink(missing_ok=True)
+                        raise UpdateError("服务器返回的续传位置不一致，请重新下载。")
+                    total = int(content_range[3])
+                else:
+                    # A server may ignore Range and send the complete package.
+                    received = 0
+                    total = int(response.headers.get("content-length") or size or 0)
+                if progress is not None:
+                    progress(received, total)
+                with part.open("ab" if received else "wb") as handle:
+                    for chunk in response.iter_bytes(CHUNK_BYTES):
+                        if cancelled is not None and cancelled.is_set():
+                            raise UpdateError("下载已取消。")
+                        handle.write(chunk)
+                        received += len(chunk)
+                        if progress is not None:
+                            progress(received, total)
+                    handle.flush()
+                    os.fsync(handle.fileno())
     except httpx.HTTPStatusError as exc:
-        part.unlink(missing_ok=True)
+        if exc.response.status_code == 416:
+            part.unlink(missing_ok=True)
         raise UpdateError(f"下载失败：HTTP {exc.response.status_code}。") from None
     except (httpx.HTTPError, httpx.InvalidURL, OSError):
-        part.unlink(missing_ok=True)
-        raise UpdateError("下载失败，请检查网络后重试。") from None
+        raise UpdateError("下载中断，已保留进度，请检查网络后重试。") from None
+    if cancelled is not None and cancelled.is_set():
+        raise UpdateError("下载已取消，已保留进度。")
     if size and received != size:
-        part.unlink(missing_ok=True)
-        raise UpdateError("下载得到的大小与发布信息不一致，已停止。")
-    if hasher.hexdigest() != digest:
+        raise UpdateError("下载未完成，已保留进度，请重试。")
+    if file_sha256(part) != digest:
         part.unlink(missing_ok=True)
         raise UpdateError("校验失败：下载内容与发布的 SHA256 不一致，已删除。")
     os.replace(part, target)
@@ -547,7 +560,8 @@ def upgrade_from_package(source, version: str = "", home: Path | None = None,
 
 def upgrade(home: Path | None = None, install_root: Path | None = None,
             force: bool = True, doctor=None, fetcher=None, stream=None,
-            timeout: float = 5.0, prune_keep: int = 2, progress=None) -> dict:
+            timeout: float = 5.0, prune_keep: int = 2, progress=None,
+            cancelled=None, on_install=None) -> dict:
     """Read the release manifest, download and verify its package, then upgrade."""
     home = paths.app_home(home)
     check = check_latest(home, force=force, fetcher=fetcher, install_root=install_root)
@@ -561,7 +575,11 @@ def upgrade(home: Path | None = None, install_root: Path | None = None,
         if not asset.get("url"):
             raise UpdateError("发布信息里没有可下载的安装包。")
         cached = download_release(home, {"version": version, "asset": asset},
-                                  stream=stream, progress=progress)
+                                  stream=stream, progress=progress, cancelled=cancelled)
+    if cancelled is not None and cancelled.is_set():
+        raise UpdateError("更新已取消。")
+    if on_install is not None:
+        on_install()
     result = upgrade_from_package(cached["path"], version, home=home,
                                   install_root=install_root, timeout=timeout,
                                   doctor=doctor, prune_keep=prune_keep)

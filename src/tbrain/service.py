@@ -573,12 +573,13 @@ class TbrainService:
         return update.check_latest(self.home, force=force,
                                    install_root=paths.install_root(self.home, self.settings.load()))
 
-    def apply_upgrade(self) -> dict:
+    def apply_upgrade(self, progress=None, cancelled=None, on_install=None) -> dict:
         from . import hosts, update
 
         return update.upgrade(home=self.home,
                               install_root=paths.install_root(self.home, self.settings.load()),
                               force=True,
+                              progress=progress, cancelled=cancelled, on_install=on_install,
                               doctor=lambda: hosts.doctor_all_hosts(self.home, None, self.settings.load()))
 
     # ------------------------------------------------------------------

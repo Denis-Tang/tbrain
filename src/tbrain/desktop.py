@@ -26,6 +26,11 @@ class DesktopAPI:
         self._service = service
         self._quit_requested = False
         self._restart_executable = None
+        self._update_thread = None
+        self._update_cancelled = threading.Event()
+        self._update_result = {"running": False}
+        self._update_check_thread = None
+        self._update_check_result = {"checking": False}
 
     def _call(self, method, *args):
         try:
@@ -160,15 +165,53 @@ class DesktopAPI:
         return self._call(self._service.disconnect, host)
 
     def update_check(self, force=True):
-        return self._call(self._service.check_update, force)
+        if self._update_check_thread is None or not self._update_check_thread.is_alive():
+            self._update_check_result = {"checking": True}
+
+            def check():
+                result = self._call(self._service.check_update, force)
+                self._update_check_result = {**result, "checking": False}
+
+            self._update_check_thread = threading.Thread(target=check, name="tbrain-update-check", daemon=True)
+            self._update_check_thread.start()
+        return {"checking": True}
+
+    def update_check_status(self):
+        return dict(self._update_check_result)
 
     def update_apply(self):
-        result = self._call(self._service.apply_upgrade)
+        if self._update_thread is None or not self._update_thread.is_alive():
+            self._update_cancelled.clear()
+            self._update_result = {"running": True, "received": 0, "total": 0, "installing": False}
+            self._update_thread = threading.Thread(target=self._apply_update,
+                                                   name="tbrain-update", daemon=True)
+            self._update_thread.start()
+        return {"running": True}
+
+    def _apply_update(self):
+        def progress(received, total):
+            self._update_result = {"running": True, "received": received,
+                                   "total": total, "installing": False}
+
+        def on_install():
+            self._update_result = {"running": True, "installing": True}
+
+        result = self._call(self._service.apply_upgrade, progress, self._update_cancelled, on_install)
+        self._update_result = {**result, "running": False}
+
+    def update_status(self):
+        result = dict(self._update_result)
         if result.get('ok') and result.get('upgraded'):
             self._restart_executable = Path(result['install_root']) / 'versions' / result['to'] / 'tbrain.exe'
             self._quit_requested = True
             result['restarting'] = True
         return result
+
+    def update_cancel(self):
+        requested = self._update_result.get("running") and not self._update_result.get("installing")
+        if requested:
+            self._update_cancelled.set()
+        return {"requested": bool(requested)}
 
     def open_document(self, path):
         return self._call(self._service.open_document, path)

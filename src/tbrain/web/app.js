@@ -53,6 +53,8 @@
     lastFocus: null,
     booted: false,
     setup: null,
+    updating: false,
+    updateCheckRequest: null,
   };
 
   function hasBridge() {
@@ -1216,6 +1218,35 @@
     $("agent-runtime").textContent = items.filter(item => !CONNECTABLE.includes(item.host)).map(item => item.detail).join(" · ");
   }
 
+  async function checkForUpdates(force) {
+    if (!state.updateCheckRequest) {
+      state.updateCheckRequest = (async () => {
+        let result = await call("update_check", force);
+        while (result.checking) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          result = await call("update_check_status");
+        }
+        if (result.latest) {
+          const button = $("app-version");
+          button.classList.toggle("has-update", !!result.newer);
+          button.title = result.newer ? `发现新版本 v${result.latest}，点击升级` : "检查更新";
+          button.setAttribute("aria-label", button.title);
+        }
+        return result;
+      })().finally(() => { state.updateCheckRequest = null; });
+    }
+    return state.updateCheckRequest;
+  }
+
+  async function refreshUpdateNotice() {
+    if (state.updating) return;
+    try {
+      await checkForUpdates(false);
+    } catch (error) {
+      // A background network failure leaves the version button usable.
+    }
+  }
+
   function updateMessage(result) {
     if (!result || typeof result !== "object") return "检查失败";
     if (result.newer) {
@@ -1383,7 +1414,7 @@
       $("update-notes").innerHTML = "";
       $("update-dialog").showModal();
       try {
-        const result = await call("update_check", true);
+        const result = await checkForUpdates(true);
         $("update-status").textContent = updateMessage(result);
         $("update-notes").innerHTML = result.newer ? renderMarkdown(result.notes || "") : "";
         $("apply-update").hidden = !result.newer;
@@ -1391,9 +1422,26 @@
         $("update-status").textContent = error.bridge ? OFFLINE : errorText(error);
       }
     }));
-    $("cancel-update").addEventListener("click", () => $("update-dialog").close());
+    $("cancel-update").addEventListener("click", async () => {
+      if (!state.updating) {
+        $("update-dialog").close();
+        return;
+      }
+      try {
+        const result = await call("update_cancel");
+        if (result.requested) {
+          $("cancel-update").disabled = true;
+          $("update-status").textContent = "正在取消下载，已下载的内容会保留…";
+        }
+      } catch (error) {
+        $("update-status").textContent = errorText(error);
+      }
+    });
     $("update-dialog").addEventListener("cancel", (event) => {
-      if ($("cancel-update").disabled) event.preventDefault();
+      if (state.updating) {
+        event.preventDefault();
+        if (!$("cancel-update").disabled) $("cancel-update").click();
+      }
     });
 
     $("status-filters").addEventListener("click", (event) => {
@@ -1568,16 +1616,37 @@
     });
 
     $("apply-update").addEventListener("click", (event) => withBusy(event.currentTarget, async () => {
-      $("cancel-update").disabled = true;
-      $("update-status").textContent = "正在下载并安装更新，请稍候…";
+      state.updating = true;
+      $("cancel-update").textContent = "取消下载";
+      $("update-status").textContent = "正在准备下载…";
+      let previousBytes = null;
+      let previousTime = performance.now();
       try {
-        const result = await call("update_apply");
+        let result = await call("update_apply");
+        while (result.running) {
+          if (result.installing) {
+            $("cancel-update").disabled = true;
+            $("update-status").textContent = "正在安装更新，完成后会自动重启…";
+          } else if (!$("cancel-update").disabled && result.total) {
+            const now = performance.now();
+            const received = result.received || 0;
+            const speed = previousBytes === null ? 0 : Math.max(0, received - previousBytes) / ((now - previousTime) / 1000);
+            const megabytes = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
+            $("update-status").textContent = `正在下载 ${Math.floor(received / result.total * 100)}% · ${megabytes(received)} / ${megabytes(result.total)} MB · ${megabytes(speed)} MB/s`;
+            previousBytes = received;
+            previousTime = now;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          result = await call("update_status");
+        }
         $("update-status").textContent = result.message || (result.restarting ? "升级完成，正在重启 Tbrain" : "已是最新版本");
         $("apply-update").hidden = true;
       } catch (error) {
         $("update-status").textContent = errorText(error);
       } finally {
+        state.updating = false;
         $("cancel-update").disabled = false;
+        $("cancel-update").textContent = "取消";
       }
     }));
     $("refresh-doctor").addEventListener("click", (event) => withBusy(event.currentTarget, loadDoctor));
@@ -1632,6 +1701,8 @@
         await loadSetup();
       } else goTo("overview");
     } catch (error) { toast(errorText(error), true); }
+    refreshUpdateNotice();
+    window.setInterval(refreshUpdateNotice, 6 * 60 * 60 * 1000);
   }
 
   window.addEventListener("desktopready", boot, { once: true });

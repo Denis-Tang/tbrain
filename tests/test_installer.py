@@ -4,6 +4,7 @@ Everything runs inside ``tmp_path`` with a fake package (real executables are no
 needed); the tests never read or write a real installation.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -180,36 +181,47 @@ def test_entry_script_is_ascii_and_reads_current(tmp_path):
     assert installer.current_version(root) == "0.6.0"
 
 
-def _shortcut_target(path: Path) -> str:
+def _shortcut_details(path: Path) -> dict:
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{str(path).replace(chr(39), chr(39) * 2)}');$s.TargetPath"],
+         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{str(path).replace(chr(39), chr(39) * 2)}');"
+         "$s | Select-Object TargetPath,WorkingDirectory,IconLocation,Arguments | ConvertTo-Json -Compress"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
-    return completed.stdout.strip()
+    return json.loads(completed.stdout)
 
 
-def _make_shortcut(path: Path, target: Path) -> None:
+def _make_shortcut(path: Path, target: Path, metadata_target: Path) -> None:
     command = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{str(path).replace(chr(39), chr(39) * 2)}');"
-               f"$s.TargetPath='{str(target).replace(chr(39), chr(39) * 2)}';$s.Save()")
+               f"$s.TargetPath='{str(target).replace(chr(39), chr(39) * 2)}';"
+               f"$s.WorkingDirectory='{str(metadata_target.parent.parent).replace(chr(39), chr(39) * 2)}';"
+               f"$s.IconLocation='{str(metadata_target).replace(chr(39), chr(39) * 2)},0';"
+               "$s.Arguments='desktop';$s.Save()")
     subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="快捷方式是 Windows 功能")
-def test_retarget_shortcuts_follows_current_version(_isolate_shortcuts, tmp_path):
+@pytest.mark.parametrize("already_current", [False, True])
+def test_retarget_shortcuts_follows_current_version(_isolate_shortcuts, tmp_path, already_current):
     root = tmp_path / "install"
     installer.install_from_dir(make_package(tmp_path, "0.6.0"), "0.6.0", root=root)
     links = tmp_path / "links"
-    links.mkdir()
-    link = links / "Tbrain.lnk"
-    _make_shortcut(link, root / "versions" / "0.6.0" / "desktop" / "Tbrain.Desktop.exe")
+    nested = links / "custom"
+    nested.mkdir(parents=True)
+    link = nested / "My Tbrain.lnk"
+    old_target = root / "versions" / "0.6.0" / "desktop" / "Tbrain.Desktop.exe"
+    target = root / "current" / "desktop" / "Tbrain.Desktop.exe" if already_current else old_target
+    _make_shortcut(link, target, old_target)
 
     result = _isolate_shortcuts(root, directories=[links])
 
     assert result["ok"] is True
     assert result["changed"] == [str(link)]
-    target = _shortcut_target(link).lower()
-    assert target.endswith(r"current\desktop\tbrain.desktop.exe")
+    details = _shortcut_details(link)
+    assert details["TargetPath"].lower().endswith(r"current\desktop\tbrain.desktop.exe")
+    assert details["WorkingDirectory"].lower() == str(root / "current").lower()
+    assert details["IconLocation"].lower().endswith(r"current\desktop\tbrain.desktop.exe,0")
+    assert details["Arguments"] == "desktop"
     assert Path(str(link) + ".bak").is_file()
     # nothing left to rewrite on the next upgrade
     assert _isolate_shortcuts(root, directories=[links])["changed"] == []

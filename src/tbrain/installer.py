@@ -71,24 +71,41 @@ $shell = New-Object -ComObject WScript.Shell
 $changed = @()
 foreach ($dir in $dirs) {
     if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
-    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue)) {
         try {
             $link = $shell.CreateShortcut($file.FullName)
             $target = $link.TargetPath
-            if (-not $target -or -not $target.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) { continue }
-            $relative = $target.Substring($from.Length)
-            $split = $relative.IndexOf('\')
-            if ($split -lt 1) { continue }
-            Copy-Item -LiteralPath $file.FullName -Destination ($file.FullName + '.bak') -Force
-            $link.TargetPath = $to + $relative.Substring($split + 1)
+            if (-not $target) { continue }
+            $modified = $false
+            if ($target.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) {
+                $relative = $target.Substring($from.Length)
+                $split = $relative.IndexOf('\')
+                if ($split -lt 1) { continue }
+                $link.TargetPath = $to + $relative.Substring($split + 1)
+                $modified = $true
+            } elseif (-not $target.StartsWith($to, [StringComparison]::OrdinalIgnoreCase)) { continue }
             $working = $link.WorkingDirectory
             if ($working -and $working.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) {
                 $workRelative = $working.Substring($from.Length)
                 $workSplit = $workRelative.IndexOf('\')
-                if ($workSplit -ge 0) { $link.WorkingDirectory = $to + $workRelative.Substring($workSplit + 1) }
+                if ($workSplit -lt 0) { $link.WorkingDirectory = $to.TrimEnd('\') }
+                else { $link.WorkingDirectory = $to + $workRelative.Substring($workSplit + 1) }
+                $modified = $true
             }
-            $link.Save()
-            $changed += $file.FullName
+            $icon = $link.IconLocation
+            if ($icon -and $icon.StartsWith($from, [StringComparison]::OrdinalIgnoreCase)) {
+                $iconRelative = $icon.Substring($from.Length)
+                $iconSplit = $iconRelative.IndexOf('\')
+                if ($iconSplit -ge 0) {
+                    $link.IconLocation = $to + $iconRelative.Substring($iconSplit + 1)
+                    $modified = $true
+                }
+            }
+            if ($modified) {
+                Copy-Item -LiteralPath $file.FullName -Destination ($file.FullName + '.bak') -Force
+                $link.Save()
+                $changed += $file.FullName
+            }
         } catch { }
     }
 }

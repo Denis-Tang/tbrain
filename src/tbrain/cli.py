@@ -95,6 +95,10 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--execute", action="store_true", help="正式执行迁移（写入新 vault，旧数据只读）")
     migrate.add_argument("--to", default="", help="目标 vault（默认 settings.vault_path）")
     sub("version", "显示版本与安装状态")
+    dream = sub("dream", "冷蒸馏长期记忆（只读本地状态；不调用模型，不阻塞启动包）")
+    dream.add_argument("action", nargs="?", default="status", choices=["status", "run"])
+    dream.add_argument("--ops", default="", help="显式整理操作 JSON（外部分析器产出，本命令不调用模型）")
+    dream.add_argument("--project", default="", help="只蒸馏该项目里已结束的会话")
     return parser
 
 
@@ -315,6 +319,13 @@ def _cmd_evict(args) -> dict:
     return proc.evict_old_versions(__version__, timeout=args.timeout, home=home)
 
 
+def _cmd_dream(args) -> dict:
+    service = _service(_app_home(args))
+    if args.action == "run":
+        return service.dream_run(ops_path=str(args.ops or ""), project=str(args.project or ""))
+    return service.dream_status()
+
+
 def _cmd_version(args) -> dict:
     from .settings import SettingsStore
 
@@ -345,6 +356,7 @@ def run_command(command: str, args) -> dict:
         "migrate": _cmd_migrate,
         "evict": _cmd_evict,
         "version": _cmd_version,
+        "dream": _cmd_dream,
     }
     return handlers[command](args)
 

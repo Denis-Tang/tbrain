@@ -195,6 +195,15 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 
 `bridge show` 列出项目内近期有效决定，便于接手前核对。项目目标、规则或阶段发生变化时，让 Agent 在 `save` 中提交对应的 `project_prompt` 节；没有变化的节不重写。
 
+冷蒸馏不进启动路径。会话已经结束或中断后，可以在本地把它们收成 wiki；没跑过 Dream 时，启动包与原来相同：
+
+```powershell
+.\tbrain.cmd dream status
+.\tbrain.cmd dream run
+```
+
+说明见 [Dream](docs/DREAM.md)。
+
 MCP 指 [Model Context Protocol](https://modelcontextprotocol.io/)，用于 Agent 调用外部工具。四个工具的参数见 [技术架构](docs/ARCHITECTURE.md)，各宿主生效条件见 [接入说明](integrations/README.md)。
 
 ## Architecture | 技术架构
@@ -269,7 +278,7 @@ pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/0.7.1
 
 **会自动清理错误或过时的记忆吗？**
 
-不会自动判断所有冲突。程序过滤明确标为失效的决定，Agent 仍需核对来源并维护状态。实测中存在旧决定未退役、阶段授权延迟清理的问题。
+热路径不会自动判断所有冲突。`bootstrap` / `save` / `resume` 仍只过滤已经明确标成失效的决定，Agent 还要核对来源并维护状态。`tbrain dream run` 在同一知识库另写一份冷蒸馏，把这些失效决定记成退役，并把「待整理」收成待核验条目；它不改写会话总结正文。见 [Dream](docs/DREAM.md)。实测中存在旧决定未退役、阶段授权延迟清理的问题。
 
 **四个 Agent 的接入效果一样吗？**
 

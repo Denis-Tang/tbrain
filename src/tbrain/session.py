@@ -406,7 +406,21 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     package = "\n\n".join(parts)
     if trimmed:
         package += "\n\n（启动包已裁剪；请用 search 定位原文，或用 resume 按会话名读取，重复 bootstrap 不会展开。）"
-    return package + "\n\n" + footer
+    return _append_dream(service, host, package + "\n\n" + footer)
+
+
+def _append_dream(service, host: str, package: str) -> str:
+    """Dream 未 ready 时原样返回。不在这里等待冷蒸馏，也不调用模型。"""
+    try:
+        from . import dream
+
+        room = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(package)
+        extra = dream.bootstrap_snippet(service.vault_root(), room=room)
+    except Exception:
+        return package
+    if not extra:
+        return package
+    return package + "\n\n" + extra
 
 
 # ---------------------------------------------------------------------------
@@ -1088,7 +1102,29 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
                 candidates.append(f"{label}{entry['id']} {entry['text']}")
         matches = sorted(candidates, key=lambda text: sum(term in text.casefold() for term in terms), reverse=True)
         item["snippet"] = _clip("\n".join(text for text in matches[:3] if any(term in text.casefold() for term in terms)), 500)
-    return {"ok": True, "query": query, "results": unique, "current_time": _time_block(service)}
+    payload = {"ok": True, "query": query, "results": unique, "current_time": _time_block(service)}
+    dream_hits = _dream_hits(service, query, limit)
+    if dream_hits:
+        payload["dream"] = dream_hits
+    return payload
+
+
+def _dream_hits(service, query: str, limit: int) -> list[dict]:
+    try:
+        from . import dream
+
+        return dream.search_topics(service.vault_root(), query, limit)
+    except Exception:
+        return []
+
+
+def _dream_resume_pointer(service, session_id: str) -> str:
+    try:
+        from . import dream
+
+        return dream.resume_pointer(service.vault_root(), session_id)
+    except Exception:
+        return ""
 
 
 def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_revision: str = "", fork: bool = False) -> dict:
@@ -1155,6 +1191,9 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
         lines += [f"### {title}"] + [f"{item['id']} {item['text']}" for item in items] + [""]
     if old.extra.get("旧总结原文（迁移）"):
         lines += ["### 旧总结原文（迁移）", old.extra["旧总结原文（迁移）"], ""]
+    pointer = _dream_resume_pointer(service, old.session_id)
+    if pointer:
+        lines += [pointer, ""]
     # 当前会话写“接续自”
     if current.name != old.name:
         current.header["resumed_from"] = f"[[{old.name}]]"

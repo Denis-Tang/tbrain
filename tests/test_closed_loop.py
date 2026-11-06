@@ -113,7 +113,7 @@ def test_bootstrap_resume_contract_and_decision_reasons(env):
                    "小重构", "要不要我继续", "理由", "取舍", "决定人",
                    "推送分支", "拉取请求", "预览", "生产环境", "删除数据", "密钥",
                    "tbrain check", "small refactors", "CONDITIONAL PASS", "真实 Windows",
-                   "pytest", "人工剩余风险接受仍未完成"):
+                   "pytest", "人工剩余风险接受仍未完成", "应该可以", "退出码"):
         assert phrase in package, phrase
     assert worktree in package
     assert "待填写" in package
@@ -181,6 +181,8 @@ def test_wrap_up_blocks_missing_gates_and_stop_stays_quiet_while_in_progress(env
     early = service.hook("codex", {"hook_event_name": "Stop", "session_id": "done", "cwd": str(folder)})
     assert early["decision"] == "block"
     assert "最终验收" in early["reason"]
+    assert "应该可以" in early["reason"]
+    assert "退出码" in early["reason"]
     assert service.save("codex:done", [_pass_report()])["ok"]
     assert service.hook("codex", {"hook_event_name": "Stop", "session_id": "done", "cwd": str(folder)}) == {}
     assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "done", "cwd": str(folder)}) == {}

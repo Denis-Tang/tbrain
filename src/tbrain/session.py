@@ -885,8 +885,10 @@ def _op_example(op: str) -> str:
         "env": '{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv","state":"生效"}]}',
         "project_prompt": '{"op":"project_prompt","sections":{"最终目标":"...","硬规则":"- ...（来源：U1）"}}',
         "permission": '{"op":"permission","action":"push branch"}',
-        "acceptance": ('{"op":"acceptance","task":"状态","verification":"tbrain check 退出码 0",'
-                       '"risks":"无","deliverables":"commit 与怎么跑","conclusion":"PASS"}'),
+        "acceptance": ('{"op":"acceptance","task":"本地检查已接上，这一轮可以提交",'
+                       '"verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装",'
+                       '"risks":"没有还要人接受的风险",'
+                       '"deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}'),
     }.get(op, "")
 
 

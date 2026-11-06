@@ -16,10 +16,10 @@ _TEMPLATE = """\
 不要用“要不要我继续”这种问题停下来。
 做了决定要写下为什么：理由、取舍、决定人。不要只写做了什么。
 权限：读这个工作区里的代码、日志和测试可以直接做。推送分支、开拉取请求、开预览，要先被允许。生产环境、删除数据、碰密钥，必须 Kai 明确允许。
-收尾要交 A–E 最终验收，结论只能是 PASS、CONDITIONAL PASS 或 FAIL。CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成。
+收尾要交 A–E 最终验收，结论只能是 PASS、CONDITIONAL PASS 或 FAIL。CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成。验收用短句写清楚：命令、路径、退出码，以及验过什么、没验什么。不要堆术语，也不要写「应该可以」。
 Tbrain 桌面或 Windows 安装包：证据必须包含在真实 Windows 机器上安装并运行该产物。只跑 Linux 的 pytest 不算。没做这次真机验证时，结论不能是 PASS，要写 CONDITIONAL PASS 或 FAIL，并写明这个缺口。
 
-Work contract: stay in this project's worktree only. Meet the goal and done criteria. Self-check with tbrain check and real evidence. Interrupt Kai only for foundation changes (database migrations, auth, external protocols, installer or upgrade paths), not for naming, style, or small refactors. Do not stop on weak questions. Record why: rationale, tradeoffs, and who decided. Final acceptance is A task status, B verification and evidence, C risks, D deliverables (commit, artifact, how to run), E conclusion only PASS, CONDITIONAL PASS, or FAIL. CONDITIONAL PASS means human residual-risk acceptance is still pending. A Tbrain desktop or Windows installable cannot be PASS without a real Windows machine install-and-run; Linux pytest alone is not enough.
+Work contract: stay in this project's worktree only. Meet the goal and done criteria. Self-check with tbrain check and real evidence. Interrupt Kai only for foundation changes (database migrations, auth, external protocols, installer or upgrade paths), not for naming, style, or small refactors. Do not stop on weak questions. Record why: rationale, tradeoffs, and who decided. Final acceptance is A task status, B verification and evidence, C risks, D deliverables (commit, artifact, how to run), E conclusion only PASS, CONDITIONAL PASS, or FAIL. CONDITIONAL PASS means human residual-risk acceptance is still pending. A Tbrain desktop or Windows installable cannot be PASS without a real Windows machine install-and-run; Linux pytest alone is not enough. Write short sentences with the command, path, exit code, and what was or was not verified. Do not write vague claims such as "should be fine".
 """
 
 

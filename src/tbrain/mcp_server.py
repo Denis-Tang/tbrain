@@ -45,9 +45,9 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
 11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
-12. 最终验收：{"op":"acceptance","task":"…","verification":"…","risks":"…","deliverables":"commit、产物、怎么跑",
-   "conclusion":"PASS"}。结论只能是 PASS、CONDITIONAL PASS、FAIL。桌面或 Windows 安装包还要写
-   windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
+12. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。
+   用短句写明命令、路径、退出码，以及验过什么、没验什么。不要写「应该可以」。结论只能是 PASS、CONDITIONAL PASS、FAIL。
+   桌面或 Windows 安装包还要写 windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
 """
 
 

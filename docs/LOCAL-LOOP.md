@@ -49,18 +49,20 @@ SQLite 只做索引 | Markdown 是唯一事实源
 - 记录过的动作没有超出已允许的权限级别。
 - 会话总结里有一份 A–E 最终验收。结论只能是 `PASS`、`CONDITIONAL PASS` 或 `FAIL`。
 
-验收写在该会话总结的 `## 最终验收`，resume 会带上这一节。用 `save` 提交：
+验收写在该会话总结的 `## 最终验收`，resume 会带上这一节。
+
+写法保持白话，该有的细节不能省。每句都要能核对：写上命令、路径、退出码，以及验过什么、没验什么。不要堆术语，也不要写「应该可以」「大体没问题」。
 
 ```json
-{"op":"acceptance","task":"现在的状态","verification":"跑了什么、证据是什么","risks":"还剩什么风险","deliverables":"commit、产物、怎么跑","conclusion":"PASS"}
+{"op":"acceptance","task":"本地检查已接上，这一轮可以提交。","verification":"在 D:\\work\\app 运行 tbrain check，退出码 0。证据 E1 是 commit 4c8fa05。没有在 Windows 上安装。","risks":"没有还要人接受的风险。","deliverables":"commit 4c8fa05。在 D:\\work\\app 运行 tbrain check。","conclusion":"PASS"}
 ```
 
 | 字段 | 写什么 |
 |---|---|
-| A 任务状态 | 做完没有，现在停在哪 |
-| B 验证与证据 | 命令、结果，以及证据编号或原文 |
-| C 风险 | 还没消掉的风险；没有就写没有 |
-| D 交付物 | commit、产物、怎么跑 |
+| A 任务状态 | 一两句说清做到哪了。例：本地检查已接上，这一轮可以提交。 |
+| B 验证与证据 | 命令、目录、退出码、证据编号。没做的也写上。例：在 D:\work\app 运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装。 |
+| C 风险 | 还没消掉的具体事情。没有就写「没有还要人接受的风险」。 |
+| D 交付物 | commit 号、产物路径、怎么跑。例：commit 4c8fa05。在 D:\work\app 运行 tbrain check。 |
 | E 结论 | 只能是 PASS、CONDITIONAL PASS、FAIL |
 
 `CONDITIONAL PASS` 会在同一节写下「人工剩余风险接受：仍未完成」。这句话还在，就不能当成已经通过。
@@ -68,10 +70,10 @@ SQLite 只做索引 | Markdown 是唯一事实源
 Tbrain 桌面或 Windows 安装包还要多记一项。证据里必须有一次真实 Windows 机器上的安装并运行，不能只拿 Linux 上的 pytest 充当。没做这次验证时，结论不能是 `PASS`：用 `CONDITIONAL PASS` 或 `FAIL`，并写上缺口。
 
 ```json
-{"op":"acceptance","task":"安装包还没在 Windows 上跑过","verification":"Linux 上 pytest 已通过","risks":"安装和启动还没在 Windows 上看过","deliverables":"dist 里的安装包；在 Windows 上安装并打开","conclusion":"CONDITIONAL PASS","windows_installable":true,"windows_gap":"没有在 Windows 机器上安装并运行该产物"}
+{"op":"acceptance","task":"安装包还不能交给 Windows 用户。","verification":"在 Linux 上运行 pytest -q，退出码 0。没有在 Windows 机器上安装或打开安装包。","risks":"安装和启动还没在 Windows 上看过。","deliverables":"dist\\tbrain-setup.exe。在 Windows 上安装并打开 tbrain.exe。","conclusion":"CONDITIONAL PASS","windows_installable":true,"windows_gap":"没有在 Windows 机器上安装并运行 dist\\tbrain-setup.exe"}
 ```
 
-真机做过之后，把 `windows_verified` 设为 true，并在 `windows_evidence` 里写明在 Windows 上安装并运行了哪个产物，结论才可以是 `PASS`。
+真机做过之后，把 `windows_verified` 设为 true，并在 `windows_evidence` 里写明在哪台 Windows 上安装并运行了哪个文件，结论才可以是 `PASS`。例如：「在 Windows 11 机器上安装 dist\\tbrain-setup.exe，并运行 tbrain.exe，窗口能打开。」
 
 ## 权限 | Permission tiers
 

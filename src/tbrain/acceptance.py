@@ -12,6 +12,7 @@ SECTION = "最终验收"
 CONCLUSIONS = ("PASS", "CONDITIONAL PASS", "FAIL")
 PENDING_LINE = "人工剩余风险接受：仍未完成"
 SETTLED_LINE = "人工剩余风险接受：不适用"
+STYLE_NOTE = "写法：用短句写明命令、路径、退出码，以及验过什么、没验什么。不要堆术语，也不要写「应该可以」。"
 
 _HEADING = re.compile(r"^###\s+([A-E])\b")
 _META_PREFIXES = (
@@ -156,11 +157,14 @@ def validate(fields: dict) -> list[str]:
 def gaps(summary) -> list[str]:
     text = str((getattr(summary, "extra", None) or {}).get(SECTION) or "").strip()
     if not text:
-        return ["缺少 A–E 最终验收报告（A 任务状态、B 验证与证据、C 风险、D 交付物、E 结论）。"]
+        return ["缺少 A–E 最终验收报告（A 任务状态、B 验证与证据、C 风险、D 交付物、E 结论）。", STYLE_NOTE]
     parsed = parse_report(text)
     if not parsed:
-        return ["最终验收不是 A–E 结构。"]
-    return validate(parsed)
+        return ["最终验收不是 A–E 结构。", STYLE_NOTE]
+    problems = validate(parsed)
+    if problems:
+        problems.append(STYLE_NOTE)
+    return problems
 
 
 def apply_report(summary, fields: dict) -> None:

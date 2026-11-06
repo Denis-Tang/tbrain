@@ -340,8 +340,30 @@ class TbrainService:
             return {"ok": False, "error": "项目不存在"}
         self.refresh_index()
         scope = [name] + self.child_projects(name)
-        return {"ok": True, "project": name, "scope": scope,
-                "items": self.store.handoff_items(scope, limit)}
+        payload = {"ok": True, "project": name, "scope": scope,
+                   "items": self.store.handoff_items(scope, limit)}
+        extra = self._dream_snippet()
+        if extra:
+            payload["dream"] = extra
+        return payload
+
+    def _dream_snippet(self) -> str:
+        try:
+            from . import dream
+
+            return dream.bootstrap_snippet(self.vault_root(), room=dream.SNIPPET_BUDGET + 2)
+        except Exception:
+            return ""
+
+    def dream_status(self) -> dict:
+        from . import dream
+
+        return dream.status_view(self.vault_root())
+
+    def dream_run(self, ops_path: str = "", project: str = "") -> dict:
+        from . import dream
+
+        return dream.run(self, ops_path=ops_path, project=project)
 
     def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
         with self.store.write_lock():

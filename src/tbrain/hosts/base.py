@@ -39,6 +39,9 @@ EVENT_KINDS = {
     "context": "context",
     "PostToolUse": "tool-result",
     "ToolResult": "tool-result",
+    "WrapUp": "wrap-up",
+    "wrap_up": "wrap-up",
+    "wrap-up": "wrap-up",
 }
 
 PI_SOURCE_MAP = {"startup": "startup", "reload": "startup", "new": "startup",
@@ -258,7 +261,8 @@ def normalize(host: str, raw: dict) -> HookEvent:
                "last_test": payload.get("last_test"),
                "parent_session_id": str(payload.get("parent_session_id") or ""),
                "fork_user_count": payload.get("fork_user_count"),
-               "fork_revision": str(payload.get("fork_revision") or "")},
+               "fork_revision": str(payload.get("fork_revision") or ""),
+               "wrap_up": _as_bool(payload.get("wrap_up"))},
     )
 
 

@@ -340,8 +340,11 @@ class TbrainService:
             return {"ok": False, "error": "项目不存在"}
         self.refresh_index()
         scope = [name] + self.child_projects(name)
+        from .contract import render_contract
+
         payload = {"ok": True, "project": name, "scope": scope,
-                   "items": self.store.handoff_items(scope, limit)}
+                   "items": self.store.handoff_items(scope, limit),
+                   "contract": render_contract(self, name)}
         extra = self._dream_snippet()
         if extra:
             payload["dream"] = extra
@@ -522,13 +525,23 @@ class TbrainService:
     def configure_project(self, name: str, paths_list: list[str], parent: str = "",
                           allow_child: bool = False, rename_from: str = "") -> dict:
         from .hosts import create_workspaces
+        from .worktree import prepare
+
         is_new = not self.store.project(str(rename_from or name).strip())
         result = self.store.save_project(name, paths_list, parent=parent,
                                            allow_child=allow_child, rename_from=rename_from)
+        setup = prepare(result.get("name") or name, list(result.get("paths") or []))
+        worktree = self.store._normalize_path(str(setup.get("worktree") or ""))
+        paths = list(result.get("paths") or [])
+        if worktree and Path(worktree).exists() and worktree not in paths:
+            result = self.store.save_project(result["name"], paths + [worktree],
+                                              parent=str(result.get("parent") or ""),
+                                              allow_child=bool(result.get("allow_child")))
+        recorded = self.store.record_execution(result["name"], setup)
         self.refresh_index()
         if is_new:
-            result["workspace_sync"] = create_workspaces(result, self.home)
-        return result
+            recorded["workspace_sync"] = create_workspaces(recorded, self.home)
+        return recorded
 
     def delete_project(self, name: str) -> dict:
         result = self.store.delete_project(name)

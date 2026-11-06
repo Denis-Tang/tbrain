@@ -18,7 +18,7 @@ WRITING_SPEC = """\
 - 时间由程序写入，不要自己写时间；需要先后关系时引用编号，例如“D3 之后”。
 - 指代其他条目用编号（D#、K#、E#、G#），不要复述内容。
 - 证据 E# 只允许三种：文件:行号、命令+输出（≤3 行）、commit 号；没有证据的推断不要写成已排除。
-- 已完成 D# 写成“动作 → 结果 [证据:E#]”；决策 K# 写成“决策 | 理由”；
+- 已完成 D# 写成“动作 → 结果 [证据:E#]”；决策 K# 第一行写成“决策 | 理由”，并另起三行“理由：… / 取舍：… / 决定人：…”；
   未走通的路 X# 写成“尝试 | 原因类别 | 当时条件 | 结论强度”，原因类别只允许
   环境/权限限制、时间不够、证据不足、已证实不可行；结论强度只允许 已排除（必须附证据）或 暂缓。
 - 下一步只能 1 条（≤150 字），写成“动作 + 怎么验证”；目标 ≤200 字。
@@ -31,7 +31,7 @@ WRITING_SPEC = """\
 SAVE_TEMPLATE = """\
 save 操作示例（operations 是对象数组，一次可提交多个操作）：
 1. 完成项：{"op":"append","section":"done","items":[{"text":"给 index.py 增加中文两字切分影子列 [证据:E1]"}]}
-2. 决策：  {"op":"append","section":"decision","items":[{"text":"SQLite 只做索引 | Markdown 是唯一事实源"}]}
+2. 决策：  {"op":"append","section":"decision","items":[{"decision":"SQLite 只做索引","reason":"Markdown 是唯一事实源","rationale":"索引可以删掉重建","tradeoffs":"多维护一个索引文件","decided_by":"Kai"}]}
 3. 走不通：{"op":"append","section":"dead_end","items":[{"attempt":"用 trigram 分词","reason_kind":"已证实不可行",
    "conditions":"SQLite 3.45 / FTS5","strength":"已排除","evidence":"E2"}]}
 4. 证据：  {"op":"append","section":"evidence","items":[{"kind":"file","text":"src/tbrain/index.py:88"}]}
@@ -44,6 +44,10 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
    "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
+11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
+12. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。
+   用短句写明命令、路径、退出码，以及验过什么、没验什么。不要写「应该可以」。结论只能是 PASS、CONDITIONAL PASS、FAIL。
+   桌面或 Windows 安装包还要写 windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
 """
 
 

@@ -112,7 +112,8 @@ def test_bootstrap_resume_contract_and_decision_reasons(env):
                    "真实证据", "Kai", "数据库迁移", "登录", "对外协议", "安装", "升级",
                    "小重构", "要不要我继续", "理由", "取舍", "决定人",
                    "推送分支", "拉取请求", "预览", "生产环境", "删除数据", "密钥",
-                   "tbrain check", "small refactors"):
+                   "tbrain check", "small refactors", "CONDITIONAL PASS", "真实 Windows",
+                   "pytest", "人工剩余风险接受仍未完成"):
         assert phrase in package, phrase
     assert worktree in package
     assert "待填写" in package
@@ -177,8 +178,136 @@ def test_wrap_up_blocks_missing_gates_and_stop_stays_quiet_while_in_progress(env
         {"op": "replace", "section": "next_step", "text": "核对本地检查已经通过"},
         {"op": "set_status", "status": "已完成", "complete_goals": ["G1"]},
     ])["ok"]
+    early = service.hook("codex", {"hook_event_name": "Stop", "session_id": "done", "cwd": str(folder)})
+    assert early["decision"] == "block"
+    assert "最终验收" in early["reason"]
+    assert service.save("codex:done", [_pass_report()])["ok"]
     assert service.hook("codex", {"hook_event_name": "Stop", "session_id": "done", "cwd": str(folder)}) == {}
     assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "done", "cwd": str(folder)}) == {}
+    _, path = _load(service, "codex:done")
+    stored = path.read_text(encoding="utf-8")
+    for heading in ("### A 任务状态", "### B 验证与证据", "### C 风险", "### D 交付物", "### E 结论"):
+        assert heading in stored
+    assert "\nPASS\n" in stored
+
+
+def _pass_report(**overrides):
+    report = {
+        "op": "acceptance",
+        "task": "本地门禁已接到收尾",
+        "verification": "tbrain check 退出码 0，证据 E1",
+        "risks": "没有剩下要 Kai 接受的风险",
+        "deliverables": "commit 4c8fa05；在项目目录运行 tbrain check",
+        "conclusion": "PASS",
+    }
+    report.update(overrides)
+    return report
+
+
+def _ready_for_acceptance(service, folder, session):
+    service.configure_project(session, [str(folder)])
+    _prompt(service, session, folder, "准备提交最终验收")
+    sid = f"codex:{session}"
+    assert service.save(sid, [
+        {"op": "append", "section": "evidence", "items": [{"kind": "commit", "text": "4c8fa05"}]},
+        {"op": "append", "section": "done", "items": [{"text": "写了验收 [证据:E1]"}]},
+        {"op": "append", "section": "goal", "items": [{"text": "交出 A-E"}]},
+        {"op": "append", "section": "decision", "items": [{
+            "decision": "用 A-E 收尾",
+            "reason": "结论只能三选一",
+            "rationale": "避免含糊的完成声明",
+            "tradeoffs": "多写一段验收",
+            "decided_by": "Kai",
+        }]},
+        {"op": "permission", "action": "read tests"},
+    ])["ok"]
+    service.hook("codex", {"hook_event_name": "ToolResult", "session_id": session, "cwd": str(folder),
+                          "last_test": {"command": "tbrain check", "exit_code": 0}})
+    assert service.save(sid, [
+        {"op": "replace", "section": "next_step", "text": "提交最终验收"},
+        {"op": "set_status", "status": "已完成", "complete_goals": ["G1"]},
+    ])["ok"]
+    return sid
+
+
+def test_wrap_up_acceptance_report_blocks_until_valid_and_stores_it(env):
+    service, _, vault = env
+    folder = vault.parent / "accept"
+    sid = _ready_for_acceptance(service, folder, "验收")
+    stop = {"hook_event_name": "Stop", "session_id": "验收", "cwd": str(folder)}
+    assert "最终验收" in service.hook("codex", stop)["reason"]
+
+    missing = service.save(sid, [_pass_report(deliverables="")])
+    assert missing["ok"] is False
+    assert any("D 交付物" in item["reason"] for item in missing["rejected"])
+    bad = service.save(sid, [_pass_report(conclusion="MAYBE")])
+    assert bad["ok"] is False
+    assert any("PASS" in item["reason"] for item in bad["rejected"])
+
+    conditional = _pass_report(
+        conclusion="CONDITIONAL PASS",
+        risks="安装路径还没在 Windows 上看过",
+        windows_installable=True,
+        windows_gap="没有在 Windows 机器上安装并运行该产物",
+    )
+    assert service.save(sid, [conditional])["ok"]
+    _, path = _load(service, sid)
+    stored = path.read_text(encoding="utf-8")
+    assert "人工剩余风险接受：仍未完成" in stored
+    assert "Windows 缺口：没有在 Windows 机器上安装并运行该产物" in stored
+    assert service.hook("codex", stop) == {}
+    _prompt(service, "验收续", folder, "读回验收结论")
+    resumed = service.resume("codex:验收续", sid)
+    assert "CONDITIONAL PASS" in resumed["handoff"]
+    assert "人工剩余风险接受：仍未完成" in resumed["handoff"]
+
+    path.write_text(stored.replace("人工剩余风险接受：仍未完成", "人工剩余风险接受：不适用"), encoding="utf-8")
+    stripped = service.hook("codex", stop)
+    assert stripped["decision"] == "block"
+    assert "人工剩余风险接受" in stripped["reason"]
+
+
+def test_windows_installable_cannot_pass_without_a_real_windows_run(env):
+    service, _, vault = env
+    folder = vault.parent / "win"
+    sid = _ready_for_acceptance(service, folder, "安装包")
+    stop = {"hook_event_name": "Stop", "session_id": "安装包", "cwd": str(folder)}
+    pytest_only = _pass_report(
+        verification="Linux 上 pytest -q 已通过",
+        windows_installable=True,
+        windows_verified=True,
+        windows_evidence="pytest -q",
+        windows_gap="只跑了 Linux pytest",
+    )
+    rejected = service.save(sid, [pytest_only])
+    assert rejected["ok"] is False
+    assert any("不能是 PASS" in item["reason"] or "pytest" in item["reason"] for item in rejected["rejected"])
+    assert service.hook("codex", stop)["decision"] == "block"
+
+    bare_pass = _pass_report(windows_installable=True, conclusion="PASS")
+    assert service.save(sid, [bare_pass])["ok"] is False
+    named = _pass_report(
+        conclusion="FAIL",
+        risks="安装包没有在 Windows 上打开过",
+        windows_installable=True,
+        windows_gap="没有在 Windows 机器上安装并运行该产物",
+    )
+    assert service.save(sid, [named])["ok"]
+    assert service.hook("codex", stop) == {}
+
+    verified = _pass_report(
+        conclusion="PASS",
+        verification="Windows 真机安装并运行过安装包；Linux pytest 只是附加检查",
+        windows_installable=True,
+        windows_verified=True,
+        windows_evidence="在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe",
+    )
+    assert service.save(sid, [verified])["ok"]
+    _, path = _load(service, sid)
+    text = path.read_text(encoding="utf-8")
+    assert "Windows 真机验证：已做" in text
+    assert "在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe" in text
+    assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "安装包", "cwd": str(folder)}) == {}
 
 
 def test_local_check_fails_missing_why_then_passes_when_reasons_exist(tmp_path):

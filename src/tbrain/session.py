@@ -728,7 +728,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     protected = summary.header.get("user_owned_fields", [])
     written: dict = {"users": [], "done": [], "decisions": [], "dead_ends": [], "evidence": [],
                      "goals": [], "target": "", "next_step": "", "status": "", "env": [],
-                     "project_prompt": {}, "permissions": []}
+                     "project_prompt": {}, "permissions": [], "acceptance": {}}
     rejected: list[dict] = []
     warnings: list[str] = []
 
@@ -822,6 +822,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             elif op == "permission":
                 recorded = _record_permission(summary, operation)
                 written["permissions"].append(recorded)
+            elif op == "acceptance":
+                written["acceptance"] = _save_acceptance(summary, operation)
             elif op == "project_prompt":
                 sections = operation.get("sections")
                 if not summary.project:
@@ -831,7 +833,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
             else:
-                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission")
+                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission/acceptance")
         except ValueError as exc:
             rejected.append({"op": op, "reason": str(exc),
                              "example": _op_example(op)})
@@ -883,6 +885,8 @@ def _op_example(op: str) -> str:
         "env": '{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv","state":"生效"}]}',
         "project_prompt": '{"op":"project_prompt","sections":{"最终目标":"...","硬规则":"- ...（来源：U1）"}}',
         "permission": '{"op":"permission","action":"push branch"}',
+        "acceptance": ('{"op":"acceptance","task":"状态","verification":"tbrain check 退出码 0",'
+                       '"risks":"无","deliverables":"commit 与怎么跑","conclusion":"PASS"}'),
     }.get(op, "")
 
 
@@ -915,6 +919,15 @@ def _supersede_decisions(service, summary, references):
             write_session(service, old, path)
         changed.extend(f'[[{old.name}]]#{identifier}' if path else identifier for identifier in marked)
     return changed
+
+
+def _save_acceptance(summary, operation: dict) -> dict:
+    from .acceptance import apply_report, normalize
+
+    fields = normalize(operation)
+    apply_report(summary, fields)
+    return {"conclusion": fields["conclusion"], "windows_installable": fields["windows_installable"],
+            "windows_verified": fields["windows_verified"]}
 
 
 def _format_decision(item: dict) -> str:
@@ -1275,6 +1288,9 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
         lines += [f"### {title}"] + [f"{item['id']} {item['text']}" for item in items] + [""]
     if old.extra.get("旧总结原文（迁移）"):
         lines += ["### 旧总结原文（迁移）", old.extra["旧总结原文（迁移）"], ""]
+    acceptance_text = str(old.extra.get("最终验收") or "").strip()
+    if acceptance_text:
+        lines += ["### 最终验收", acceptance_text, ""]
     pointer = _dream_resume_pointer(service, old.session_id)
     if pointer:
         lines += [pointer, ""]

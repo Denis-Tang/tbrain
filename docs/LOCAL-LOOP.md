@@ -41,12 +41,37 @@ SQLite 只做索引 | Markdown 是唯一事实源
 
 ## 收尾 | Wrap-up
 
-宿主事件 `WrapUp` 会检查下面四项，缺任何一项就 `decision=block`，原因写在 `reason` 里。会话状态已经是「已完成」时，原来的 `Stop` 也会做同样的检查。进行中的 `Stop` 仍只提醒尚未 save 的内容。
+宿主事件 `WrapUp` 会检查下面各项，缺任何一项就 `decision=block`，原因写在 `reason` 里。会话状态已经是「已完成」时，原来的 `Stop` 也会做同样的检查。进行中的 `Stop` 仍只提醒尚未 save 的内容。
 
 - 至少一条证据；已完成项要引用证据编号。
 - 验证结果里有一次退出码为 0 的 `tbrain check`。
 - 每条仍有效的决定都写了理由、取舍、决定人。
 - 记录过的动作没有超出已允许的权限级别。
+- 会话总结里有一份 A–E 最终验收。结论只能是 `PASS`、`CONDITIONAL PASS` 或 `FAIL`。
+
+验收写在该会话总结的 `## 最终验收`，resume 会带上这一节。用 `save` 提交：
+
+```json
+{"op":"acceptance","task":"现在的状态","verification":"跑了什么、证据是什么","risks":"还剩什么风险","deliverables":"commit、产物、怎么跑","conclusion":"PASS"}
+```
+
+| 字段 | 写什么 |
+|---|---|
+| A 任务状态 | 做完没有，现在停在哪 |
+| B 验证与证据 | 命令、结果，以及证据编号或原文 |
+| C 风险 | 还没消掉的风险；没有就写没有 |
+| D 交付物 | commit、产物、怎么跑 |
+| E 结论 | 只能是 PASS、CONDITIONAL PASS、FAIL |
+
+`CONDITIONAL PASS` 会在同一节写下「人工剩余风险接受：仍未完成」。这句话还在，就不能当成已经通过。
+
+Tbrain 桌面或 Windows 安装包还要多记一项。证据里必须有一次真实 Windows 机器上的安装并运行，不能只拿 Linux 上的 pytest 充当。没做这次验证时，结论不能是 `PASS`：用 `CONDITIONAL PASS` 或 `FAIL`，并写上缺口。
+
+```json
+{"op":"acceptance","task":"安装包还没在 Windows 上跑过","verification":"Linux 上 pytest 已通过","risks":"安装和启动还没在 Windows 上看过","deliverables":"dist 里的安装包；在 Windows 上安装并打开","conclusion":"CONDITIONAL PASS","windows_installable":true,"windows_gap":"没有在 Windows 机器上安装并运行该产物"}
+```
+
+真机做过之后，把 `windows_verified` 设为 true，并在 `windows_evidence` 里写明在 Windows 上安装并运行了哪个产物，结论才可以是 `PASS`。
 
 ## 权限 | Permission tiers
 

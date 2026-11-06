@@ -1,10 +1,10 @@
-"""Wrap-up gate: evidence, local check, decision reasons, permission tier."""
+"""Wrap-up gate: evidence, local check, decision reasons, permission tier, A–E acceptance."""
 
 from __future__ import annotations
 
 import re
 
-from . import handoff
+from . import acceptance, handoff
 from .check import has_decision_reasons
 from .policy import TIERS, TIER_TEXT, classify, covers
 
@@ -70,6 +70,7 @@ def gaps(summary) -> list[str]:
         saved_users = 0
     if len(summary.users) > saved_users:
         missing.append("还有未保存的用户指令，先 save。")
+    missing.extend(acceptance.gaps(summary))
     return missing
 
 

@@ -45,6 +45,9 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
 11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
+12. 最终验收：{"op":"acceptance","task":"…","verification":"…","risks":"…","deliverables":"commit、产物、怎么跑",
+   "conclusion":"PASS"}。结论只能是 PASS、CONDITIONAL PASS、FAIL。桌面或 Windows 安装包还要写
+   windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
 """
 
 

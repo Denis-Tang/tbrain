@@ -195,6 +195,14 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 
 `bridge show` 列出项目内近期有效决定，便于接手前核对。项目目标、规则或阶段发生变化时，让 Agent 在 `save` 中提交对应的 `project_prompt` 节；没有变化的节不重写。
 
+新建项目时，第一个代码目录会初始化为 git 仓库（已是仓库则沿用），并固定一处工作区：`../.tbrain-worktrees/<仓库目录名>/<项目名>`。同时写入完成标准模板，字段是 goal、done、evidence、verify。
+
+每天的本地门禁用 `tbrain check`。它只跑项目里的 `.tbrain/check.yaml`，不连接 GitHub；远程拉取请求仍用仓库自己的 CI。说明见 [本地闭环](docs/LOCAL-LOOP.md)。
+
+```powershell
+.\tbrain.cmd check --path D:\work\app
+```
+
 冷蒸馏不进启动路径。会话已经结束或中断后，可以在本地把它们收成 wiki；没跑过 Dream 时，启动包与原来相同：
 
 ```powershell

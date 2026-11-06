@@ -95,6 +95,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--execute", action="store_true", help="正式执行迁移（写入新 vault，旧数据只读）")
     migrate.add_argument("--to", default="", help="目标 vault（默认 settings.vault_path）")
     sub("version", "显示版本与安装状态")
+    check = sub("check", "运行项目本地检查（不依赖 GitHub CI）")
+    check.add_argument("--path", type=Path, default=None, help="项目目录（默认当前目录）")
+    check.add_argument("--config", type=Path, default=None, help="检查配置；默认查找 .tbrain/check.yaml 或 tbrain.check.yaml")
     dream = sub("dream", "冷蒸馏长期记忆（只读本地状态；不调用模型，不阻塞启动包）")
     dream.add_argument("action", nargs="?", default="status", choices=["status", "run"])
     dream.add_argument("--ops", default="", help="显式整理操作 JSON（外部分析器产出，本命令不调用模型）")
@@ -319,6 +322,14 @@ def _cmd_evict(args) -> dict:
     return proc.evict_old_versions(__version__, timeout=args.timeout, home=home)
 
 
+def _cmd_check(args) -> dict:
+    from .check import run_check
+
+    root = Path(args.path).expanduser() if getattr(args, "path", None) else Path.cwd()
+    config = Path(args.config).expanduser() if getattr(args, "config", None) else None
+    return run_check(root, config_path=config)
+
+
 def _cmd_dream(args) -> dict:
     service = _service(_app_home(args))
     if args.action == "run":
@@ -357,6 +368,7 @@ def run_command(command: str, args) -> dict:
         "evict": _cmd_evict,
         "version": _cmd_version,
         "dream": _cmd_dream,
+        "check": _cmd_check,
     }
     return handlers[command](args)
 
@@ -379,7 +391,7 @@ def main(argv=None) -> int:
         result = run_command(command, args)
         compact = command in ("hook", "tool")
         _print(result, indent=None if compact else 2)
-        if command == "bridge" and isinstance(result, dict) and result.get("ok") is False:
+        if command in ("bridge", "check") and isinstance(result, dict) and result.get("ok") is False:
             return 1
         return 0
     except KeyboardInterrupt:

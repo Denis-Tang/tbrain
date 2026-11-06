@@ -16,7 +16,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import handoff, identity, naming, prompt as prompt_mod
+from .contract import render_contract
 from .hooks import HookEvent, HookResult
+from .policy import TIERS, classify
 
 HOST_BUDGETS = {"claude-code": 9000, "codex": 8000, "dsh": 12000, "pi": 12000, "unknown": 8000}
 STATUS_PRIORITY = {"已中断": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}
@@ -383,8 +385,9 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
         progress = _clip(progress, HOST_BUDGETS.get(host, 8000) // 4)
     pending = service.store.pending_confirmations(summary.project)
     decisions = _handoff_block(service, summary.project)
-    footer = "\n\n".join(part for part in (decisions, progress, recent, _clip(pending, 1500), _time_block(service),
-                                           _identity_block(service, summary)) if part)
+    contract = render_contract(service, summary.project, cwd=str(summary.header.get("cwd") or ""))
+    footer = "\n\n".join(part for part in (contract, decisions, progress, recent, _clip(pending, 1500),
+                                           _time_block(service), _identity_block(service, summary)) if part)
     budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(footer) - 80
     parts: list[str] = []
     used = 0
@@ -460,6 +463,24 @@ def _stop_reminder(service, summary: handoff.Summary, path: Path, host: str) -> 
                       reason=message)
 
 
+def _wrap_up_hook(service, summary, path, host: str) -> HookResult:
+    from .wrapup import gaps, message
+
+    if summary is None:
+        text = "收尾未通过：没有会话记录，不能核对证据、本地检查、决定理由和权限。"
+        return HookResult(decision="block", reason=text,
+                          additional_context=text if host == "pi" else "")
+    found = gaps(summary)
+    summary.header["last_activity_at"] = _utc_iso(service.now().utc)
+    if path is not None:
+        write_session(service, summary, path)
+    if not found:
+        return HookResult()
+    text = message(found)
+    return HookResult(decision="block", reason=text,
+                      additional_context=text if host == "pi" else "")
+
+
 def _needs_save(summary: handoff.Summary) -> bool:
     verification = summary.header.get("last_verify") or {}
     return (len(summary.users) > int(summary.header.get("saved_users") or 0) or
@@ -494,6 +515,10 @@ def handle_hook(service, event: HookEvent) -> HookResult:
             write_session(service, summary, path)
         return HookResult()
 
+    if event.kind == "wrap-up":
+        summary, path = _load_or_none(service, host, event.host_session_id)
+        return _wrap_up_hook(service, summary, path, host)
+
     if event.kind == "stop":
         if event.stop_hook_active:
             return HookResult(decision="", reason="")
@@ -502,6 +527,8 @@ def handle_hook(service, event: HookEvent) -> HookResult:
             return HookResult()
         if _needs_save(summary):
             return _stop_reminder(service, summary, path, host)
+        if summary.status == "已完成" or event.extra.get("wrap_up"):
+            return _wrap_up_hook(service, summary, path, host)
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
         return HookResult()
@@ -700,7 +727,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         summary.header["user_owned_fields"] = ["target", "next_step"]
     protected = summary.header.get("user_owned_fields", [])
     written: dict = {"users": [], "done": [], "decisions": [], "dead_ends": [], "evidence": [],
-                     "goals": [], "target": "", "next_step": "", "status": "", "env": [], "project_prompt": {}}
+                     "goals": [], "target": "", "next_step": "", "status": "", "env": [],
+                     "project_prompt": {}, "permissions": []}
     rejected: list[dict] = []
     warnings: list[str] = []
 
@@ -791,6 +819,9 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         error["operation"] = {**operation, "items": [item]}
                     if card:
                         written["env"].append(card)
+            elif op == "permission":
+                recorded = _record_permission(summary, operation)
+                written["permissions"].append(recorded)
             elif op == "project_prompt":
                 sections = operation.get("sections")
                 if not summary.project:
@@ -800,7 +831,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
             else:
-                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt")
+                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission")
         except ValueError as exc:
             rejected.append({"op": op, "reason": str(exc),
                              "example": _op_example(op)})
@@ -851,6 +882,7 @@ def _op_example(op: str) -> str:
         "set_status": '{"op":"set_status","status":"已完成","complete_goals":["G1"]}',
         "env": '{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv","state":"生效"}]}',
         "project_prompt": '{"op":"project_prompt","sections":{"最终目标":"...","硬规则":"- ...（来源：U1）"}}',
+        "permission": '{"op":"permission","action":"push branch"}',
     }.get(op, "")
 
 
@@ -885,6 +917,58 @@ def _supersede_decisions(service, summary, references):
     return changed
 
 
+def _format_decision(item: dict) -> str:
+    """Keep the first line as 决策 | 理由 and store why on the following lines."""
+    text = str(item.get("text") or "").strip()
+    decision = str(item.get("decision") or "").strip()
+    reason = str(item.get("reason") or "").strip()
+    rationale = str(item.get("rationale") or "").strip()
+    tradeoffs = str(item.get("tradeoffs") or item.get("tradeoff") or "").strip()
+    who = str(item.get("decided_by") or item.get("who") or "").strip()
+    if "|" not in text and decision and (reason or rationale):
+        text = f"{decision} | {reason or rationale}"
+    lines = [text] if text else []
+    if rationale and "理由：" not in text and "理由:" not in text and "Rationale:" not in text:
+        lines.append(f"理由：{rationale}")
+    if tradeoffs and "取舍：" not in text and "取舍:" not in text and "Tradeoffs:" not in text:
+        lines.append(f"取舍：{tradeoffs}")
+    if who and "决定人：" not in text and "决定人:" not in text and "Decided by:" not in text:
+        lines.append(f"决定人：{who}")
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _record_permission(summary, operation: dict) -> dict:
+    grants = summary.header.get("permission_grants")
+    if not isinstance(grants, list):
+        grants = ["auto"]
+    elif "auto" not in grants:
+        grants = ["auto", *grants]
+    grant = str(operation.get("grant") or "").strip()
+    action = str(operation.get("action") or "").strip()
+    if not grant and not action:
+        raise ValueError("permission 需要 grant 或 action")
+    if grant:
+        if grant not in TIERS:
+            raise ValueError("grant 只允许 auto / conditional / auth-required")
+        if grant not in grants:
+            grants.append(grant)
+    tier = str(operation.get("tier") or "").strip()
+    recorded = {"grant": grant}
+    if action:
+        if tier and tier not in TIERS:
+            raise ValueError("tier 只允许 auto / conditional / auth-required")
+        tier = tier or classify(action)
+        actions = summary.header.get("permission_actions")
+        if not isinstance(actions, list):
+            actions = []
+        entry = {"action": action, "tier": tier}
+        actions.append(entry)
+        summary.header["permission_actions"] = actions
+        recorded.update(entry)
+    summary.header["permission_grants"] = grants
+    return recorded
+
+
 def _append_item(service, summary, section, item, rejected, warnings):
     if isinstance(item, str):
         item = {"text": item}
@@ -895,9 +979,7 @@ def _append_item(service, summary, section, item, rejected, warnings):
         return _append_evidence(service, summary, item, rejected, warnings)
     if section == "未走通的路":
         return _append_dead_end(service, summary, item, rejected)
-    text = str(item.get("text") or "").strip()
-    if section == "决策" and "|" not in text and item.get("decision") and item.get("reason"):
-        text = f"{item['decision']} | {item['reason']}"
+    text = _format_decision(item) if section == "决策" else str(item.get("text") or "").strip()
     if not text:
         rejected.append({"section": section, "reason": "text 不能为空", "example": _op_example("append")})
         return ""
@@ -914,8 +996,10 @@ def _append_item(service, summary, section, item, rejected, warnings):
             not re.fullmatch(r"E\d+", reference) or not summary.has_reference(reference) for reference in references):
         rejected.append({"section": section, "reason": "证据引用无效或不存在；先保存证据并使用返回的 E#", "example": _op_example("append")})
         return ""
-    if len(text) > handoff.ITEM_MAX_CHARS:
-        rejected.append({"section": section, "reason": f"正文连同证据引用不超过 {handoff.ITEM_MAX_CHARS} 字", "example": _op_example("append")})
+    primary = text.split("\n", 1)[0] if section == "决策" else text
+    if len(primary) > handoff.ITEM_MAX_CHARS or (section == "决策" and len(text) > 2000):
+        limit = "全文不超过 2000 字" if section == "决策" and len(primary) <= handoff.ITEM_MAX_CHARS else f"正文连同证据引用不超过 {handoff.ITEM_MAX_CHARS} 字"
+        rejected.append({"section": section, "reason": limit, "example": _op_example("append")})
         return ""
     for candidate in summary.all_items(section):
         if _same_text(candidate.get("text", ""), text):
@@ -1194,6 +1278,11 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
     pointer = _dream_resume_pointer(service, old.session_id)
     if pointer:
         lines += [pointer, ""]
+    handoff_text = "\n".join(lines)
+    contract = render_contract(service, current.project or old.project,
+                               cwd=str(current.header.get("cwd") or old.header.get("cwd") or ""))
+    if contract:
+        handoff_text = contract + "\n\n" + handoff_text
     # 当前会话写“接续自”
     if current.name != old.name:
         current.header["resumed_from"] = f"[[{old.name}]]"
@@ -1206,7 +1295,7 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
     ranking = service.index.record_resume_feedback(current.session_id, current.project, old.session_id)
     return {"ok": True, "resumed_from": old.name, "session_id": current.session_id,
             "resumed_session_id": old.session_id,
-            "handoff": "\n".join(lines), "current_time": _time_block(service), "ranking": ranking}
+            "handoff": handoff_text, "current_time": _time_block(service), "ranking": ranking}
 
 
 def bootstrap(service, session_id: str, agent: str, cwd: str, host_record: str = "",

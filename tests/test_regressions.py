@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from tbrain.check import run_check
@@ -131,18 +132,33 @@ def test_populated_folder_keeps_code_and_does_not_commit_it(tmp_path):
     subprocess.run([*git, "-C", str(committed), "init"], check=True, capture_output=True)
     subprocess.run([*git, "-C", str(committed), "add", "app.py"], check=True, capture_output=True)
     subprocess.run([*git, "-C", str(committed), "commit", "-m", "app"], check=True, capture_output=True)
-    service3 = _service(tmp_path, "committed")
+    service3 = _service(tmp_path, "committed-home")
     saved3 = service3.configure_project("已提交", [str(committed)])
     assert saved3["worktree_status"] == "worktree"
     assert (Path(saved3["worktree"]) / "app.py").read_text(encoding="utf-8") == "SENTINEL = 3\n"
     (committed / "app.py").write_text("SENTINEL = 4\n", encoding="utf-8")
     (committed / "notes.txt").write_text("local only\n", encoding="utf-8")
-    service3.configure_project("已提交", [str(committed)])
+    dirty = service3.configure_project("已提交", [str(committed)])
     card = service3.store.project("已提交")
+    assert dirty["worktree_status"] == "original"
+    assert Path(card["worktree"]).resolve() == committed.resolve()
     assert "未提交的文件没有复制" in card["worktree_limitation"]
     assert (committed / "app.py").read_text(encoding="utf-8") == "SENTINEL = 4\n"
-    assert (Path(card["worktree"]) / "app.py").read_text(encoding="utf-8") == "SENTINEL = 3\n"
-    assert not (Path(card["worktree"]) / "notes.txt").exists()
+    assert (committed / "notes.txt").read_text(encoding="utf-8") == "local only\n"
+    package = service3.bootstrap("codex:committed", "codex", str(committed), project="已提交")["package"]
+    assert str(committed.resolve()) in package
+    listed = subprocess.run(
+        ["git", "-C", str(committed), "worktree", "list", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    isolated = [
+        Path(line.split(" ", 1)[1])
+        for line in listed.splitlines()
+        if line.startswith("worktree ") and Path(line.split(" ", 1)[1]).resolve() != committed.resolve()
+    ]
+    assert isolated
+    assert (isolated[0] / "app.py").read_text(encoding="utf-8") == "SENTINEL = 3\n"
+    assert not (isolated[0] / "notes.txt").exists()
 
 
 def test_changed_failure_counts_are_not_one_stall_and_a_batch_keeps_later_success(tmp_path):
@@ -232,13 +248,13 @@ def test_pause_keeps_evidence_and_continue_needs_the_users_route(tmp_path):
     assert _load(service, "codex:pause")[0].status == "已暂停"
     noted = service.save("codex:pause", [
         {"op": "append", "section": "evidence", "items": [{"kind": "command", "text": "pytest -q\n1 passed"}]},
-        {"op": "replace", "section": "next_step", "text": "补一条不同的失败用例后再改解析"},
+        {"op": "replace", "section": "next_step", "text": "改为先补表格驱动测试再改解析"},
     ])
     assert noted["ok"] is True
     summary = _load(service, "codex:pause")[0]
     assert summary.status == "已暂停"
     assert summary.items("证据")[-1]["text"] == "pytest -q\n1 passed"
-    assert summary.next_step == "补一条不同的失败用例后再改解析"
+    assert summary.header["stall"]["proposed_route"] == "改为先补表格驱动测试再改解析"
     no_source = service.save("codex:pause", [{
         "op": "continue", "route": "改为先补表格驱动测试再改解析",
         "why": "三次都没有新证据", "tradeoffs": "先不重写", "decided_by": "Kai",
@@ -249,13 +265,19 @@ def test_pause_keeps_evidence_and_continue_needs_the_users_route(tmp_path):
         "why": "三次都没有新证据", "tradeoffs": "先不重写", "decided_by": "Kai",
     }])
     assert bad_source["ok"] is False
-    wrong_words = service.save("codex:pause", [{
+    old_source = service.save("codex:pause", [{
         "op": "continue", "route": "改为先补表格驱动测试再改解析", "source": "U1",
         "why": "三次都没有新证据", "tradeoffs": "先不重写", "decided_by": "Kai",
     }])
-    assert wrong_words["ok"] is False
-    assert _load(service, "codex:pause")[0].status == "已暂停"
-    _prompt(service, "pause", folder, "改为先补表格驱动测试再改解析")
+    assert old_source["ok"] is False
+    assert "暂停之前" in old_source["rejected"][0]["reason"]
+    _prompt(service, "pause", folder, "继续按建议的新路线做")
+    fragment = service.save("codex:pause", [{
+        "op": "continue", "route": "新路线", "source": "U2",
+        "why": "三次都没有新证据", "tradeoffs": "先不重写", "decided_by": "Kai",
+    }])
+    assert fragment["ok"] is False
+    assert "已记下的下一步" in fragment["rejected"][0]["reason"]
     continued = service.save("codex:pause", [{
         "op": "continue", "route": "改为先补表格驱动测试再改解析", "source": "U2",
         "why": "三次都没有新证据", "tradeoffs": "先不重写", "decided_by": "Kai",
@@ -307,10 +329,105 @@ def test_windows_pass_rejects_a_negative_sentence_and_a_model_flag(tmp_path):
     assert summary.header["last_verify"]["platform"] != "Windows"
     still = service.save("codex:accept", [report])
     assert still["ok"] is False
-    summary.header["last_verify"] = {
-        "command": "tbrain-setup.exe", "exit_code": 0, "source": "tool",
-        "platform": "Windows", "at": summary.header["last_verify"]["at"],
-    }
     from tbrain.acceptance import host_windows_proof
-    assert host_windows_proof(summary) is True
+    summary.header["last_verify"] = {
+        "command": "whoami", "exit_code": 0, "source": "tool",
+        "platform": "Windows", "at": "2000-01-01T00:00:00Z",
+    }
+    assert host_windows_proof(summary) is False  # simulated header, not a Windows run
+    from tbrain.acceptance import validate
+    problems = validate({
+        "task": "安装包", "verification": "模拟的 whoami 退出码 0", "risks": "没有核对产物",
+        "deliverables": "没有安装记录", "conclusion": "PASS", "windows_installable": True,
+        "windows_gap": "",
+    }, host_windows_proof=host_windows_proof(summary))
+    assert any("检查器" in item for item in problems)
     assert host_windows_proof(_load(service, "codex:accept")[0]) is False
+
+
+def test_dirty_committed_repo_contract_uses_the_original_files(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("version-one\n", encoding="utf-8")
+    git = ["git", "-c", "user.name=Tbrain", "-c", "user.email=tbrain@localhost", "-c", "commit.gpgsign=false"]
+    subprocess.run([*git, "-C", str(root), "init"], check=True, capture_output=True)
+    subprocess.run([*git, "-C", str(root), "add", "README.md"], check=True, capture_output=True)
+    subprocess.run([*git, "-C", str(root), "commit", "-m", "readme"], check=True, capture_output=True)
+    service = _service(tmp_path, "dirty")
+    clean = service.configure_project("改过的仓库", [str(root)])
+    assert clean["worktree_status"] == "worktree"
+    (root / "README.md").write_text("version-two\n", encoding="utf-8")
+    (root / "app.py").write_text("print('working')\n", encoding="utf-8")
+    again = service.configure_project("改过的仓库", [str(root)])
+    assert again["worktree_status"] == "original"
+    package = service.bootstrap("codex:dirty", "codex", str(root), project="改过的仓库")["package"]
+    work_line = next(line for line in package.splitlines() if line.startswith("工作区："))
+    prescribed = Path(work_line.split("：", 1)[1].strip())
+    assert prescribed.resolve() == root.resolve()
+    assert (prescribed / "README.md").read_text(encoding="utf-8") == "version-two\n"
+    assert (prescribed / "app.py").read_text(encoding="utf-8") == "print('working')\n"
+
+
+def test_elapsed_seconds_do_not_count_as_a_new_failure_outcome(tmp_path):
+    service = _service(tmp_path)
+    folder = tmp_path / "app"
+    folder.mkdir()
+    _prompt(service, "time", folder, "同一失败次数多了耗时")
+    route = "pytest tests/test_app.py::test_parse -q"
+    for evidence in ("10 failed", "10 failed, took 12s", "10 failed"):
+        saved = service.save("codex:time", [{
+            "op": "attempt", "route": route, "evidence": evidence, "productive": False,
+        }])
+        assert saved["ok"] is True
+    summary = _load(service, "codex:time")[0]
+    assert summary.status == "已暂停"
+    assert summary.header["stall"]["consecutive"] == 3
+
+
+def test_unrelated_agreement_does_not_accept_another_question(tmp_path):
+    service = _service(tmp_path)
+    folder = tmp_path / "app"
+    folder.mkdir()
+    service.configure_project("按钮", [str(folder)])
+    _prompt(service, "agree", folder, "同意把按钮改成蓝色")
+    package = service.bootstrap("codex:agree", "codex", str(folder), project="按钮")["package"]
+    assert "决定人不必写在原话里" in package
+    rejected = service.save("codex:agree", [{
+        "op": "confirm", "question": "Q1", "accept_default": True,
+        "source": "U1", "why": "按钮颜色不是这个问题", "tradeoffs": "不能借用同意两个字",
+        "decided_by": "Kai",
+    }])
+    assert rejected["ok"] is False
+    assert any("这个具体问题" in item["reason"] for item in rejected["rejected"])
+    _prompt(service, "agree", folder, "不同意 Q1 的建议默认")
+    refused = service.save("codex:agree", [{
+        "op": "confirm", "question": "Q1", "accept_default": True,
+        "source": "U2", "why": "这句是否定", "tradeoffs": "不能把否定当成同意",
+        "decided_by": "Kai",
+    }])
+    assert refused["ok"] is False
+    _prompt(service, "agree", folder, "同意 Q1 的建议默认")
+    accepted = service.save("codex:agree", [{
+        "op": "confirm", "question": "Q1", "accept_default": True,
+        "source": "U3", "why": "这句原话指向 Q1", "tradeoffs": "不另写答案",
+        "decided_by": "Kai",
+    }])
+    assert accepted["ok"] is True
+
+
+def test_user_check_file_stall_threshold_wins_over_generated_file(tmp_path):
+    service = _service(tmp_path)
+    folder = tmp_path / "app"
+    folder.mkdir()
+    service.configure_project("阈值", [str(folder)])
+    (folder / ".tbrain" / "check.yaml").write_text(
+        "stall:\n  unproductive_attempts: 3\nchecks: []\n", encoding="utf-8")
+    (folder / "tbrain.check.yaml").write_text(
+        "stall:\n  unproductive_attempts: 9\nchecks: []\n", encoding="utf-8")
+    _prompt(service, "limit", folder, "用户文件里的阈值应该生效")
+    route = "same failing command"
+    for _ in range(4):
+        assert service.save("codex:limit", [{
+            "op": "attempt", "route": route, "evidence": "still red", "productive": False,
+        }])["ok"]
+    assert _load(service, "codex:limit")[0].status != "已暂停"

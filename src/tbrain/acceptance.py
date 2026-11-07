@@ -130,21 +130,16 @@ def parse_report(text: str) -> dict | None:
 
 
 def host_windows_proof(summary) -> bool:
-    """True only for a host-collected command that this process recorded on Windows.
+    """No installable verifier is available.
 
-    The model cannot set ``platform``. Tbrain writes it when a tool result arrives.
-    A sentence or a ``windows_verified`` flag is not this record. This function does
-    not contact a Windows machine and does not prove a human saw the window.
+    A host event with exit code 0 is not proof that this build was installed and
+    started, even if the record says Windows. ``whoami``, ``echo``, ``pytest``,
+    and an old timestamp do not identify the artifact. A model-supplied platform
+    is not a trusted runner. This returns False until a real verifier exists.
+    Hand-built headers in tests are simulations, not Windows runs.
     """
-    verify = getattr(summary, "header", {}).get("last_verify") if summary is not None else None
-    if not isinstance(verify, dict):
-        return False
-    return (
-        verify.get("source") == "tool"
-        and verify.get("platform") == "Windows"
-        and verify.get("exit_code") == 0
-        and bool(str(verify.get("command") or "").strip())
-    )
+    del summary
+    return False
 
 
 def validate(fields: dict, *, host_windows_proof: bool = False) -> list[str]:
@@ -164,8 +159,8 @@ def validate(fields: dict, *, host_windows_proof: bool = False) -> list[str]:
     if fields.get("windows_installable") and not host_windows_proof:
         if conclusion == "PASS":
             problems.append(
-                "桌面或 Windows 安装包的 PASS 需要宿主在 Windows 上采集的执行记录"
-                "（平台、命令、退出码 0）。模型填写的 windows_verified 不能代替，结论不能是 PASS"
+                "当前没有能核对安装包的检查器。宿主上的任意成功命令，即使平台写成 Windows，"
+                "也不能当作本版本已安装并启动的证据。模型填写的 windows_verified 不能代替，结论不能是 PASS"
             )
         if not str(fields.get("windows_gap") or "").strip():
             problems.append("Windows 真机验证未做，必须写明缺口")

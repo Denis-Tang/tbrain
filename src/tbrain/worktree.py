@@ -129,12 +129,7 @@ def ensure(name: str, folder: Path) -> dict:
     if _registered(root, destination):
         payload["worktree_status"] = "worktree"
         payload["worktree_error"] = ""
-        pending = _uncommitted(root)
-        if pending:
-            payload["worktree_limitation"] = (
-                "未提交的文件没有复制到工作区，仍只在原目录：" + "、".join(pending[:8])
-            )
-        return payload
+        return _prefer_original_when_uncommitted(payload, folder, root)
     if not _clear_reserved(destination, payload):
         return payload
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -145,12 +140,7 @@ def ensure(name: str, folder: Path) -> dict:
     if added.returncode == 0 and _registered(root, destination):
         payload["worktree_status"] = "worktree"
         payload["worktree_error"] = ""
-        pending = _uncommitted(root)
-        if pending:
-            payload["worktree_limitation"] = (
-                "未提交的文件没有复制到工作区，仍只在原目录：" + "、".join(pending[:8])
-            )
-        return payload
+        return _prefer_original_when_uncommitted(payload, folder, root)
     _write_marker(destination, name)
     payload["worktree_error"] = (added.stderr or added.stdout or "git worktree add 失败").strip()
     return payload
@@ -198,6 +188,26 @@ def _commit_skeleton(root: Path, files: list[Path]) -> subprocess.CompletedProce
         return _git(root, ["commit", "--allow-empty", "-m", "tbrain: project worktree skeleton"])
     _git(root, ["add", "--", *relative])
     return _git(root, ["commit", "-m", "tbrain: project worktree skeleton"])
+
+
+def _prefer_original_when_uncommitted(payload: dict, folder: Path, root: Path) -> dict:
+    """Dirty or untracked project files stay the execution location.
+
+    A warning on an empty worktree still sends the agent to the stale tree.
+    Do not copy or commit those files.
+    """
+    pending = _uncommitted(root)
+    if not pending:
+        payload.pop("worktree_limitation", None)
+        return payload
+    payload["worktree_status"] = "original"
+    payload["worktree"] = str(folder)
+    payload["worktree_error"] = (
+        "有未提交的改动或未跟踪文件，执行位置仍是原目录。"
+        "没有复制或提交这些文件，隔离还不完整。"
+    )
+    payload["worktree_limitation"] = "未提交的文件没有复制到工作区，仍只在原目录：" + "、".join(pending[:8])
+    return payload
 
 
 def _user_files(folder: Path) -> list[Path]:

@@ -830,6 +830,10 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         raise ValueError(f"下一步不超过 {handoff.NEXT_MAX_CHARS} 字")
                     summary.next_step = text
                     written["next_step"] = text
+                    if progress.is_paused(summary):
+                        stall = summary.header.setdefault("stall", {})
+                        if isinstance(stall, dict):
+                            stall["proposed_route"] = text
                 else:
                     raise ValueError("replace.section 只允许 target / next_step")
             elif op == "set_status":

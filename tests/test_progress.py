@@ -154,7 +154,7 @@ def test_unclear_goals_ask_once_record_why_and_block_pass(tmp_path, monkeypatch)
     _prompt(service, "ask", folder, "同意 Q1 的建议默认")
     invented = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U1")])
     assert invented["ok"] is False
-    assert any("明确同意" in item["reason"] for item in invented["rejected"])
+    assert any("这个具体问题" in item["reason"] for item in invented["rejected"])
     granted = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2", grant="auth-required")])
     assert granted["ok"] is False
     assert any("权限" in item["reason"] for item in granted["rejected"])
@@ -371,7 +371,7 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
     assert blocked["ok"] is False
     noted = service.save("codex:work", [
         {"op": "append", "section": "evidence", "items": [{"kind": "command", "text": "pytest -q\n1 failed"}]},
-        {"op": "replace", "section": "next_step", "text": "先把失败次数记下来"},
+        {"op": "replace", "section": "next_step", "text": "改为先补表格驱动测试再改解析"},
     ])
     assert noted["ok"] is True
     assert _load(service, "codex:work")[0].status == "已暂停"
@@ -381,13 +381,13 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
     }])
     assert no_source["ok"] is False
     assert any("source" in item["reason"] for item in no_source["rejected"])
-    _prompt(service, "work", folder, route)
-    same_route = service.save("codex:work", [{
-        "op": "continue", "route": route, "why": "再试一次", "tradeoffs": "不换路",
+    _prompt(service, "work", folder, "继续按建议的新路线做")
+    fragment = service.save("codex:work", [{
+        "op": "continue", "route": "新路线", "why": "再试一次", "tradeoffs": "不换路",
         "decided_by": "Kai", "source": "U2",
     }])
-    assert same_route["ok"] is False
-    assert "不能当作换路" in same_route["rejected"][0]["reason"]
+    assert fragment["ok"] is False
+    assert "已记下的下一步" in fragment["rejected"][0]["reason"]
 
     _prompt(service, "next", folder, "接手暂停的会话")
     resumed = service.resume("codex:next", "codex:work")
@@ -402,11 +402,10 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
     assert again.startswith("已暂停")
     assert "不能把那个进程杀掉" in again
 
-    _prompt(service, "work", folder, "改为先补表格驱动测试再改解析")
     continued = service.save("codex:work", [{
         "op": "continue", "route": "改为先补表格驱动测试再改解析",
         "why": "同一条 pytest 失败已经重复", "tradeoffs": "先不重写解析器",
-        "decided_by": "Kai", "source": "U3",
+        "decided_by": "Kai", "source": "U2",
     }])
     assert continued["ok"] is True
     restored, _ = _load(service, "codex:work")

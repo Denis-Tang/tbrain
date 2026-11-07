@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from . import handoff, naming
-from .check import find_config
+from .check import find_configs
 from .store import COMPLETION_FILE, render_note, split_front_matter
 
 HANDOFF_SECTION = "热交接"
@@ -25,6 +25,7 @@ HANDOFF_PACKAGE_LIMIT = 3500
 _STALL_KEYS = {
     "policy", "consecutive", "last_signature", "last_text", "paused", "reason",
     "paused_at", "log", "cleared_by", "streak_notes", "last_outcome",
+    "paused_user_count", "proposed_route",
 }
 _UNPRODUCTIVE_EFFECTS = {"start", "repeat", "unproductive"}
 _PERSONAL_PATH = re.compile(
@@ -132,7 +133,8 @@ def pause_instruction(summary) -> str:
     return (
         f"已暂停：{reason}\n"
         "可以继续保存证据、走不通的路、决定理由和下一步提议。这些不是继续实现。\n"
-        "要解除暂停，用户原话里要写出新路线，并用 continue 的 source 指向那句原话。\n"
+        "要解除暂停，先把下一步写成具体路线，再让用户在这次暂停之后同意这条路线。\n"
+        "原话不必重复整句路线。暂停前的旧原话、以及原话里的片段，都不能代替这条路线。\n"
         "只填写决定人的名字不能解除暂停。Tbrain 不核验这个名字。\n"
         "Tbrain 会拒绝已完成和 PASS。Stop 不会再要求模型继续这一轮。\n"
         "Tbrain 不拥有外部 Agent 进程，不能把那个进程杀掉。"
@@ -210,8 +212,8 @@ def apply_confirm(service, summary, operation: dict) -> str:
     answer = str(operation.get("decision") or operation.get("answer") or "").strip()
     if accept_default:
         answer = str(found.get("default") or "").strip()
-        if not _accepts_default(source["text"]):
-            raise ValueError("接受建议默认时，用户原话要明确同意，不能由保存操作自行认定")
+        if not _assents_to_question(source["text"], question_id, answer):
+            raise ValueError("这句原话没有同意这个具体问题的建议默认")
     elif not _text_has(source["text"], answer):
         raise ValueError("用户原话里没有这条决定，不能自行认定已确认")
     if not answer:
@@ -242,18 +244,24 @@ def apply_confirm(service, summary, operation: dict) -> str:
 def apply_continue(service, summary, operation: dict, *, now: str) -> str:
     if not is_paused(summary):
         raise ValueError("还没有暂停，不用 continue")
-    route = str(operation.get("route") or operation.get("text") or "").strip()
     why = str(operation.get("why") or operation.get("rationale") or "").strip()
     tradeoffs = str(operation.get("tradeoffs") or operation.get("tradeoff") or "").strip()
     who = str(operation.get("decided_by") or operation.get("who") or "").strip()
-    if not route:
-        raise ValueError("continue 需要新路线 route")
     if not why or not tradeoffs or not who:
         raise ValueError("继续要写理由、取舍、决定人")
-    source = _confirmation_source(summary, operation, who=who)
-    if not _text_has(source["text"], route):
-        raise ValueError("新路线必须出现在 source 指向的用户原话里，不能只凭决定人名字继续")
     state = ensure_stall(summary, policy_limit(service, summary))
+    proposal = str(state.get("proposed_route") or "").strip()
+    if not proposal:
+        raise ValueError("还没有记下具体的新路线。请先把下一步写成要走的路线，再请用户在这次暂停之后明确同意。不要猜。")
+    source = _confirmation_source(summary, operation, who=who)
+    if int(source["id"][1:]) <= int(state.get("paused_user_count") or 0):
+        raise ValueError("这句原话在本次暂停之前，不能用来解除暂停")
+    if not _assents_to_proposal(source["text"]):
+        raise ValueError("这句原话没有同意已记下的新路线")
+    supplied = str(operation.get("route") or operation.get("text") or "").strip()
+    route = supplied or proposal
+    if route != proposal:
+        raise ValueError("继续的路线必须是已记下的下一步，不能用原话里的片段代替")
     previous = str(state.get("last_text") or "")
     if _matches_streak(state, route):
         raise ValueError("新路线仍是没有实质进展的尝试，不能当作换路")
@@ -352,6 +360,8 @@ def ensure_stall(summary, policy: int) -> dict:
     state.setdefault("last_text", "")
     state.setdefault("last_outcome", "")
     state.setdefault("paused", False)
+    state.setdefault("paused_user_count", 0)
+    state.setdefault("proposed_route", "")
     state.setdefault("reason", "")
     state.setdefault("paused_at", "")
     state.setdefault("log", [])
@@ -371,17 +381,20 @@ def policy_limit(service, summary) -> int:
     roots: list[str] = []
     if service is not None and summary.project:
         card = service.store.project(summary.project) or {}
+        roots.extend(str(item) for item in (card.get("paths") or []))
         if card.get("worktree"):
             roots.append(str(card["worktree"]))
-        roots.extend(str(item) for item in (card.get("paths") or []))
     cwd = str(summary.header.get("cwd") or "")
     if cwd:
         roots.append(cwd)
+    configs = []
     for root in roots:
-        limit = _policy_in(root)
-        if limit is not None:
-            return limit
-    return DEFAULT_UNPRODUCTIVE
+        try:
+            configs.extend(find_configs(Path(root)))
+        except OSError:
+            continue
+    limit = _stall_from_configs(configs)
+    return limit if limit is not None else DEFAULT_UNPRODUCTIVE
 
 
 def mark_paused(service, summary, reason: str, *, now: str) -> None:
@@ -389,6 +402,8 @@ def mark_paused(service, summary, reason: str, *, now: str) -> None:
     state["paused"] = True
     state["reason"] = _scrub(reason, summary, service)
     state["paused_at"] = now
+    state["paused_user_count"] = len(summary.users)
+    state["proposed_route"] = ""
     summary.header["status"] = "已暂停"
     summary.header["stall"] = state
     summary.extra[HANDOFF_SECTION] = render_hot_handoff(service, summary, reason=state["reason"])
@@ -500,30 +515,33 @@ def question_lines(items: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _numbers(text: str) -> str:
-    return ",".join(re.findall(r"\d+", str(text or "")))
+_FAIL_COUNT = re.compile(r"(\d+)\s*(?:failed|failures|failure|失败)", re.IGNORECASE)
+_PASS_COUNT = re.compile(r"(\d+)\s*(?:passed|passing|通过)", re.IGNORECASE)
+
+
+def result_counts(text: str) -> tuple[str, str] | None:
+    """Failing and passing counts only. Elapsed time and other digits are ignored."""
+    raw = str(text or "")
+    failed = _FAIL_COUNT.findall(raw)
+    passed = _PASS_COUNT.findall(raw)
+    if not failed and not passed:
+        return None
+    return (",".join(failed), ",".join(passed))
 
 
 def outcome_key(text: str, explicit: str = "") -> str:
-    """Identity of an execution result. Counts stay; surrounding words do not.
+    """Identity of an execution result.
 
-    ``10 failed`` and ``10 tests failed`` are the same outcome. ``10 failed``
-    and ``5 failed`` are not. An explicit outcome string wins over the text.
+    An explicit outcome wins. Otherwise only ``N failed`` / ``N passed`` counts.
+    ``10 failed, took 12s`` is the same result as ``10 failed``.
     """
     given = " ".join(str(explicit or "").casefold().split())
     if given:
         return "explicit:" + given
-    raw = str(text or "")
-    numbers = re.findall(r"\d+", raw)
-    folded = raw.casefold()
-    labels = []
-    if re.search(r"failed|failure|失败", folded):
-        labels.append("fail")
-    if re.search(r"passed|通过", folded) and "fail" not in labels:
-        labels.append("pass")
-    if not numbers and not labels:
+    counts = result_counts(text)
+    if not counts:
         return ""
-    return ",".join(labels) + ":" + ",".join(numbers)
+    return f"fail:{counts[0]}|pass:{counts[1]}"
 
 
 def same_failure(left: str, right: str) -> bool:
@@ -531,7 +549,7 @@ def same_failure(left: str, right: str) -> bool:
         return False
     anchors_left, anchors_right = specific_anchors(left), specific_anchors(right)
     if anchors_left and anchors_right and anchors_left == anchors_right:
-        return _numbers(left) == _numbers(right)
+        return result_counts(left) == result_counts(right)
     fuzzy_left, fuzzy_right = _fuzzy(left), _fuzzy(right)
     if fuzzy_left and fuzzy_left == fuzzy_right:
         return True
@@ -582,8 +600,8 @@ def _note(summary, state: dict, item: dict, *, now: str, service) -> str:
     same = _matches_streak(state, text)
     outcome_changed = bool(
         kind in {"attempt", "verify"} and route_same
-        and _numbers(text) and _numbers(str(state.get("last_text") or ""))
-        and _numbers(text) != _numbers(str(state.get("last_text") or ""))
+        and result_counts(text) and result_counts(str(state.get("last_text") or ""))
+        and result_counts(text) != result_counts(str(state.get("last_text") or ""))
     )
     if exit_code == 0 or (kind == "evidence" and not same) or outcome_changed:
         state["consecutive"] = 0
@@ -642,13 +660,7 @@ def _append_log(summary, state: dict, entry: dict) -> None:
     summary.extra["停顿记录"] = "\n".join(lines).strip() + "\n"
 
 
-def _policy_in(root: str) -> int | None:
-    try:
-        path = find_config(Path(root))
-    except OSError:
-        return None
-    if path is None:
-        return None
+def _stall_value(path: Path) -> int | None:
     try:
         import yaml
         loaded = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
@@ -657,16 +669,49 @@ def _policy_in(root: str) -> int | None:
     if not isinstance(loaded, dict) or "stall" not in loaded:
         return None
     stall = loaded.get("stall") or {}
-    if not isinstance(stall, dict):
+    if not isinstance(stall, dict) or "unproductive_attempts" not in stall:
         return None
-    raw = stall.get("unproductive_attempts", DEFAULT_UNPRODUCTIVE)
     try:
-        value = int(raw)
+        value = int(stall.get("unproductive_attempts"))
     except (TypeError, ValueError):
-        return DEFAULT_UNPRODUCTIVE
+        return None
     if value < 1:
         return DEFAULT_UNPRODUCTIVE
     return min(value, MAX_UNPRODUCTIVE)
+
+
+def _policy_in(root: str) -> int | None:
+    """Stall limit for one directory. A user check file wins over the generated file."""
+    try:
+        return _stall_from_configs(find_configs(Path(root)))
+    except OSError:
+        return None
+
+
+def _stall_from_configs(paths: list[Path]) -> int | None:
+    """A user ``tbrain.check.yaml`` stall value wins over ``.tbrain/check.yaml``."""
+    user_value = None
+    managed_value = None
+    seen = set()
+    for path in paths:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        value = _stall_value(path)
+        if value is None:
+            continue
+        if path.name == "tbrain.check.yaml":
+            if user_value is None:
+                user_value = value
+        elif managed_value is None:
+            managed_value = value
+    if user_value is not None:
+        return user_value
+    return managed_value
 
 
 def _sync_project(service, summary, task: str) -> bool:
@@ -1012,11 +1057,30 @@ def _confirmation_source(summary, operation: dict, *, who: str) -> dict:
     return {"id": source, "text": text, "recorded_name": who}
 
 
-def _accepts_default(text: str) -> bool:
+def _positive_assent(text: str, marks: tuple[str, ...]) -> bool:
     raw = str(text or "")
+    if re.search(r"不(同意|接受|按默认|用默认|继续)", raw):
+        return False
     folded = raw.casefold()
-    marks = ("同意", "接受", "按默认", "用默认", "建议默认", "accept")
     return any(mark.casefold() in folded or mark in raw for mark in marks)
+
+
+def _assents_to_question(text: str, question_id: str, default: str) -> bool:
+    """Assent must name this question or its stored default, not any agreement."""
+    if not _accepts_default(text):
+        return False
+    if question_id and question_id.upper() in str(text or "").upper():
+        return True
+    proposal = " ".join(str(default or "").split())
+    return len(proposal) >= 12 and proposal in text
+
+
+def _assents_to_proposal(text: str) -> bool:
+    return _positive_assent(text, ("继续", "同意", "按建议", "就按", "accept"))
+
+
+def _accepts_default(text: str) -> bool:
+    return _positive_assent(text, ("同意", "接受", "按默认", "用默认", "建议默认", "accept"))
 
 
 def _text_has(haystack: str, needle: str) -> bool:

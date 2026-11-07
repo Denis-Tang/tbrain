@@ -47,7 +47,7 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
 11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
 12. 确认目标：{"op":"confirm","question":"Q1","source":"U2","accept_default":true,"why":"同意建议默认","tradeoffs":"先不扩大范围","decided_by":"Kai"}
 13. 记录一次尝试：{"op":"attempt","route":"pytest -q","evidence":"AssertionError test_parse","productive":false}
-14. 暂停后换路：{"op":"continue","route":"改为先补失败用例","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"Kai"}
+14. 暂停后换路：先把下一步写成具体路线，再 {"op":"continue","source":"U2","route":"与下一步相同的路线","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"Kai"}。source 必须指向这次暂停之后、同意该路线的用户原话。
 15. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。
    用短句写明命令、路径、退出码，以及验过什么、没验什么。不要写「应该可以」。结论只能是 PASS、CONDITIONAL PASS、FAIL。
    桌面或 Windows 安装包还要写 windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。

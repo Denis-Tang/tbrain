@@ -102,6 +102,13 @@
 
       <form class="settings-form" id="settings-form">
         <article class="card">
+          <div class="card-heading"><h2>工作模式</h2></div>
+          <div class="switch-row"><div class="switch-text"><h3>任务模式</h3></div><label class="switch"><input type="checkbox" id="task-mode" aria-label="任务模式" aria-describedby="task-mode-help"><span></span></label></div>
+          <p class="page-subtitle" id="task-mode-help">先确认目标和业务规则，再自主推进；关键缺口集中补问，无进展时暂停并保存交接。</p>
+          <p class="page-subtitle">默认关闭。切换后立即保存，仅对新会话生效，已有会话保持原模式。</p>
+        </article>
+
+        <article class="card">
           <div class="card-heading"><h2>知识库</h2></div>
           <label for="vault-path">路径</label>
           <div class="input-row"><input id="vault-path" autocomplete="off" spellcheck="false"><button type="button" class="button secondary" id="choose-vault">选择</button></div>

@@ -14,6 +14,8 @@
 param([string]$OutputDirectory = 'dist')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$originalPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = (Join-Path $projectRoot 'src') + [IO.Path]::PathSeparator + $originalPythonPath
 Push-Location -LiteralPath $projectRoot
 try {
     New-Item -ItemType Directory -Path build -Force | Out-Null
@@ -134,5 +136,6 @@ if __name__ == "__main__":
     Write-Host "Built $packageDirectory (v$version)"
 }
 finally {
+    $env:PYTHONPATH = $originalPythonPath
     Pop-Location
 }

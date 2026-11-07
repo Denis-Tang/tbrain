@@ -31,6 +31,8 @@ class DesktopAPI:
         self._update_result = {"running": False}
         self._update_check_thread = None
         self._update_check_result = {"checking": False}
+        self._project_thread = None
+        self._project_result = {"running": False}
 
     def _call(self, method, *args):
         try:
@@ -131,7 +133,20 @@ class DesktopAPI:
         return self._call(self._service.projects)
 
     def project_save(self, name, paths, parent="", allow_child=False, rename_from=""):
-        return self._call(self._service.configure_project, name, paths, parent, allow_child, rename_from)
+        if self._project_thread is not None and self._project_thread.is_alive():
+            return {"ok": False, "error": "已有项目正在保存，请稍候。"}
+        self._project_result = {"running": True}
+
+        def save():
+            result = self._call(self._service.configure_project, name, paths, parent, allow_child, rename_from)
+            self._project_result = {**result, "running": False}
+
+        self._project_thread = threading.Thread(target=save, name="tbrain-project-save", daemon=True)
+        self._project_thread.start()
+        return {"running": True}
+
+    def project_save_status(self):
+        return dict(self._project_result)
 
     def project_delete(self, name):
         return self._call(self._service.delete_project, name)

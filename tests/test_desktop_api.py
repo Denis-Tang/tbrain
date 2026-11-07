@@ -142,7 +142,11 @@ def test_projects_keep_parent_child_relationship(api):
     child_work = work / "child"
     child_work.mkdir()
     brain.project_save("主项目", [str(work)])
+    brain._project_thread.join(timeout=10)
+    assert brain.project_save_status()["running"] is False
     brain.project_save("子项目", [str(child_work)], parent="主项目")
+    brain._project_thread.join(timeout=10)
+    assert brain.project_save_status()["running"] is False
     projects = {item["name"]: item for item in brain.projects()}
     assert projects["主项目"]["parent"] == ""
     assert projects["子项目"]["parent"] == "主项目"
@@ -158,7 +162,10 @@ def test_global_prompt_roundtrip(api):
 def test_projects_crud_and_prompt(api):
     brain, service, vault, work = api
     saved = brain.project_save("Tbrain", [str(work)], parent="", allow_child=False)
-    assert saved["name"] == "Tbrain"
+    assert saved["running"] is True
+    brain._project_thread.join(timeout=10)
+    saved = brain.project_save_status()
+    assert saved["running"] is False and saved["name"] == "Tbrain"
     projects = brain.projects()
     assert projects and projects[0]["name"] == "Tbrain"
     prompt_saved = brain.project_prompt_save("Tbrain", {

@@ -18,7 +18,7 @@ WRITING_SPEC = """\
 - 时间由程序写入，不要自己写时间；需要先后关系时引用编号，例如“D3 之后”。
 - 指代其他条目用编号（D#、K#、E#、G#），不要复述内容。
 - 证据 E# 只允许三种：文件:行号、命令+输出（≤3 行）、commit 号；没有证据的推断不要写成已排除。
-- 已完成 D# 写成“动作 → 结果 [证据:E#]”；决策 K# 写成“决策 | 理由”；
+- 已完成 D# 写成“动作 → 结果 [证据:E#]”；决策 K# 第一行写成“决策 | 理由”，并另起三行“理由：… / 取舍：… / 决定人：…”；
   未走通的路 X# 写成“尝试 | 原因类别 | 当时条件 | 结论强度”，原因类别只允许
   环境/权限限制、时间不够、证据不足、已证实不可行；结论强度只允许 已排除（必须附证据）或 暂缓。
 - 下一步只能 1 条（≤150 字），写成“动作 + 怎么验证”；目标 ≤200 字。
@@ -31,11 +31,11 @@ WRITING_SPEC = """\
 SAVE_TEMPLATE = """\
 save 操作示例（operations 是对象数组，一次可提交多个操作）：
 1. 完成项：{"op":"append","section":"done","items":[{"text":"给 index.py 增加中文两字切分影子列 [证据:E1]"}]}
-2. 决策：  {"op":"append","section":"decision","items":[{"text":"SQLite 只做索引 | Markdown 是唯一事实源"}]}
+2. 决策：  {"op":"append","section":"decision","items":[{"decision":"SQLite 只做索引","reason":"Markdown 是唯一事实源","rationale":"索引可以删掉重建","tradeoffs":"多维护一个索引文件","decided_by":"用户"}]}
 3. 走不通：{"op":"append","section":"dead_end","items":[{"attempt":"用 trigram 分词","reason_kind":"已证实不可行",
    "conditions":"SQLite 3.45 / FTS5","strength":"已排除","evidence":"E2"}]}
 4. 证据：  {"op":"append","section":"evidence","items":[{"kind":"file","text":"src/tbrain/index.py:88"}]}
-5. 未完成目标：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
+5. 未完成目标（任务模式也用于集中记录关键业务问题及影响范围，继续不依赖答案的工作；用户回答后保存决定及原话来源，再用 set_status 的 complete_goals 关闭相应 G#，不重启任务确认）：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
 6. 目标：  {"op":"replace","section":"target","text":"……（≤200 字）"}
 7. 下一步：{"op":"replace","section":"next_step","text":"跑 pytest -q，确认中文检索用例全绿"}
 8. 状态：  {"op":"set_status","status":"已完成","complete_goals":["G1"],"supersede":["K1","[[旧会话名]]#K2"]}
@@ -44,6 +44,14 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
    "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
+以下11～15项仅供任务模式会话使用；以启动包的“工作模式”为准，普通记忆模式不要求执行。
+11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
+12. 首条用户消息后，先按任务目标、本次范围与业务规则、交付结果、完成标准复述；用 {"op":"understanding","goal":"用户需要的结果","scope":"本次范围及已确认的业务口径","deliverables":"交付结果","done":"可核对的完成标准"} 保存同一份复述，再等用户确认。用户纠正后更新复述；确认后仅用户指出整体理解有误时重做 understanding 并引用 source；新的关键业务缺口按第5项集中补问，不重新确认整个任务。确认目标：{"op":"confirm","question":"Q1","source":"U2","why":"用户确认任务目标理解","tradeoffs":"先不扩大范围","decided_by":"用户"}
+13. 记录一次尝试：{"op":"attempt","route":"pytest -q","evidence":"AssertionError test_parse","productive":false}
+14. 暂停后换路：先把下一步写成具体路线，再 {"op":"continue","source":"U2","route":"与下一步相同的路线","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"用户"}。source 必须指向这次暂停之后、同意该路线的用户原话。
+15. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。
+   用短句写明命令、路径、退出码，以及验过什么、没验什么。不要写「应该可以」。结论只能是 PASS、CONDITIONAL PASS、FAIL。
+   桌面或 Windows 安装包还要写 windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
 """
 
 

@@ -32,13 +32,14 @@ BM25_CANDIDATES = 50
 
 STATUS_PRIORITY = {
     "已中断": 0,
+    "已暂停": 0,
     "进行中": 1,
     "受阻": 2,
     "待验证": 3,
     "已完成": 4,
     "已放弃": 4,
 }
-UNFINISHED_STATUSES = ("已中断", "进行中", "受阻", "待验证")
+UNFINISHED_STATUSES = ("已中断", "已暂停", "进行中", "受阻", "待验证")
 TAU_UNFINISHED_DAYS = 7.0
 TAU_FINISHED_DAYS = 30.0
 HISTORY_DAYS = 90.0

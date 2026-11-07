@@ -95,6 +95,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--execute", action="store_true", help="正式执行迁移（写入新 vault，旧数据只读）")
     migrate.add_argument("--to", default="", help="目标 vault（默认 settings.vault_path）")
     sub("version", "显示版本与安装状态")
+    check = sub("check", "运行项目本地检查")
+    check.add_argument("--path", type=Path, default=None, help="项目目录（默认当前目录）")
+    check.add_argument("--config", type=Path, default=None, help="检查配置文件")
     return parser
 
 
@@ -326,6 +329,12 @@ def _cmd_version(args) -> dict:
             "installed": bool(installer.installed_versions(root))}
 
 
+def _cmd_check(args) -> dict:
+    from .check import run_check
+
+    return run_check(Path(args.path) if args.path else Path.cwd(), config_path=args.config)
+
+
 def run_command(command: str, args) -> dict:
     handlers = {
         "hook": _cmd_hook,
@@ -345,6 +354,7 @@ def run_command(command: str, args) -> dict:
         "migrate": _cmd_migrate,
         "evict": _cmd_evict,
         "version": _cmd_version,
+        "check": _cmd_check,
     }
     return handlers[command](args)
 
@@ -367,7 +377,7 @@ def main(argv=None) -> int:
         result = run_command(command, args)
         compact = command in ("hook", "tool")
         _print(result, indent=None if compact else 2)
-        if command == "bridge" and isinstance(result, dict) and result.get("ok") is False:
+        if command in ("bridge", "check") and isinstance(result, dict) and result.get("ok") is False:
             return 1
         return 0
     except KeyboardInterrupt:

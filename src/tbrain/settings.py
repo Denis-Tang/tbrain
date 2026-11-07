@@ -71,7 +71,7 @@ def validate_timezone(name: str) -> str:
 
 @dataclass
 class Settings:
-    """The six fixed settings keys; an empty string means "not configured"."""
+    """Machine-local settings; an empty string means "not configured"."""
 
     vault_path: str = ""
     timezone: str = ""
@@ -79,13 +79,14 @@ class Settings:
     timeout_hours: float = 6.0
     reminder_context_switch: bool = True
     install_root: str = ""
+    task_mode: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
 KNOWN_KEYS = tuple(field.name for field in fields(Settings))
-_BOOL_KEYS = {"ntp_enabled", "reminder_context_switch"}
+_BOOL_KEYS = {"ntp_enabled", "reminder_context_switch", "task_mode"}
 _EXPAND_KEYS = {"vault_path", "install_root"}
 
 

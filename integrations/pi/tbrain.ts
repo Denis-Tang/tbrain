@@ -284,7 +284,10 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		name: "tbrain_save",
 		label: "Tbrain Save",
 		description:
-			"保存会话总结与进度。operations 为 JSON 数组，元素形如 " +
+			"保存会话总结与进度。以下任务流程仅在启动包显示任务模式已开启时适用；普通记忆模式不要求执行。首条用户消息后，先用 understanding 保存目标、范围及业务规则、交付物、完成标准的复述，等用户确认后再用 confirm。" +
+			'understanding 字段为 goal、scope、deliverables、done；用户指出理解有误后重新复述时用 source 引用原话。' +
+			'confirm 字段为 question="Q1"、source="U2"、why、tradeoffs、decided_by。确认后不重复确认整个任务。新的关键业务缺口先查已有资料，再集中询问问题及影响范围；用 append goal 记录，用户回答后保存决定及来源，再用 set_status 的 complete_goals 关闭相应 G#，不依赖答案的工作继续。' +
+			"operations 为 JSON 数组，元素形如 " +
 			'{"op":"append","section":"decision","items":[{"text":"决定 | 理由"}]}、' +
 			'{"op":"replace","section":"next_step","text":"动作 + 验证"} 或 ' +
 			'{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"}}。' +

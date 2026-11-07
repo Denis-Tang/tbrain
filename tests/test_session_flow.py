@@ -110,6 +110,11 @@ def test_archived_match_has_snippet_and_inactive_decision_is_not_resumed(env):
 def test_explicit_cross_session_supersede_and_rule_sources(env):
     service, _, work = env
     service.configure_project('P1', [str(work)])
+    criteria = service.vault_root() / "项目" / "P1" / "完成标准.md"
+    text = criteria.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", "项目约定可以跨会话作废")
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 被明确取代的决定不再进入交接")
+    criteria.write_text(text, encoding="utf-8")
     prompt(service, 'codex', 'old-rule', work, '保存项目约定')
     service.save('codex:old-rule', [{'op': 'append', 'section': 'decision', 'items': [
         {'text': '保持本地存储 | 用户要求'}, {'text': '采用远程服务 | 理由；建议，待用户确认'}]}])

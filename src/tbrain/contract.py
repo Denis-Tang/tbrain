@@ -15,11 +15,13 @@ _TEMPLATE = """\
 只有地基级别的改动才打断 Kai：数据库迁移、登录和权限、对外协议、安装和升级路径。命名、风格、小重构自己定，不要问。
 不要用“要不要我继续”这种问题停下来。
 做了决定要写下为什么：理由、取舍、决定人。不要只写做了什么。
+目标和完成标准还没写清时，先问具体问题，并给出建议默认。可以只读代码和测试来把问题问清楚。不要把没确认的目标做成已完成或 PASS。仓库和测试能回答的技术问题自己定，不要问。
+同一条失败换个说法再试，不算新进展。连续没有新进展会暂停，并先把热交接写进这次会话。要继续得写明新路线和为什么。Tbrain 在保存、启动包和 hook 上拦住继续做；它停不掉外部 Agent 进程。
 权限：读这个工作区里的代码、日志和测试可以直接做。推送分支、开拉取请求、开预览，要先被允许。生产环境、删除数据、碰密钥，必须 Kai 明确允许。
 收尾要交 A–E 最终验收，结论只能是 PASS、CONDITIONAL PASS 或 FAIL。CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成。验收用短句写清楚：命令、路径、退出码，以及验过什么、没验什么。不要堆术语，也不要写「应该可以」。
 Tbrain 桌面或 Windows 安装包：证据必须包含在真实 Windows 机器上安装并运行该产物。只跑 Linux 的 pytest 不算。没做这次真机验证时，结论不能是 PASS，要写 CONDITIONAL PASS 或 FAIL，并写明这个缺口。
 
-Work contract: stay in this project's worktree only. Meet the goal and done criteria. Self-check with tbrain check and real evidence. Interrupt Kai only for foundation changes (database migrations, auth, external protocols, installer or upgrade paths), not for naming, style, or small refactors. Do not stop on weak questions. Record why: rationale, tradeoffs, and who decided. Final acceptance is A task status, B verification and evidence, C risks, D deliverables (commit, artifact, how to run), E conclusion only PASS, CONDITIONAL PASS, or FAIL. CONDITIONAL PASS means human residual-risk acceptance is still pending. A Tbrain desktop or Windows installable cannot be PASS without a real Windows machine install-and-run; Linux pytest alone is not enough. Write short sentences with the command, path, exit code, and what was or was not verified. Do not write vague claims such as "should be fine".
+Work contract: stay in this project's worktree only. Meet the goal and done criteria. Self-check with tbrain check and real evidence. Interrupt Kai only for foundation changes (database migrations, auth, external protocols, installer or upgrade paths), not for naming, style, or small refactors. Do not stop on weak questions. Record why: rationale, tradeoffs, and who decided. If the goal or done criteria are still unresolved, ask those concrete questions with the recommended default and do not turn them into PASS. A reworded failure is not new progress; a no-progress pause stops further autonomous saves and does not kill an external agent. Final acceptance is A task status, B verification and evidence, C risks, D deliverables (commit, artifact, how to run), E conclusion only PASS, CONDITIONAL PASS, or FAIL. CONDITIONAL PASS means human residual-risk acceptance is still pending. A Tbrain desktop or Windows installable cannot be PASS without a real Windows machine install-and-run; Linux pytest alone is not enough. Write short sentences with the command, path, exit code, and what was or was not verified. Do not write vague claims such as "should be fine".
 """
 
 
@@ -46,7 +48,14 @@ def _render(service, project: str, cwd: str) -> str:
             goal = found_goal
         if found_done:
             done = found_done
-    return _TEMPLATE.format(worktree=_flat(worktree, 300), goal=_flat(goal, 300), done=_flat(done, 400))
+    text = _TEMPLATE.format(worktree=_flat(worktree, 300), goal=_flat(goal, 300), done=_flat(done, 400))
+    try:
+        from .progress import contract_extra
+
+        extra = contract_extra(service, project)
+    except Exception:
+        extra = ""
+    return text + (extra or "")
 
 
 def _section(text: str, heading: str) -> str:

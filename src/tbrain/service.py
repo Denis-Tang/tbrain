@@ -770,7 +770,7 @@ def _installed_version(settings) -> str:
 
 
 def _priority(status) -> int:
-    return {"已中断": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}.get(str(status), 5)
+    return {"已中断": 0, "已暂停": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}.get(str(status), 5)
 
 
 def _display(service, iso_text) -> str:

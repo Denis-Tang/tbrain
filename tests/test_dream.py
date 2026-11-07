@@ -35,8 +35,17 @@ def env(tmp_path, monkeypatch):
                              "ntp_enabled": False, "timeout_hours": 6})
     service.reset_vault()
     service.configure_project("示例", [str(work)])
+    _clear_criteria(vault, "示例")
     monkeypatch.setattr(service, "now", lambda: FIXED)
     return service, vault, work, home
+
+
+def _clear_criteria(vault, project, goal="冷热记忆分开，热交接仍可用", done="冷蒸馏不改热会话"):
+    path = Path(vault) / "项目" / project / "完成标准.md"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", goal)
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", f"- [ ] {done}")
+    path.write_text(text, encoding="utf-8")
 
 
 def _prompt(service, session, work, text):
@@ -140,6 +149,7 @@ def test_fixture_dream_run_reaches_ready_and_budgets_snippet(env):
     other_work = work.parent / "other-work"
     other_work.mkdir()
     service.configure_project("别的", [str(other_work)])
+    _clear_criteria(vault, "别的", "另一个项目自己的目标", "只蒸馏自己的会话")
     _prompt(service, "other", other_work, "另一个项目")
     service.save("codex:other", [{"op": "append", "section": "decision",
                                   "items": [{"text": "其他项目专有词 | 这次不蒸馏"}]}])

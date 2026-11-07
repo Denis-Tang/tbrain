@@ -15,7 +15,12 @@ from pathlib import Path
 import yaml
 
 CONFIG_NAMES = (Path(".tbrain") / "check.yaml", Path("tbrain.check.yaml"))
-DEFAULT_LINTS = ("decision-missing-why",)
+DEFAULT_LINTS = (
+    "decision-missing-why",
+    "handoff-personal-path",
+    "paused-without-handoff",
+    "unresolved-marked-pass",
+)
 STARTER_CONFIG = """\
 version: 1
 # 本地检查：tbrain check 按顺序运行 checks，再跑 lints。
@@ -23,6 +28,12 @@ version: 1
 checks: []
 lints:
   - decision-missing-why
+  - handoff-personal-path
+  - paused-without-handoff
+  - unresolved-marked-pass
+# 连续多少次同一失败后暂停。只数尝试，不算 token、费用或时长。
+stall:
+  unproductive_attempts: 3
 """
 
 # A decision has a why only when all three lines have text after the label.
@@ -170,6 +181,84 @@ def _finding(path: Path, root: Path, line: int, message: str) -> dict:
 
 
 register_lint("decision-missing-why", decision_missing_why)
+
+
+_PERSONAL_PATH = re.compile(
+    r"[A-Za-z]:[\\/]Users[\\/][^\s\"']+|/(?:home|Users)/[^\s\"']+",
+    re.IGNORECASE,
+)
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    collecting = False
+    body: list[str] = []
+    for line in str(text or "").replace("\r\n", "\n").split("\n"):
+        if line.startswith("## "):
+            if collecting:
+                break
+            collecting = line[3:].strip() == heading
+            continue
+        if collecting:
+            body.append(line)
+    return "\n".join(body)
+
+
+def handoff_personal_path(root: Path) -> list[dict]:
+    """Fail when a hot handoff records a personal machine path."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        body = _markdown_section(text, "热交接")
+        if not body or not _PERSONAL_PATH.search(body):
+            continue
+        line_no = next((index for index, line in enumerate(text.splitlines(), 1) if line.startswith("## 热交接")), 1)
+        findings.append(_finding(path, base, line_no, "热交接写进了本机用户目录，应改成工作区约定"))
+    return findings
+
+
+def paused_without_handoff(root: Path) -> list[dict]:
+    """Fail when a paused session has no hot handoff section."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if not re.search(r"(?m)^status:\s*已暂停\s*$", text):
+            continue
+        if "## 热交接" in text:
+            continue
+        line_no = next((index for index, line in enumerate(text.splitlines(), 1) if line.strip() == "status: 已暂停"), 1)
+        findings.append(_finding(path, base, line_no, "已暂停但没有热交接，不能恢复"))
+    return findings
+
+
+def unresolved_marked_pass(root: Path) -> list[dict]:
+    """Fail when an open product question sits in the same note as PASS."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if "状态：未确认" not in text:
+            continue
+        for index, line in enumerate(text.splitlines(), 1):
+            if line.strip() == "PASS":
+                findings.append(_finding(path, base, index, "目标或完成标准还没确认，不能标 PASS"))
+                break
+    return findings
+
+
+register_lint("handoff-personal-path", handoff_personal_path)
+register_lint("paused-without-handoff", paused_without_handoff)
+register_lint("unresolved-marked-pass", unresolved_marked_pass)
 
 
 def _enabled_lints(config: dict | None) -> list[str]:

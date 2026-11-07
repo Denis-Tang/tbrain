@@ -589,6 +589,11 @@ def test_parent_rules_prompt_conflicts_and_source_numbers(env):
     service, _, work = env
     service.configure_project('父项目', [str(work)])
     service.configure_project('子项目', [str(work / 'child')], parent='父项目')
+    criteria = service.vault_root() / "项目" / "父项目" / "完成标准.md"
+    criteria.write_text(criteria.read_text(encoding="utf-8")
+                        .replace("（待填写：这个项目要做成什么样）", "父项目规则可以继承")
+                        .replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 硬规则带来源"),
+                        encoding="utf-8")
     prompt(service, 'codex', 'rules', work, '所有测试用临时目录')
     source = service.index.session('codex:rules')['name']
     result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {

@@ -24,8 +24,9 @@ HANDOFF_PACKAGE_LIMIT = 3500
 
 _STALL_KEYS = {
     "policy", "consecutive", "last_signature", "last_text", "paused", "reason",
-    "paused_at", "log", "cleared_by",
+    "paused_at", "log", "cleared_by", "streak_notes",
 }
+_UNPRODUCTIVE_EFFECTS = {"start", "repeat", "unproductive"}
 _PERSONAL_PATH = re.compile(
     r"[A-Za-z]:[\\/]Users[\\/][^\\/\s]+(?:[\\/][^\s\"']*)?"
     r"|/(?:home|Users)/[^/\s]+(?:/[^\s\"']*)?",
@@ -179,10 +180,13 @@ def apply_confirm(service, summary, operation: dict) -> str:
     why = str(operation.get("why") or operation.get("rationale") or "").strip()
     tradeoffs = str(operation.get("tradeoffs") or operation.get("tradeoff") or "").strip()
     who = str(operation.get("decided_by") or operation.get("who") or "").strip()
+    if operation.get("grant") or operation.get("permission") or operation.get("tier"):
+        raise ValueError("确认目标不附带权限。权限仍按 permission 单独记录，默认只有读代码、日志和测试。")
     if not question_id:
         raise ValueError("confirm 需要 question，例如 Q1")
     if not why or not tradeoffs or not who:
         raise ValueError("确认决定要写理由、取舍、决定人")
+    source = _confirmation_source(summary, operation, who=who)
     if not summary.project:
         questions = _header_questions(summary)
         path = None
@@ -205,12 +209,16 @@ def apply_confirm(service, summary, operation: dict) -> str:
     answer = str(operation.get("decision") or operation.get("answer") or "").strip()
     if accept_default:
         answer = str(found.get("default") or "").strip()
+        if not _accepts_default(source["text"]):
+            raise ValueError("接受建议默认时，用户原话要明确同意，不能由保存操作自行认定")
+    elif not _text_has(source["text"], answer):
+        raise ValueError("用户原话里没有这条决定，不能自行认定已确认")
     if not answer:
         raise ValueError("要给出决定，或 accept_default=true 接受建议默认")
     found = dict(found)
     found.update(status="confirmed", answer=answer, why=why, tradeoffs=tradeoffs, decided_by=who)
     updated = [found if item["id"] == question_id else item for item in questions]
-    item = _decision_item(f"确认{question_id}：{answer}", why, tradeoffs, who)
+    item = _decision_item(f"确认{question_id}：{answer}", why, tradeoffs, who, source=source["id"])
     decision_text = _decision_text(item)
     _check_decision_length(decision_text)
     if path is not None:
@@ -243,8 +251,8 @@ def apply_continue(service, summary, operation: dict, *, now: str) -> str:
         raise ValueError("继续要写理由、取舍、决定人")
     state = ensure_stall(summary, policy_limit(service, summary))
     previous = str(state.get("last_text") or "")
-    if previous and same_failure(route, previous):
-        raise ValueError("新路线和刚停下的失败是同一条，不能当作换路")
+    if _matches_streak(state, route):
+        raise ValueError("新路线仍是没有实质进展的尝试，不能当作换路")
     item = _decision_item(f"换路继续：{route}", why, tradeoffs, who)
     decision_text = _decision_text(item)
     _check_decision_length(decision_text)
@@ -254,6 +262,7 @@ def apply_continue(service, summary, operation: dict, *, now: str) -> str:
     state["consecutive"] = 0
     state["last_signature"] = ""
     state["last_text"] = ""
+    state["streak_notes"] = []
     state["cleared_by"] = {"route": _scrub(route, summary, service), "why": _scrub(why, summary, service),
                            "at": now, "previous_consecutive": cleared}
     _append_log(summary, state, {
@@ -321,8 +330,8 @@ def observe_saved(service, summary, *, now: str, attempts: list[dict] | None = N
     summary.header["stall"] = state
     if tripped:
         reason = (
-            f"连续 {state['consecutive']} 次没有新进展。"
-            f"同一失败：{_clip(str(state.get('last_text') or ''), 120)}"
+            f"连续 {state['consecutive']} 次没有实质进展。"
+            f"最近一次：{_clip(str(state.get('last_text') or ''), 120)}"
         )
         mark_paused(service, summary, reason, now=now)
     return tripped
@@ -341,6 +350,7 @@ def ensure_stall(summary, policy: int) -> dict:
     state.setdefault("reason", "")
     state.setdefault("paused_at", "")
     state.setdefault("log", [])
+    state.setdefault("streak_notes", [])
     if not isinstance(state["log"], list):
         state["log"] = []
     try:
@@ -473,7 +483,9 @@ def render_questions(items: list[dict], *, heading: str) -> str:
 
 def question_lines(items: list[dict]) -> str:
     lines = [
-        "可以只读代码和测试，把问题问清楚。不要动手实现，也不要写成已完成或 PASS。",
+        "探索：可以读代码和测试，并保存证据、走不通的路、尝试。这些是事实，不是已经批准的实现。",
+        "实现：目标或完成标准还没确认时，已完成、项目提示词、已完成状态和验收 PASS 会被拒绝。",
+        "Tbrain 只拦这些保存和 hook。它不能拦住宿主直接改工作区里的文件。",
         "仓库和测试能回答的技术问题自己定，不要问 Kai。",
     ]
     for item in items:
@@ -518,40 +530,61 @@ def specific_anchors(text: str) -> frozenset[str]:
 
 
 def _note(summary, state: dict, item: dict, *, now: str, service) -> str:
+    """Count attempts without substantive progress. A new failure wording still counts.
+
+    Only a successful verification, or evidence that is not a reword of this
+    streak, resets the counter. Claiming ``productive`` does not.
+    """
     text = str(item.get("text") or "")
     kind = str(item.get("kind") or "attempt")
-    previous = str(state.get("last_text") or "")
-    same = bool(previous) and (signature(text) == state.get("last_signature") or same_failure(text, previous))
     exit_code = item.get("exit_code")
-    claimed = bool(item.get("productive"))
-    if exit_code == 0 or kind == "done" or (claimed and not same):
+    note = _scrub(text, summary, service)[:240]
+    if kind == "done":
+        _append_log(summary, state, {
+            "at": now, "effect": "noted", "kind": kind, "signature": signature(text),
+            "note": note, "consecutive": int(state.get("consecutive") or 0),
+        })
+        return "noted"
+    same = _matches_streak(state, text)
+    if exit_code == 0 or (kind == "evidence" and not same):
         state["consecutive"] = 0
         state["last_signature"] = ""
         state["last_text"] = ""
-        effect = "progress"
-    elif kind == "evidence" and not same:
-        state["consecutive"] = 0
-        state["last_signature"] = ""
-        state["last_text"] = ""
-        effect = "new-evidence"
-    elif same:
+        state["streak_notes"] = []
+        effect = "progress" if exit_code == 0 else "new-evidence"
+    else:
         state["consecutive"] = int(state.get("consecutive") or 0) + 1
         state["last_signature"] = signature(text)
-        state["last_text"] = _scrub(text, summary, service)[:240]
-        effect = "repeat"
-    else:
-        state["consecutive"] = 1
-        state["last_signature"] = signature(text)
-        state["last_text"] = _scrub(text, summary, service)[:240]
-        effect = "new-route" if previous else "start"
+        state["last_text"] = note
+        streak = [str(item) for item in (state.get("streak_notes") or []) if str(item).strip()]
+        streak.append(note)
+        state["streak_notes"] = streak[-20:]
+        effect = "repeat" if same else ("start" if state["consecutive"] == 1 else "unproductive")
     _append_log(summary, state, {
         "at": now, "effect": effect, "kind": kind, "signature": signature(text),
-        "note": _scrub(text, summary, service)[:240], "consecutive": int(state["consecutive"]),
+        "note": note, "consecutive": int(state["consecutive"]),
     })
     policy = int(state.get("policy") or DEFAULT_UNPRODUCTIVE)
-    if effect in {"repeat", "start", "new-route"} and int(state["consecutive"]) >= policy:
+    if effect in _UNPRODUCTIVE_EFFECTS and int(state["consecutive"]) >= policy:
         return "pause"
     return effect
+
+
+def _matches_streak(state: dict, text: str) -> bool:
+    if not str(text or "").strip():
+        return False
+    notes = [str(state.get("last_text") or "")]
+    notes.extend(str(item) for item in (state.get("streak_notes") or []))
+    for note in notes:
+        if note and (signature(text) == signature(note) or same_failure(text, note)):
+            return True
+    for entry in state.get("log") or []:
+        if not isinstance(entry, dict) or entry.get("effect") not in _UNPRODUCTIVE_EFFECTS:
+            continue
+        note = str(entry.get("note") or "")
+        if note and (signature(text) == str(entry.get("signature") or "") or same_failure(text, note)):
+            return True
+    return False
 
 
 def _append_log(summary, state: dict, entry: dict) -> None:
@@ -842,14 +875,17 @@ def _read_completion(service, project: str) -> str:
         return ""
 
 
-def _decision_item(decision: str, why: str, tradeoffs: str, who: str) -> dict:
+def _decision_item(decision: str, why: str, tradeoffs: str, who: str, source: str = "") -> dict:
     decision = " ".join(decision.split())
     why_line = " ".join(why.split())
     if len(decision) > 120:
         decision = decision[:119] + "…"
     if len(why_line) > 60:
         why_line = why_line[:59] + "…"
-    return {"decision": decision, "reason": why_line, "rationale": why, "tradeoffs": tradeoffs, "decided_by": who}
+    item = {"decision": decision, "reason": why_line, "rationale": why, "tradeoffs": tradeoffs, "decided_by": who}
+    if source:
+        item["source"] = source
+    return item
 
 
 def _decision_text(item: dict) -> str:
@@ -860,6 +896,8 @@ def _decision_text(item: dict) -> str:
         lines.append(f"取舍：{item['tradeoffs']}")
     if item.get("decided_by"):
         lines.append(f"决定人：{item['decided_by']}")
+    if item.get("source"):
+        lines.append(f"来源：{item['source']}")
     return "\n".join(lines)
 
 
@@ -916,6 +954,36 @@ def _scrub(text: str, summary, service) -> str:
 def _stall(summary) -> dict:
     raw = summary.header.get("stall")
     return raw if isinstance(raw, dict) else {}
+
+
+def _confirmation_source(summary, operation: dict, *, who: str) -> dict:
+    source = str(operation.get("source") or "").strip().upper()
+    match = re.fullmatch(r"U(\d+)", source)
+    if not match:
+        raise ValueError("confirm 需要 source，指向用户原话编号，例如 U2。不能由保存操作自行认定已经确认")
+    number = int(match.group(1))
+    found = next((item for item in summary.sections.get("用户指令", []) if int(item.get("number") or 0) == number), None)
+    if found is None:
+        raise ValueError(f"找不到用户原话 {source}")
+    text = str(found.get("text") or "").strip()
+    if not text or naming.is_low_information(text):
+        raise ValueError("这句用户原话不能当作确认")
+    if who not in text:
+        raise ValueError("决定人必须出现在这句用户原话里，不能由保存操作自行写上")
+    return {"id": source, "text": text}
+
+
+def _accepts_default(text: str) -> bool:
+    raw = str(text or "")
+    folded = raw.casefold()
+    marks = ("同意", "接受", "按默认", "用默认", "建议默认", "accept")
+    return any(mark.casefold() in folded or mark in raw for mark in marks)
+
+
+def _text_has(haystack: str, needle: str) -> bool:
+    left = " ".join(str(haystack or "").split())
+    right = " ".join(str(needle or "").split())
+    return bool(right) and right in left
 
 
 def _flag(value) -> bool:

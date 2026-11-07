@@ -99,7 +99,9 @@ def test_unclear_goals_ask_once_record_why_and_block_pass(tmp_path, monkeypatch)
     assert "这个项目要做成什么样" in package
     assert "怎样才算做完" in package
     assert "建议默认：按已说明的任务做完并可交接：把解析器的错误信息改成中文" in package
-    assert "可以只读代码和测试" in package
+    assert "探索：" in package
+    assert "实现：" in package
+    assert "不能拦住宿主直接改" in package
     assert "不要问 Kai" in package
     stored = criteria.read_text(encoding="utf-8")
     assert "状态：未确认" in stored
@@ -111,6 +113,26 @@ def test_unclear_goals_ask_once_record_why_and_block_pass(tmp_path, monkeypatch)
     other = service.bootstrap("codex:other", "codex", str(folder))["package"]
     assert "把解析器的错误信息改成中文" in other
     assert "改成另一件完全不同的事" not in other.split("建议默认", 1)[1].split("状态：未确认", 1)[0]
+
+    facts = service.save("codex:ask", [
+        {"op": "append", "section": "evidence", "items": [{"kind": "command", "text": "pytest -q\n2 failed"}]},
+        {"op": "append", "section": "dead_end", "items": [{
+            "attempt": "先读测试", "reason_kind": "证据不足", "conditions": "目标未确认", "strength": "暂缓",
+        }]},
+    ])
+    assert facts["ok"] is True
+    implemented = service.save("codex:ask", [
+        {"op": "append", "section": "done", "items": [{"text": "已经改完解析器"}]},
+        {"op": "project_prompt", "sections": {"最终目标": "我自己定的目标"}},
+        {"op": "acceptance", "task": "先交一版", "verification": "还没确认目标",
+         "risks": "目标未确认", "deliverables": "无", "conclusion": "CONDITIONAL PASS"},
+    ])
+    assert implemented["ok"] is False
+    implemented_reasons = " ".join(item["reason"] for item in implemented["rejected"])
+    assert "不能把实现写成已完成" in implemented_reasons
+    assert "项目提示词" in implemented_reasons
+    assert "验收不能代替" in implemented_reasons
+    assert _load(service, "codex:ask")[0].items("已完成") == []
 
     blocked = service.save("codex:ask", [
         {"op": "replace", "section": "target", "text": "我自己写成了目标"},
@@ -126,19 +148,36 @@ def test_unclear_goals_ask_once_record_why_and_block_pass(tmp_path, monkeypatch)
     assert summary.status != "已完成"
     assert "最终验收" not in summary.extra
 
-    first = service.save("codex:ask", [_confirm("Q1", accept_default=True)])
+    missing_source = service.save("codex:ask", [_confirm("Q1", accept_default=True)])
+    assert missing_source["ok"] is False
+    assert any("原话" in item["reason"] for item in missing_source["rejected"])
+    _prompt(service, "ask", folder, "同意 Q1 的建议默认。决定人 Kai")
+    invented = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2", decided_by="模型")])
+    assert invented["ok"] is False
+    assert any("决定人" in item["reason"] for item in invented["rejected"])
+    granted = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2", grant="auth-required")])
+    assert granted["ok"] is False
+    assert any("权限" in item["reason"] for item in granted["rejected"])
+    assert (_load(service, "codex:ask")[0].header.get("permission_grants") or ["auto"]) == ["auto"] or "auth-required" not in (
+        _load(service, "codex:ask")[0].header.get("permission_grants") or [])
+    first = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2")])
     assert first["ok"] is True
     text = _load(service, "codex:ask")[0].items("决策")[0]["text"]
     assert "理由：这是要交给人用的结果" in text
     assert "取舍：先不扩大范围" in text
     assert "决定人：Kai" in text
+    assert "来源：U2" in text
     confirmed = criteria.read_text(encoding="utf-8")
     assert "决定：按已说明的任务做完并可交接：把解析器的错误信息改成中文" in confirmed
     assert "状态：未确认" in confirmed
     assert service.save("codex:ask", [{"op": "set_status", "status": "已完成"}])["ok"] is False
 
+    _prompt(service, "ask", folder, "完成标准定为：本地 tbrain check 退出码为 0，并且错误信息是中文。决定人 Kai")
+    absent = service.save("codex:ask", [_confirm("Q2", decision="改成网页版", source="U3")])
+    assert absent["ok"] is False
+    assert any("原话" in item["reason"] for item in absent["rejected"])
     second = service.save("codex:ask", [_confirm(
-        "Q2", decision="本地 tbrain check 退出码为 0，并且错误信息是中文")])
+        "Q2", decision="本地 tbrain check 退出码为 0，并且错误信息是中文", source="U3")])
     assert second["ok"] is True
     body = criteria.read_text(encoding="utf-8")
     assert "状态：未确认" not in body
@@ -164,6 +203,60 @@ def test_low_information_asks_and_a_clear_task_does_not(tmp_path, monkeypatch):
     package = service.bootstrap("codex:clear", "codex", str(clear))["package"]
     assert "状态：未确认" not in package
     assert service.save("codex:clear", [{"op": "set_status", "status": "已完成"}])["ok"]
+
+
+def test_different_failures_without_new_evidence_still_pause(tmp_path, monkeypatch):
+    service, _, vault = _service(tmp_path, monkeypatch)
+    folder = vault.parent / "alternate"
+    folder.mkdir()
+    _prompt(service, "alt", folder, "连续试三条不同的失败")
+    attempts = [
+        "pytest -q AssertionError test_parse",
+        "ruff F401 src/tbrain/naming.py:4",
+        "仍然是 AssertionError test_parse",
+    ]
+    for text in attempts[:2]:
+        assert service.save("codex:alt", [_attempt(text)])["ok"]
+        assert _load(service, "codex:alt")[0].status != "已暂停"
+    assert service.save("codex:alt", [_attempt(attempts[2])])["ok"]
+    summary, _ = _load(service, "codex:alt")
+    assert summary.status == "已暂停"
+    assert summary.header["stall"]["consecutive"] == 3
+    assert [item["effect"] for item in summary.header["stall"]["log"]] == ["start", "unproductive", "repeat"]
+
+    folder2 = vault.parent / "reset"
+    folder2.mkdir()
+    _prompt(service, "reset", folder2, "新证据才能重新计数")
+    assert service.save("codex:reset", [_attempt(attempts[0])])["ok"]
+    assert service.save("codex:reset", [_attempt(attempts[1])])["ok"]
+    restated = service.save("codex:reset", [{
+        "op": "append", "section": "evidence",
+        "items": [{"kind": "command", "text": "还是 AssertionError test_parse"}],
+    }])
+    assert restated["ok"] is True
+    stalled, _ = _load(service, "codex:reset")
+    assert stalled.status == "已暂停"
+    assert stalled.header["stall"]["consecutive"] == 3
+    assert "new-evidence" not in [item["effect"] for item in stalled.header["stall"]["log"]]
+
+    folder3 = vault.parent / "fresh-evidence"
+    folder3.mkdir()
+    _prompt(service, "fresh", folder3, "换一条有文件证据的失败")
+    assert service.save("codex:fresh", [_attempt(attempts[0])])["ok"]
+    assert service.save("codex:fresh", [_attempt(attempts[1])])["ok"]
+    evidence = service.save("codex:fresh", [{
+        "op": "append", "section": "evidence",
+        "items": [{"kind": "file", "text": "src/tbrain/parser.py:12"}],
+    }])
+    assert evidence["ok"] is True
+    summary, _ = _load(service, "codex:fresh")
+    assert summary.status != "已暂停"
+    assert summary.header["stall"]["consecutive"] == 0
+    assert any(item["effect"] == "new-evidence" for item in summary.header["stall"]["log"])
+    assert service.save("codex:fresh", [_attempt("mypy error src/tbrain/clock.py:9", productive=True)])["ok"]
+    summary, _ = _load(service, "codex:fresh")
+    assert summary.status != "已暂停"
+    assert summary.header["stall"]["consecutive"] == 1
 
 
 def test_reworded_failure_stalls_and_new_evidence_counts(tmp_path, monkeypatch):
@@ -280,7 +373,7 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
         "op": "continue", "route": route, "why": "再试一次", "tradeoffs": "不换路", "decided_by": "Kai",
     }])
     assert same_route["ok"] is False
-    assert "同一条" in same_route["rejected"][0]["reason"]
+    assert "不能当作换路" in same_route["rejected"][0]["reason"]
 
     _prompt(service, "next", folder, "接手暂停的会话")
     resumed = service.resume("codex:next", "codex:work")

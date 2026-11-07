@@ -120,6 +120,11 @@ def test_scenario4_concurrent_sessions_do_not_overwrite(brain):
     vault = brain.vault
     work = brain.workdir("concurrent")
     brain.service.configure_project("Tbrain", [str(work)])
+    criteria = vault / "项目" / "Tbrain" / "完成标准.md"
+    criteria.write_text(criteria.read_text(encoding="utf-8")
+                        .replace("（待填写：这个项目要做成什么样）", "并发保存时不互相覆盖")
+                        .replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 两个会话的完成项都在"),
+                        encoding="utf-8")
     env = dict(os.environ, TBRAIN_HOME=str(home), PYTHONIOENCODING="utf-8")
     processes = [
         subprocess.Popen([sys.executable, "-c", WORKER, str(home), str(vault), str(work), session],

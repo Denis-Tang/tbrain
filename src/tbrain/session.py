@@ -778,6 +778,11 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 items = operation.get("items")
                 if not isinstance(items, list) or not items:
                     raise ValueError("items 必须是非空数组")
+                if section == "已完成" and progress.approval_block(service, summary):
+                    raise ValueError(
+                        "目标或完成标准还没确认，不能把实现写成已完成。"
+                        "探索可以保存证据、走不通的路和尝试。"
+                        "Tbrain 不能拦住宿主直接改文件。")
                 for item in items:
                     item_start = len(rejected)
                     appended = _append_item(service, summary, section, item, rejected, warnings)
@@ -882,6 +887,10 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         part for part in (normalized["route"], normalized["evidence"]) if part)),
                 })
             elif op == "project_prompt":
+                if progress.approval_block(service, summary):
+                    raise ValueError(
+                        "目标或完成标准还没确认，不能改项目提示词把实现当成已经批准。"
+                        "Tbrain 不能拦住宿主直接改文件。")
                 sections = operation.get("sections")
                 if not summary.project:
                     raise ValueError("独立会话没有项目提示词")
@@ -990,10 +999,9 @@ def _save_acceptance(service, summary, operation: dict) -> dict:
     from .acceptance import apply_report, normalize
 
     fields = normalize(operation)
-    if fields.get("conclusion") == "PASS":
-        blocked = progress.approval_block(service, summary)
-        if blocked:
-            raise ValueError(blocked)
+    blocked = progress.approval_block(service, summary)
+    if blocked:
+        raise ValueError(blocked + " 验收不能代替目标确认。")
     apply_report(summary, fields)
     return {"conclusion": fields["conclusion"], "windows_installable": fields["windows_installable"],
             "windows_verified": fields["windows_verified"]}

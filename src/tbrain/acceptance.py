@@ -39,7 +39,7 @@ _LABELS = {
 _FIELD_LIMIT = 2000
 
 
-def normalize(operation: dict) -> dict:
+def normalize(operation: dict, *, host_windows_proof: bool = False) -> dict:
     """Build a report dict from a save operation. Raises ValueError when it cannot be stored."""
     if not isinstance(operation, dict):
         raise ValueError("acceptance 必须是对象")
@@ -54,7 +54,7 @@ def normalize(operation: dict) -> dict:
         "windows_evidence": _clean(operation.get("windows_evidence")),
         "windows_gap": _clean(operation.get("windows_gap")),
     }
-    problems = validate(fields)
+    problems = validate(fields, host_windows_proof=host_windows_proof)
     if problems:
         raise ValueError("；".join(problems))
     return fields
@@ -129,7 +129,20 @@ def parse_report(text: str) -> dict | None:
     }
 
 
-def validate(fields: dict) -> list[str]:
+def host_windows_proof(summary) -> bool:
+    """No installable verifier is available.
+
+    A host event with exit code 0 is not proof that this build was installed and
+    started, even if the record says Windows. ``whoami``, ``echo``, ``pytest``,
+    and an old timestamp do not identify the artifact. A model-supplied platform
+    is not a trusted runner. This returns False until a real verifier exists.
+    Hand-built headers in tests are simulations, not Windows runs.
+    """
+    del summary
+    return False
+
+
+def validate(fields: dict, *, host_windows_proof: bool = False) -> list[str]:
     """Return human-readable problems. Empty means the report may be stored and can pass wrap-up."""
     problems: list[str] = []
     for key, label in _LABELS.items():
@@ -143,12 +156,12 @@ def validate(fields: dict) -> list[str]:
         problems.append("E 结论只能是 PASS、CONDITIONAL PASS 或 FAIL")
     if conclusion == "CONDITIONAL PASS" and not fields.get("residual_pending", True):
         problems.append("CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成")
-    if fields.get("windows_installable") and not _windows_verified(fields):
-        claimed = bool(fields.get("windows_verified")) and not _names_windows_install_run(fields.get("windows_evidence") or "")
-        if claimed:
-            problems.append("Windows 真机证据要写明在 Windows 机器上安装并运行该产物，不能只写 pytest")
+    if fields.get("windows_installable") and not host_windows_proof:
         if conclusion == "PASS":
-            problems.append("桌面或 Windows 安装包没有真机安装并运行的证据，结论不能是 PASS")
+            problems.append(
+                "当前没有能核对安装包的检查器。宿主上的任意成功命令，即使平台写成 Windows，"
+                "也不能当作本版本已安装并启动的证据。模型填写的 windows_verified 不能代替，结论不能是 PASS"
+            )
         if not str(fields.get("windows_gap") or "").strip():
             problems.append("Windows 真机验证未做，必须写明缺口")
     return problems
@@ -161,7 +174,7 @@ def gaps(summary) -> list[str]:
     parsed = parse_report(text)
     if not parsed:
         return ["最终验收不是 A–E 结构。", STYLE_NOTE]
-    problems = validate(parsed)
+    problems = validate(parsed, host_windows_proof=host_windows_proof(summary))
     if problems:
         problems.append(STYLE_NOTE)
     return problems

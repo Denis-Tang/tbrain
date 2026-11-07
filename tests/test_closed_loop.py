@@ -130,10 +130,19 @@ def test_bootstrap_resume_contract_and_decision_reasons(env):
     assert any("决定人：Kai" in item["text"] for item in pack["items"])
 
 
+def _clear_criteria(vault, project):
+    path = vault / "项目" / project / "完成标准.md"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", "已有目标：把这一轮做完并可交接")
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 证据、本地检查和决定理由都齐")
+    path.write_text(text, encoding="utf-8")
+
+
 def test_wrap_up_blocks_missing_gates_and_stop_stays_quiet_while_in_progress(env):
-    service, _, _ = env
-    folder = env[2].parent / "wrap"
+    service, _, vault = env
+    folder = vault.parent / "wrap"
     service.configure_project("收尾项目", [str(folder)])
+    _clear_criteria(vault, "收尾项目")
     _prompt(service, "open", folder, "先做一轮，先不交")
     assert service.save("codex:open", [
         {"op": "append", "section": "decision", "items": [{"text": "先记一笔 | 还没写原因"}]},
@@ -208,6 +217,7 @@ def _pass_report(**overrides):
 
 def _ready_for_acceptance(service, folder, session):
     service.configure_project(session, [str(folder)])
+    _clear_criteria(service.vault_root(), session)
     _prompt(service, session, folder, "准备提交最终验收")
     sid = f"codex:{session}"
     assert service.save(sid, [
@@ -297,18 +307,18 @@ def test_windows_installable_cannot_pass_without_a_real_windows_run(env):
     assert service.save(sid, [named])["ok"]
     assert service.hook("codex", stop) == {}
 
-    verified = _pass_report(
+    prose = _pass_report(
         conclusion="PASS",
         verification="Windows 真机安装并运行过安装包；Linux pytest 只是附加检查",
         windows_installable=True,
         windows_verified=True,
         windows_evidence="在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe",
     )
-    assert service.save(sid, [verified])["ok"]
+    prose_saved = service.save(sid, [prose])
+    assert prose_saved["ok"] is False
+    assert any("宿主" in item["reason"] for item in prose_saved["rejected"])
     _, path = _load(service, sid)
-    text = path.read_text(encoding="utf-8")
-    assert "Windows 真机验证：已做" in text
-    assert "在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe" in text
+    assert "\nPASS\n" not in path.read_text(encoding="utf-8")
     assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "安装包", "cwd": str(folder)}) == {}
 
 

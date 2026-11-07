@@ -354,7 +354,7 @@ class Index:
 
 ```python
 SECTIONS = ["原始命令", "用户指令", "目标", "已完成", "决策", "未走通的路", "证据", "未完成目标", "下一步", "待整理", "待用户确认", "归档"]
-STATUSES = ["进行中", "受阻", "待验证", "已完成", "已放弃", "已中断"]
+STATUSES = ["进行中", "受阻", "待验证", "已完成", "已放弃", "已中断", "已暂停"]
 REASON_KINDS = ["环境/权限限制", "时间不够", "证据不足", "已证实不可行"]
 STRENGTHS = ["已排除", "暂缓"]
 @dataclass
@@ -460,6 +460,9 @@ save 操作（JSON 数组，每项一个 dict）：
 {"op":"append","section":"done|decision|dead_end|evidence|goal","items":[...]}
 {"op":"replace","section":"target|next_step","text":"..."}
 {"op":"set_status","status":"进行中|受阻|待验证|已完成|已放弃","complete_goals":["G1"],"supersede":["K1","[[同项目旧会话名]]#K2"]}
+{"op":"confirm","question":"Q1","accept_default":true,"why":"...","tradeoffs":"...","decided_by":"Kai"}
+{"op":"attempt","route":"...","evidence":"...","productive":false}
+{"op":"continue","route":"...","why":"...","tradeoffs":"...","decided_by":"Kai"}
 {"op":"env","items":[{...公共池卡片字段...}]}
 {"op":"project_prompt","sections":{"最终目标":"...","硬规则":"...","当前阶段":"...","关键路径和命令":"..."}}
 ```

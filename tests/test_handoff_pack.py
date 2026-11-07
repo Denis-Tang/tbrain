@@ -33,6 +33,11 @@ def env(tmp_path, monkeypatch):
     service = TbrainService(home, vault=vault)
     service.settings.update({"vault_path": str(vault), "ntp_enabled": False})
     service.configure_project("甲项目", [str(repo)])
+    criteria = service.vault_root() / "项目" / "甲项目" / "完成标准.md"
+    text = criteria.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", "交接包保持有效决定")
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 完成的会话仍能读到决定")
+    criteria.write_text(text, encoding="utf-8")
     return service, repo, home
 
 

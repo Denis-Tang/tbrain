@@ -15,7 +15,12 @@ from pathlib import Path
 import yaml
 
 CONFIG_NAMES = (Path(".tbrain") / "check.yaml", Path("tbrain.check.yaml"))
-DEFAULT_LINTS = ("decision-missing-why",)
+DEFAULT_LINTS = (
+    "decision-missing-why",
+    "handoff-personal-path",
+    "paused-without-handoff",
+    "unresolved-marked-pass",
+)
 STARTER_CONFIG = """\
 version: 1
 # 本地检查：tbrain check 按顺序运行 checks，再跑 lints。
@@ -23,6 +28,12 @@ version: 1
 checks: []
 lints:
   - decision-missing-why
+  - handoff-personal-path
+  - paused-without-handoff
+  - unresolved-marked-pass
+# 连续多少次同一失败后暂停。只数尝试，不算 token、费用或时长。
+stall:
+  unproductive_attempts: 3
 """
 
 # A decision has a why only when all three lines have text after the label.
@@ -67,35 +78,52 @@ def starter_config_path(folder: Path) -> Path:
 
 
 def write_starter_config(folder: Path) -> Path:
+    """Write a starter only when the project has no check config yet.
+
+    An existing ``tbrain.check.yaml`` is the user's gate. Creating
+    ``.tbrain/check.yaml`` beside it would hide those commands.
+    """
+    folder = Path(folder)
+    user = folder / "tbrain.check.yaml"
+    if user.is_file():
+        return user
     path = starter_config_path(folder)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(STARTER_CONFIG, encoding="utf-8")
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(STARTER_CONFIG, encoding="utf-8")
     return path
 
 
-def find_config(start: Path) -> Path | None:
+def find_configs(start: Path) -> list[Path]:
+    """Every supported check file from ``start`` up to the git root."""
     current = Path(start).expanduser()
     try:
         current = current.resolve()
     except OSError:
-        return None
+        return []
     if current.is_file():
-        return current
+        return [current]
     if not current.is_dir():
-        return None
+        return []
+    found: list[Path] = []
     for _ in range(8):
         for name in CONFIG_NAMES:
             candidate = current / name
             if candidate.is_file():
-                return candidate
+                found.append(candidate)
         if (current / ".git").exists():
             break
         parent = current.parent
         if parent == current:
             break
         current = parent
-    return None
+    return found
+
+
+def find_config(start: Path) -> Path | None:
+    found = find_configs(start)
+    return found[0] if found else None
 
 
 def iter_markdown(root: Path):
@@ -172,6 +200,84 @@ def _finding(path: Path, root: Path, line: int, message: str) -> dict:
 register_lint("decision-missing-why", decision_missing_why)
 
 
+_PERSONAL_PATH = re.compile(
+    r"[A-Za-z]:[\\/]Users[\\/][^\s\"']+|/(?:home|Users)/[^\s\"']+",
+    re.IGNORECASE,
+)
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    collecting = False
+    body: list[str] = []
+    for line in str(text or "").replace("\r\n", "\n").split("\n"):
+        if line.startswith("## "):
+            if collecting:
+                break
+            collecting = line[3:].strip() == heading
+            continue
+        if collecting:
+            body.append(line)
+    return "\n".join(body)
+
+
+def handoff_personal_path(root: Path) -> list[dict]:
+    """Fail when a hot handoff records a personal machine path."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        body = _markdown_section(text, "热交接")
+        if not body or not _PERSONAL_PATH.search(body):
+            continue
+        line_no = next((index for index, line in enumerate(text.splitlines(), 1) if line.startswith("## 热交接")), 1)
+        findings.append(_finding(path, base, line_no, "热交接写进了本机用户目录，应改成工作区约定"))
+    return findings
+
+
+def paused_without_handoff(root: Path) -> list[dict]:
+    """Fail when a paused session has no hot handoff section."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if not re.search(r"(?m)^status:\s*已暂停\s*$", text):
+            continue
+        if "## 热交接" in text:
+            continue
+        line_no = next((index for index, line in enumerate(text.splitlines(), 1) if line.strip() == "status: 已暂停"), 1)
+        findings.append(_finding(path, base, line_no, "已暂停但没有热交接，不能恢复"))
+    return findings
+
+
+def unresolved_marked_pass(root: Path) -> list[dict]:
+    """Fail when an open product question sits in the same note as PASS."""
+    findings = []
+    base = Path(root)
+    for path in iter_markdown(base):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        if "状态：未确认" not in text:
+            continue
+        for index, line in enumerate(text.splitlines(), 1):
+            if line.strip() == "PASS":
+                findings.append(_finding(path, base, index, "目标或完成标准还没确认，不能标 PASS"))
+                break
+    return findings
+
+
+register_lint("handoff-personal-path", handoff_personal_path)
+register_lint("paused-without-handoff", paused_without_handoff)
+register_lint("unresolved-marked-pass", unresolved_marked_pass)
+
+
 def _enabled_lints(config: dict | None) -> list[str]:
     if not config or "lints" not in config:
         return list(DEFAULT_LINTS)
@@ -235,16 +341,28 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
     if not folder.is_dir():
         return {"ok": False, "root": str(folder), "config": "", "checks": [], "lints": [],
                 "error": "项目目录不存在"}
-    chosen = Path(config_path).expanduser() if config_path else find_config(folder)
-    if config_path and chosen and not chosen.is_file():
-        return {"ok": False, "root": str(folder), "config": str(chosen), "checks": [],
-                "lints": [], "error": "找不到检查配置"}
-    config, error = _load_config(chosen if chosen and chosen.is_file() else None)
+    chosen = Path(config_path).expanduser() if config_path else None
+    if config_path:
+        configs = [chosen] if chosen is not None else []
+        if not chosen or not chosen.is_file():
+            return {"ok": False, "root": str(folder), "config": str(chosen or ""), "checks": [],
+                    "lints": [], "error": "找不到检查配置"}
+    else:
+        configs = find_configs(folder)
     checks = []
-    if config and not error:
-        raw_checks = config.get("checks") or []
-        if not isinstance(raw_checks, list):
-            error = "checks 必须是数组"
+    lint_rows = []
+    errors = []
+    lint_ids: list[str] = []
+    if not configs:
+        lint_ids = list(DEFAULT_LINTS)
+    for path in configs:
+        config, error = _load_config(path if path.is_file() else None)
+        if error:
+            errors.append(error)
+            continue
+        raw_checks = (config or {}).get("checks") or []
+        if config is not None and "checks" in config and not isinstance(raw_checks, list):
+            errors.append("checks 必须是数组")
             raw_checks = []
         for index, item in enumerate(raw_checks):
             if not isinstance(item, dict):
@@ -263,9 +381,12 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
                 timeout = 120
             timeout = max(1, min(timeout, 600))
             checks.append(_run_command(folder, name, command, timeout))
-    lint_rows = []
-    if not error:
         for lint_id in _enabled_lints(config):
+            if lint_id not in lint_ids:
+                lint_ids.append(lint_id)
+    error = "；".join(errors)
+    if not error:
+        for lint_id in lint_ids:
             fn = LINTS.get(lint_id)
             if fn is None:
                 lint_rows.append({"id": lint_id, "ok": False, "findings": [
@@ -278,5 +399,5 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
             lint_rows.append({"id": lint_id, "ok": not findings, "findings": findings})
     ok = not error and all(item.get("ok") for item in checks) and all(item.get("ok") for item in lint_rows)
     return {"ok": ok, "root": str(folder),
-            "config": str(chosen) if chosen and chosen.is_file() else "",
+            "config": " | ".join(str(path) for path in configs),
             "checks": checks, "lints": lint_rows, "error": error}

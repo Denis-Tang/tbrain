@@ -91,6 +91,20 @@ def ensure(name: str, folder: Path) -> dict:
         doc_path.parent.mkdir(parents=True, exist_ok=True)
         doc_path.write_text(worktree_doc(name), encoding="utf-8")
     destination = worktree_path(root, name)
+    if not _has_head(root) and _user_files(folder):
+        return {
+            "git_root": str(root),
+            "worktree": str(folder),
+            "worktree_convention": convention_for(root, name),
+            "worktree_branch": branch,
+            "worktree_status": "original",
+            "worktree_error": (
+                "项目文件还没有进入用户自己的提交，执行位置仍是原目录。"
+                "没有自动提交这些文件，隔离还不完整。"
+            ),
+            "check_config": str(config_path),
+            "worktree_limitation": "",
+        }
     payload = {
         "git_root": str(root),
         "worktree": str(destination),
@@ -114,7 +128,8 @@ def ensure(name: str, folder: Path) -> dict:
         return payload
     if _registered(root, destination):
         payload["worktree_status"] = "worktree"
-        return payload
+        payload["worktree_error"] = ""
+        return _prefer_original_when_uncommitted(payload, folder, root)
     if not _clear_reserved(destination, payload):
         return payload
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +140,7 @@ def ensure(name: str, folder: Path) -> dict:
     if added.returncode == 0 and _registered(root, destination):
         payload["worktree_status"] = "worktree"
         payload["worktree_error"] = ""
-        return payload
+        return _prefer_original_when_uncommitted(payload, folder, root)
     _write_marker(destination, name)
     payload["worktree_error"] = (added.stderr or added.stdout or "git worktree add 失败").strip()
     return payload
@@ -173,6 +188,50 @@ def _commit_skeleton(root: Path, files: list[Path]) -> subprocess.CompletedProce
         return _git(root, ["commit", "--allow-empty", "-m", "tbrain: project worktree skeleton"])
     _git(root, ["add", "--", *relative])
     return _git(root, ["commit", "-m", "tbrain: project worktree skeleton"])
+
+
+def _prefer_original_when_uncommitted(payload: dict, folder: Path, root: Path) -> dict:
+    """Dirty or untracked project files stay the execution location.
+
+    A warning on an empty worktree still sends the agent to the stale tree.
+    Do not copy or commit those files.
+    """
+    pending = _uncommitted(root)
+    if not pending:
+        payload.pop("worktree_limitation", None)
+        return payload
+    payload["worktree_status"] = "original"
+    payload["worktree"] = str(folder)
+    payload["worktree_error"] = (
+        "有未提交的改动或未跟踪文件，执行位置仍是原目录。"
+        "没有复制或提交这些文件，隔离还不完整。"
+    )
+    payload["worktree_limitation"] = "未提交的文件没有复制到工作区，仍只在原目录：" + "、".join(pending[:8])
+    return payload
+
+
+def _user_files(folder: Path) -> list[Path]:
+    found = []
+    if not folder.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = [name for name in dirnames if name not in {".git", ".tbrain"}]
+        for name in filenames:
+            found.append(Path(dirpath) / name)
+    return found
+
+
+def _uncommitted(root: Path) -> list[str]:
+    proc = _git(root, ["status", "--porcelain"])
+    if proc.returncode != 0:
+        return []
+    names = []
+    for line in proc.stdout.splitlines():
+        text = line[3:].strip() if len(line) > 3 else ""
+        if not text or text.startswith(".tbrain/"):
+            continue
+        names.append(text.split(" -> ")[-1])
+    return names
 
 
 def _has_head(root: Path) -> bool:

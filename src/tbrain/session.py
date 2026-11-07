@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+import copy
 import json
 import re
 import sys
@@ -19,9 +20,10 @@ from . import handoff, identity, naming, prompt as prompt_mod
 from .contract import render_contract
 from .hooks import HookEvent, HookResult
 from .policy import TIERS, classify
+from . import progress
 
 HOST_BUDGETS = {"claude-code": 9000, "codex": 8000, "dsh": 12000, "pi": 12000, "unknown": 8000}
-STATUS_PRIORITY = {"已中断": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}
+STATUS_PRIORITY = {"已中断": 0, "已暂停": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}
 
 
 # ---------------------------------------------------------------------------
@@ -377,18 +379,19 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     rows = _resume_rows(service, summary, related_query)
     blocks.append(("", _resume_block(service, rows, summary.project)))
     recent = _recent_users_block(summary, max_chars=HOST_BUDGETS.get(host, 8000) // 4) if resume else ""
-    progress = ''
+    saved_progress = ''
     if resume:
-        progress = '\n'.join(['## 本会话已保存进度', '原始命令：' + _clip(summary.raw_command, 1000),
-                              '目标：' + summary.target, '下一步：' + summary.next_step] +
-                             [item['id'] + ' ' + item['text'] for item in summary.items('已完成')[-5:]])
-        progress = _clip(progress, HOST_BUDGETS.get(host, 8000) // 4)
+        saved_progress = '\n'.join(['## 本会话已保存进度', '原始命令：' + _clip(summary.raw_command, 1000),
+                                    '目标：' + summary.target, '下一步：' + summary.next_step] +
+                                   [item['id'] + ' ' + item['text'] for item in summary.items('已完成')[-5:]])
+        saved_progress = _clip(saved_progress, HOST_BUDGETS.get(host, 8000) // 4)
     pending = service.store.pending_confirmations(summary.project)
     decisions = _handoff_block(service, summary.project)
     contract = render_contract(service, summary.project, cwd=str(summary.header.get("cwd") or ""))
-    footer = "\n\n".join(part for part in (contract, decisions, progress, recent, _clip(pending, 1500),
+    lead = progress.lead_block(service, summary)
+    footer = "\n\n".join(part for part in (contract, decisions, saved_progress, recent, _clip(pending, 1500),
                                            _time_block(service), _identity_block(service, summary)) if part)
-    budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(footer) - 80
+    budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"]) - len(footer) - len(lead) - 80
     parts: list[str] = []
     used = 0
     trimmed = False
@@ -409,7 +412,8 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
     package = "\n\n".join(parts)
     if trimmed:
         package += "\n\n（启动包已裁剪；请用 search 定位原文，或用 resume 按会话名读取，重复 bootstrap 不会展开。）"
-    return _append_dream(service, host, package + "\n\n" + footer)
+    body = "\n\n".join(part for part in (lead, package, footer) if part)
+    return _append_dream(service, host, body)
 
 
 def _append_dream(service, host: str, package: str) -> str:
@@ -470,6 +474,7 @@ def _wrap_up_hook(service, summary, path, host: str) -> HookResult:
         text = "收尾未通过：没有会话记录，不能核对证据、本地检查、决定理由和权限。"
         return HookResult(decision="block", reason=text,
                           additional_context=text if host == "pi" else "")
+    progress.sync(service, summary)
     found = gaps(summary)
     summary.header["last_activity_at"] = _utc_iso(service.now().utc)
     if path is not None:
@@ -502,14 +507,19 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                 return HookResult(additional_context='工具结果缺少 command 或整数 exit_code，未记录验证结果。')
             summary.header["last_verify"] = {"command": str(result["command"]),
                                               "exit_code": result["exit_code"],
-                                              "at": _utc_iso(service.now().utc), "source": "tool"}
+                                              "at": _utc_iso(service.now().utc), "source": "tool",
+                                              "platform": platform.system()}
+            progress.observe_saved(service, summary, attempts=[], dead_ends=[], evidence=[], done=[],
+                                   verify=result, now=summary.header["last_verify"]["at"])
             write_session(service, summary, path)
+            if progress.is_paused(summary):
+                return HookResult(additional_context=progress.pause_instruction(summary))
         return HookResult()
 
     if event.kind == "session-end":
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is not None:
-            if summary.status in ("进行中", "受阻", "待验证"):
+            if summary.status in ("进行中", "受阻", "待验证") and not progress.is_paused(summary):
                 summary.header["status"] = "已中断"
             summary.header["last_activity_at"] = _utc_iso(service.now().utc)
             write_session(service, summary, path)
@@ -525,6 +535,12 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is None:
             return HookResult()
+        if progress.is_paused(summary):
+            # Block on Stop asks the host to take another autonomous turn. A pause
+            # must end the turn instead, and keep refusing completion on save.
+            summary.header["last_activity_at"] = _utc_iso(service.now().utc)
+            write_session(service, summary, path)
+            return HookResult(additional_context=progress.pause_instruction(summary))
         if _needs_save(summary):
             return _stop_reminder(service, summary, path, host)
         if summary.status == "已完成" or event.extra.get("wrap_up"):
@@ -589,6 +605,7 @@ def handle_hook(service, event: HookEvent) -> HookResult:
             return HookResult()
         summary, path = existing
         _mark_active(service, summary, path)
+        progress.sync(service, summary)
         related = " ".join([summary.raw_command] + handoff.last_users(summary, 3)).strip()
         package = assemble_startup(service, summary, host, resume=True, related_query=related)
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
@@ -602,6 +619,8 @@ def handle_hook(service, event: HookEvent) -> HookResult:
             summary, path, created = resolve_session(service, host, event.host_session_id, event.cwd,
                                                      first_message=first_message,
                                                      host_record=event.extra.get("host_record", ""))
+            progress.sync(service, summary, task=first_message)
+            write_session(service, summary, path)
             package = assemble_startup(service, summary, host, related_query=first_message)
             if warning:
                 package = warning + "\n\n" + package
@@ -622,12 +641,17 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                 name = naming.session_name(first_message, summary.project,
                                           _history_names(service, summary.project), date, sequence)
                 path = rename_session(service, summary, path, name)
+            progress.sync(service, summary, task=first_message)
             write_session(service, summary, path)
             package = assemble_startup(service, summary, host, related_query=first_message)
             if warning:
                 package = warning + "\n\n" + package
             return HookResult(additional_context=package)
+        progress.sync(service, summary, task=first_message)
         record_user(service, summary, path, first_message)
+        notice = progress.turn_notice(service, summary)
+        if notice:
+            return HookResult(additional_context=notice)
         return HookResult()
 
     return HookResult()
@@ -728,7 +752,10 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     protected = summary.header.get("user_owned_fields", [])
     written: dict = {"users": [], "done": [], "decisions": [], "dead_ends": [], "evidence": [],
                      "goals": [], "target": "", "next_step": "", "status": "", "env": [],
-                     "project_prompt": {}, "permissions": [], "acceptance": {}}
+                     "project_prompt": {}, "permissions": [], "acceptance": {},
+                     "attempts": [], "confirms": [], "continues": []}
+    progress.sync(service, summary)
+    observed: list[dict] = []
     rejected: list[dict] = []
     warnings: list[str] = []
 
@@ -742,6 +769,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             continue
         op = str(operation.get("op") or "")
         try:
+            if progress.is_paused(summary) and op not in {"confirm", "continue", "append", "replace"}:
+                raise ValueError("已暂停。可以保存证据和理由；解除暂停需要用户原话里的新路线。")
             if op == "append":
                 section_key = str(operation.get("section") or "").strip()
                 section = SECTION_ALIASES.get(section_key)
@@ -750,6 +779,13 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 items = operation.get("items")
                 if not isinstance(items, list) or not items:
                     raise ValueError("items 必须是非空数组")
+                if progress.is_paused(summary) and section not in {"证据", "决策", "未走通的路"}:
+                    raise ValueError("已暂停。可以保存证据、走不通的路和决定理由，不能把实现写成已完成。")
+                if section == "已完成" and progress.approval_block(service, summary):
+                    raise ValueError(
+                        "目标或完成标准还没确认，不能把实现写成已完成。"
+                        "探索可以保存证据、走不通的路和尝试。"
+                        "Tbrain 不能拦住宿主直接改文件。")
                 for item in items:
                     item_start = len(rejected)
                     appended = _append_item(service, summary, section, item, rejected, warnings)
@@ -759,9 +795,20 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         written_key = {"已完成": "done", "决策": "decisions", "未走通的路": "dead_ends",
                                        "证据": "evidence", "未完成目标": "goals"}[section]
                         written[written_key].append(appended)
+                        if section == "未走通的路":
+                            observed.append({"kind": "dead_end", "productive": False,
+                                             "text": str(item.get("attempt") or item.get("text") or "")})
+                        elif section == "证据":
+                            observed.append({"kind": "evidence", "productive": False,
+                                             "text": str(item.get("text") or "")})
+                        elif section == "已完成":
+                            observed.append({"kind": "done", "productive": True,
+                                             "text": str(item.get("text") or "")})
             elif op == "replace":
                 section = str(operation.get("section") or "")
                 text = str(operation.get("text") or "").strip()
+                if progress.is_paused(summary) and section != "next_step":
+                    raise ValueError("已暂停。可以记下下一步提议，不能改写目标。")
                 if section in protected:
                     summary.conflicts.append(
                         f"- 用户手改过本会话总结，{section} 的模型更新未覆盖（{_utc_iso(service.now().utc)}），待用户确认")
@@ -770,6 +817,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                                      "example": "请手动合并；确认恢复模型维护后，移除文件头 user_owned_fields 中的对应字段"})
                     continue
                 if section == "target":
+                    if progress.approval_block(service, summary):
+                        raise ValueError("目标还没确认。用 confirm 写下决定、理由、取舍和决定人，或先接受建议默认。")
                     if len(text) > handoff.TARGET_MAX_CHARS:
                         raise ValueError(f"目标不超过 {handoff.TARGET_MAX_CHARS} 字")
                     summary.target = text
@@ -781,14 +830,22 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         raise ValueError(f"下一步不超过 {handoff.NEXT_MAX_CHARS} 字")
                     summary.next_step = text
                     written["next_step"] = text
+                    if progress.is_paused(summary):
+                        stall = summary.header.setdefault("stall", {})
+                        if isinstance(stall, dict):
+                            stall["proposed_route"] = text
                 else:
                     raise ValueError("replace.section 只允许 target / next_step")
             elif op == "set_status":
                 status = str(operation.get("status") or "")
                 if status not in handoff.STATUSES:
                     raise ValueError("status 只允许：" + " / ".join(handoff.STATUSES))
-                if status == "已中断":
-                    raise ValueError("已中断只由程序写入")
+                if status in {"已中断", "已暂停"}:
+                    raise ValueError(f"{status}只由程序写入")
+                if progress.is_paused(summary):
+                    raise ValueError("已暂停。要继续先 continue，不能直接改状态。")
+                if status == "已完成" and progress.approval_block(service, summary):
+                    raise ValueError(progress.approval_block(service, summary))
                 goal_ids = operation.get('complete_goals') or []
                 if not isinstance(goal_ids, list) or any(not isinstance(value, str) for value in goal_ids):
                     raise ValueError('complete_goals 必须是目标编号数组')
@@ -823,8 +880,26 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 recorded = _record_permission(summary, operation)
                 written["permissions"].append(recorded)
             elif op == "acceptance":
-                written["acceptance"] = _save_acceptance(summary, operation)
+                written["acceptance"] = _save_acceptance(service, summary, operation)
+            elif op == "confirm":
+                written["confirms"].append(progress.apply_confirm(service, summary, operation))
+            elif op == "continue":
+                written["continues"].append(progress.apply_continue(
+                    service, summary, operation, now=_utc_iso(service.now().utc)))
+            elif op == "attempt":
+                normalized = progress.normalize_attempt(operation)
+                written["attempts"].append(normalized)
+                observed.append({
+                    "kind": "attempt",
+                    "productive": normalized["productive"],
+                    "text": " ".join(dict.fromkeys(
+                        part for part in (normalized["route"], normalized["evidence"]) if part)),
+                })
             elif op == "project_prompt":
+                if progress.approval_block(service, summary):
+                    raise ValueError(
+                        "目标或完成标准还没确认，不能改项目提示词把实现当成已经批准。"
+                        "Tbrain 不能拦住宿主直接改文件。")
                 sections = operation.get("sections")
                 if not summary.project:
                     raise ValueError("独立会话没有项目提示词")
@@ -833,7 +908,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
             else:
-                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission/acceptance")
+                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission/acceptance/confirm/continue/attempt")
         except ValueError as exc:
             rejected.append({"op": op, "reason": str(exc),
                              "example": _op_example(op)})
@@ -845,6 +920,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     summary.header["updated_at"] = now_iso
     summary.header["last_activity_at"] = now_iso
     summary.header["git"] = service.git_info(str(summary.header.get("cwd") or ""))
+    applied_verify = None
     if last_test is not None:
         if not isinstance(last_test, dict) or not isinstance(last_test.get("command"), str) or type(last_test.get("exit_code")) is not int:
             rejected.append({"op": "last_test", "operation": {"last_test": last_test},
@@ -856,6 +932,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
         else:
             summary.header["last_verify"] = {"command": last_test["command"], "exit_code": last_test["exit_code"],
                                               "at": now_iso, "source": "model"}
+            applied_verify = last_test
+    progress.observe_saved(service, summary, ordered=observed, verify=applied_verify, now=now_iso)
     if not rejected:
         summary.header["saved_users"] = len(summary.users)
         summary.header["saved_verify_at"] = summary.header.get("last_verify", {}).get("at")
@@ -885,6 +963,9 @@ def _op_example(op: str) -> str:
         "env": '{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv","state":"生效"}]}',
         "project_prompt": '{"op":"project_prompt","sections":{"最终目标":"...","硬规则":"- ...（来源：U1）"}}',
         "permission": '{"op":"permission","action":"push branch"}',
+        "confirm": '{"op":"confirm","question":"Q1","accept_default":true,"why":"同意建议默认","tradeoffs":"先不扩大范围","decided_by":"Kai"}',
+        "continue": '{"op":"continue","route":"改为先补失败用例再改解析","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"Kai"}',
+        "attempt": '{"op":"attempt","route":"pytest -q","evidence":"AssertionError test_parse","productive":false}',
         "acceptance": ('{"op":"acceptance","task":"本地检查已接上，这一轮可以提交",'
                        '"verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装",'
                        '"risks":"没有还要人接受的风险",'
@@ -923,10 +1004,13 @@ def _supersede_decisions(service, summary, references):
     return changed
 
 
-def _save_acceptance(summary, operation: dict) -> dict:
-    from .acceptance import apply_report, normalize
+def _save_acceptance(service, summary, operation: dict) -> dict:
+    from .acceptance import apply_report, host_windows_proof, normalize
 
-    fields = normalize(operation)
+    fields = normalize(operation, host_windows_proof=host_windows_proof(summary))
+    blocked = progress.approval_block(service, summary)
+    if blocked:
+        raise ValueError(blocked + " 验收不能代替目标确认。")
     apply_report(summary, fields)
     return {"conclusion": fields["conclusion"], "windows_installable": fields["windows_installable"],
             "windows_verified": fields["windows_verified"]}
@@ -1270,9 +1354,11 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
         current.target, current.next_step = old.target, old.next_step
         current.archive = list(old.archive)
         current.extra = dict(old.extra)
-        for key in ("last_verify", "git", "dead_end_conditions"):
+        for key in ("last_verify", "git", "dead_end_conditions", "stall", "goal_questions"):
             if key in old.header:
-                current.header[key] = old.header[key]
+                current.header[key] = copy.deepcopy(old.header[key])
+        if progress.is_paused(old):
+            current.header["status"] = "已暂停"
         current.header.update(branched_from=f"[[{old.name}]]", branch_revision=version.stem,
                               branch_user_count=len(old.users))
     users = old.users[-3:]
@@ -1297,10 +1383,21 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
     if pointer:
         lines += [pointer, ""]
     handoff_text = "\n".join(lines)
+    progress.sync(service, old)
+    progress.sync(service, current, task=current.raw_command)
+    if progress.is_paused(old):
+        current.header["status"] = "已暂停"
+        current.header["stall"] = copy.deepcopy(old.header.get("stall") or {})
+        if old.extra.get(progress.HANDOFF_SECTION):
+            current.extra[progress.HANDOFF_SECTION] = old.extra[progress.HANDOFF_SECTION]
+    elif not current.project:
+        inherited = [item for item in (old.header.get("goal_questions") or []) if isinstance(item, dict) and item.get("status") == "open"]
+        if inherited and not current.header.get("goal_questions"):
+            current.header["goal_questions"] = inherited
+    lead = progress.lead_block(service, old if progress.is_paused(old) or progress.open_questions(service, old) else current)
     contract = render_contract(service, current.project or old.project,
                                cwd=str(current.header.get("cwd") or old.header.get("cwd") or ""))
-    if contract:
-        handoff_text = contract + "\n\n" + handoff_text
+    handoff_text = "\n\n".join(part for part in (lead, contract, handoff_text) if part)
     # 当前会话写“接续自”
     if current.name != old.name:
         current.header["resumed_from"] = f"[[{old.name}]]"
@@ -1333,7 +1430,8 @@ def bootstrap(service, session_id: str, agent: str, cwd: str, host_record: str =
             if service.store.project(project):
                 summary.header["project"] = project
                 summary.header["project_link"] = f"[[{project}]]"
-                write_session(service, summary, path)
+    progress.sync(service, summary)
+    write_session(service, summary, path)
     service.refresh_index()
     package = assemble_startup(service, summary, host,
                               resume=bool(summary.users), related_query=summary.raw_command)

@@ -110,6 +110,11 @@ def test_archived_match_has_snippet_and_inactive_decision_is_not_resumed(env):
 def test_explicit_cross_session_supersede_and_rule_sources(env):
     service, _, work = env
     service.configure_project('P1', [str(work)])
+    criteria = service.vault_root() / "项目" / "P1" / "完成标准.md"
+    text = criteria.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", "项目约定可以跨会话作废")
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 被明确取代的决定不再进入交接")
+    criteria.write_text(text, encoding="utf-8")
     prompt(service, 'codex', 'old-rule', work, '保存项目约定')
     service.save('codex:old-rule', [{'op': 'append', 'section': 'decision', 'items': [
         {'text': '保持本地存储 | 用户要求'}, {'text': '采用远程服务 | 理由；建议，待用户确认'}]}])
@@ -584,6 +589,11 @@ def test_parent_rules_prompt_conflicts_and_source_numbers(env):
     service, _, work = env
     service.configure_project('父项目', [str(work)])
     service.configure_project('子项目', [str(work / 'child')], parent='父项目')
+    criteria = service.vault_root() / "项目" / "父项目" / "完成标准.md"
+    criteria.write_text(criteria.read_text(encoding="utf-8")
+                        .replace("（待填写：这个项目要做成什么样）", "父项目规则可以继承")
+                        .replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 硬规则带来源"),
+                        encoding="utf-8")
     prompt(service, 'codex', 'rules', work, '所有测试用临时目录')
     source = service.index.session('codex:rules')['name']
     result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {

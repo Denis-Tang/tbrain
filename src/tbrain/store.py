@@ -630,6 +630,7 @@ class Store:
             "worktree_branch": str(data.get("worktree_branch") or ""),
             "worktree_status": str(data.get("worktree_status") or ""),
             "worktree_error": str(data.get("worktree_error") or ""),
+            "worktree_limitation": str(data.get("worktree_limitation") or ""),
             "check_config": str(data.get("check_config") or ""),
             "completion_criteria": str(data.get("completion_criteria") or ""),
             "completion_fields": [str(item) for item in fields if str(item).strip()],
@@ -698,6 +699,11 @@ class Store:
             data["worktree_error"] = error
         else:
             data.pop("worktree_error", None)
+        limitation = str((setup or {}).get("worktree_limitation") or "").strip()
+        if limitation:
+            data["worktree_limitation"] = limitation
+        else:
+            data.pop("worktree_limitation", None)
         data["completion_criteria"] = COMPLETION_FILE
         data["completion_fields"] = list(COMPLETION_FIELDS)
         self.write_text(card, render_note(data, body))
@@ -824,7 +830,10 @@ class Store:
         best_name = ""
         best_length = -1
         for project in self.projects():
-            for path in project.get("paths") or []:
+            candidates = list(project.get("paths") or [])
+            if project.get("worktree_status") == "worktree" and project.get("worktree"):
+                candidates.append(project["worktree"])
+            for path in candidates:
                 candidate = _path_key(path)
                 if not candidate:
                     continue

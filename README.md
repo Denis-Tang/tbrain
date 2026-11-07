@@ -2,7 +2,7 @@
 
 > 给编程 Agent 用的本地记忆工具。把要求、决定和进度存成 Markdown，换会话或换 Agent 时接着做。
 
-[**下载 0.7.1**](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.1) · [**使用文档**](#usage--使用指南) · [**实验与结果**](#experiments--长任务评测) · [**问题反馈**](https://github.com/Denis-Tang/tbrain/issues)
+[**下载 0.7.2**](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.2) · [**使用文档**](#usage--使用指南) · [**实验与结果**](#experiments--长任务评测) · [**问题反馈**](https://github.com/Denis-Tang/tbrain/issues)
 
 ## Overview | 产品介绍
 
@@ -18,7 +18,7 @@ Tbrain 面向在 Windows 上使用 Claude Code、Codex、DeepSeek Harness（DSH�
 
 ## Preview | 产品预览
 
-此候选版基于 **0.7.1**，版本为 **0.7.2-dev.1**，增加可选任务模式，不包含 Dream 冷蒸馏。
+此版本基于 **0.7.1**，正式版本为 **0.7.2**，增加可选任务模式，不包含 Dream 冷蒸馏。
 
 在「设置 → 工作模式」切换「任务模式」。默认关闭，切换后立即保存，只影响新建会话；已有会话及升级前的旧会话保持原模式。开关不批量改动已有项目，总观页不变。
 
@@ -148,7 +148,7 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 
 ### 安装与配置
 
-1. 下载 [0.7.1 发布页](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.1) 中的 `tbrain-0.7.1-windows-x64.zip` 并解压。
+1. 下载 [0.7.2 发布页](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.2) 中的 `tbrain-0.7.2-windows-x64.zip` 并解压。
 2. 双击解压目录里的 `tbrain.exe`，选择知识库文件夹，勾选要接入的 Agent，点击“开始使用”。
 3. 按完成页提示重开 Agent。Codex 还需在 `/hooks` 中审核并信任 Tbrain Hook；Pi 新开会话或执行 `/reload`；DSH 完整退出后重开。
 4. 在“项目配置”添加项目及代码目录，让会话匹配到对应项目。
@@ -164,7 +164,7 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 已有安装可点击桌面左下角版本号检查更新，或用固定入口从本地 ZIP 升级：
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Tbrain\bin\tbrain.cmd" upgrade --from .\tbrain-0.7.1-windows-x64.zip
+& "$env:LOCALAPPDATA\Programs\Tbrain\bin\tbrain.cmd" upgrade --from .\tbrain-0.7.2-windows-x64.zip
 ```
 
 升级后重开 Agent，核对 `version` 输出中的 `installed_version`。升级与回退细节见 [升级文档](docs/UPGRADE.md)。
@@ -259,16 +259,17 @@ python -m venv .venv
 .venv\Scripts\python.exe -m tbrain desktop
 ```
 
-构建 0.7.1 分发包：
+构建 0.7.2 分发包：
 
 ```powershell
-pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/0.7.1
+pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/0.7.2
 ```
 
-版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.1 的本地全量回归为 **301 项通过**，覆盖更新下载、取消续传、后台检查与旧快捷方式修正等行为。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
+版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.2 的本地全量回归为 **336 项通过**，覆盖模式开关、任务理解确认、业务缺口补问、暂停接续，以及既有记忆与安装更新行为。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
 
 ## Roadmap | 开发计划
 
+- **0.7.2 已包含：** 默认关闭的可选任务模式，设置即时保存，仅新会话生效；首轮任务理解确认、关键业务缺口集中补问、停滞暂停与交接，以及后台项目保存。
 - **0.7.1 已包含**后台更新检查与版本提示、下载进度和断点续传、取消下载、安装后重启、旧快捷方式复用，以及补全配置和方法的实验说明。
 - **0.7.0 已包含：** 记忆保存与检索、跨会话接续、有效决定筛选、历史版本、项目多目录、Codex/DSH 新建项目联动、Pi 异步扩展及快照兼容修复。
 - **后续优先核验：** DSH 会话归属与原话采集、旧决定和阶段授权退役、项目侧栏实际刷新行为。

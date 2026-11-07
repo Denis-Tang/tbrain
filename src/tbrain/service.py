@@ -531,12 +531,6 @@ class TbrainService:
         result = self.store.save_project(name, paths_list, parent=parent,
                                            allow_child=allow_child, rename_from=rename_from)
         setup = prepare(result.get("name") or name, list(result.get("paths") or []))
-        worktree = self.store._normalize_path(str(setup.get("worktree") or ""))
-        paths = list(result.get("paths") or [])
-        if worktree and Path(worktree).exists() and worktree not in paths:
-            result = self.store.save_project(result["name"], paths + [worktree],
-                                              parent=str(result.get("parent") or ""),
-                                              allow_child=bool(result.get("allow_child")))
         recorded = self.store.record_execution(result["name"], setup)
         self.refresh_index()
         if is_new:

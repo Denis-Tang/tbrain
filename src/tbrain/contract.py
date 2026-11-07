@@ -36,11 +36,17 @@ def _render(service, project: str, cwd: str) -> str:
     worktree = cwd or "还没有绑定代码目录"
     goal = "还没有写下目标。"
     done = "还没有写下完成标准。"
+    note = ""
     if service is not None and project:
         card = service.store.project(project) or {}
         recorded = str(card.get("worktree") or "").strip()
         paths = card.get("paths") or []
-        worktree = recorded or (str(paths[0]) if paths else worktree)
+        status = str(card.get("worktree_status") or "")
+        if status == "worktree" and recorded:
+            worktree = recorded
+        elif paths:
+            worktree = str(paths[0])
+        note = str(card.get("worktree_error") or card.get("worktree_limitation") or "").strip()
         text = service.store.read_text(service.store.project_dir(project) / COMPLETION_FILE)
         found_goal = _section(text, "目标")
         found_done = _section(text, "完成标准")
@@ -49,6 +55,8 @@ def _render(service, project: str, cwd: str) -> str:
         if found_done:
             done = found_done
     text = _TEMPLATE.format(worktree=_flat(worktree, 300), goal=_flat(goal, 300), done=_flat(done, 400))
+    if note:
+        text += "\n" + note + "\n"
     try:
         from .progress import contract_extra
 

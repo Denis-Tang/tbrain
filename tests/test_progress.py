@@ -151,10 +151,10 @@ def test_unclear_goals_ask_once_record_why_and_block_pass(tmp_path, monkeypatch)
     missing_source = service.save("codex:ask", [_confirm("Q1", accept_default=True)])
     assert missing_source["ok"] is False
     assert any("原话" in item["reason"] for item in missing_source["rejected"])
-    _prompt(service, "ask", folder, "同意 Q1 的建议默认。决定人 Kai")
-    invented = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2", decided_by="模型")])
+    _prompt(service, "ask", folder, "同意 Q1 的建议默认")
+    invented = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U1")])
     assert invented["ok"] is False
-    assert any("决定人" in item["reason"] for item in invented["rejected"])
+    assert any("明确同意" in item["reason"] for item in invented["rejected"])
     granted = service.save("codex:ask", [_confirm("Q1", accept_default=True, source="U2", grant="auth-required")])
     assert granted["ok"] is False
     assert any("权限" in item["reason"] for item in granted["rejected"])
@@ -369,8 +369,22 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
 
     blocked = service.save("codex:work", [_attempt(route)])
     assert blocked["ok"] is False
+    noted = service.save("codex:work", [
+        {"op": "append", "section": "evidence", "items": [{"kind": "command", "text": "pytest -q\n1 failed"}]},
+        {"op": "replace", "section": "next_step", "text": "先把失败次数记下来"},
+    ])
+    assert noted["ok"] is True
+    assert _load(service, "codex:work")[0].status == "已暂停"
+    no_source = service.save("codex:work", [{
+        "op": "continue", "route": "改为先补表格驱动测试再改解析",
+        "why": "再试一次", "tradeoffs": "不换路", "decided_by": "Kai",
+    }])
+    assert no_source["ok"] is False
+    assert any("source" in item["reason"] for item in no_source["rejected"])
+    _prompt(service, "work", folder, route)
     same_route = service.save("codex:work", [{
-        "op": "continue", "route": route, "why": "再试一次", "tradeoffs": "不换路", "decided_by": "Kai",
+        "op": "continue", "route": route, "why": "再试一次", "tradeoffs": "不换路",
+        "decided_by": "Kai", "source": "U2",
     }])
     assert same_route["ok"] is False
     assert "不能当作换路" in same_route["rejected"][0]["reason"]
@@ -388,9 +402,11 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
     assert again.startswith("已暂停")
     assert "不能把那个进程杀掉" in again
 
+    _prompt(service, "work", folder, "改为先补表格驱动测试再改解析")
     continued = service.save("codex:work", [{
         "op": "continue", "route": "改为先补表格驱动测试再改解析",
-        "why": "同一条 pytest 失败已经重复", "tradeoffs": "先不重写解析器", "decided_by": "Kai",
+        "why": "同一条 pytest 失败已经重复", "tradeoffs": "先不重写解析器",
+        "decided_by": "Kai", "source": "U3",
     }])
     assert continued["ok"] is True
     restored, _ = _load(service, "codex:work")

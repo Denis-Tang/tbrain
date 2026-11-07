@@ -24,7 +24,7 @@ HANDOFF_PACKAGE_LIMIT = 3500
 
 _STALL_KEYS = {
     "policy", "consecutive", "last_signature", "last_text", "paused", "reason",
-    "paused_at", "log", "cleared_by", "streak_notes",
+    "paused_at", "log", "cleared_by", "streak_notes", "last_outcome",
 }
 _UNPRODUCTIVE_EFFECTS = {"start", "repeat", "unproductive"}
 _PERSONAL_PATH = re.compile(
@@ -131,10 +131,11 @@ def pause_instruction(summary) -> str:
     reason = str(_stall(summary).get("reason") or "连续没有新进展")
     return (
         f"已暂停：{reason}\n"
-        "不要再自主实现，也不要把同一条失败换个说法再试。\n"
-        "Tbrain 会拒绝已完成和 PASS，并让收尾失败。Stop 不会再要求模型继续这一轮。\n"
-        "Tbrain 不拥有外部 Agent 进程，不能把那个进程杀掉。\n"
-        "要继续，调用 save 的 continue，写明新路线、理由、取舍和决定人。"
+        "可以继续保存证据、走不通的路、决定理由和下一步提议。这些不是继续实现。\n"
+        "要解除暂停，用户原话里要写出新路线，并用 continue 的 source 指向那句原话。\n"
+        "只填写决定人的名字不能解除暂停。Tbrain 不核验这个名字。\n"
+        "Tbrain 会拒绝已完成和 PASS。Stop 不会再要求模型继续这一轮。\n"
+        "Tbrain 不拥有外部 Agent 进程，不能把那个进程杀掉。"
     )
 
 
@@ -249,11 +250,14 @@ def apply_continue(service, summary, operation: dict, *, now: str) -> str:
         raise ValueError("continue 需要新路线 route")
     if not why or not tradeoffs or not who:
         raise ValueError("继续要写理由、取舍、决定人")
+    source = _confirmation_source(summary, operation, who=who)
+    if not _text_has(source["text"], route):
+        raise ValueError("新路线必须出现在 source 指向的用户原话里，不能只凭决定人名字继续")
     state = ensure_stall(summary, policy_limit(service, summary))
     previous = str(state.get("last_text") or "")
     if _matches_streak(state, route):
         raise ValueError("新路线仍是没有实质进展的尝试，不能当作换路")
-    item = _decision_item(f"换路继续：{route}", why, tradeoffs, who)
+    item = _decision_item(f"换路继续：{route}", why, tradeoffs, who, source=source["id"])
     decision_text = _decision_text(item)
     _check_decision_length(decision_text)
     cleared = int(state.get("consecutive") or 0)
@@ -317,24 +321,24 @@ def observe_saved(service, summary, *, now: str, attempts: list[dict] | None = N
         return False
     state = ensure_stall(summary, policy_limit(service, summary))
     seen: set[str] = set()
-    tripped = False
+    end_paused = False
     for item in items:
-        sig = signature(item["text"])
+        sig = signature(item["text"]) + "|" + str(item.get("exit_code") if item.get("exit_code") is not None else "")
         if sig in seen:
             continue
         seen.add(sig)
         effect = _note(summary, state, item, now=now, service=service)
-        if effect == "pause":
-            tripped = True
-            break
+        end_paused = effect == "pause"
+        if effect in {"progress", "new-evidence", "outcome"}:
+            end_paused = False
     summary.header["stall"] = state
-    if tripped:
+    if end_paused:
         reason = (
             f"连续 {state['consecutive']} 次没有实质进展。"
             f"最近一次：{_clip(str(state.get('last_text') or ''), 120)}"
         )
         mark_paused(service, summary, reason, now=now)
-    return tripped
+    return end_paused
 
 
 def ensure_stall(summary, policy: int) -> dict:
@@ -346,6 +350,7 @@ def ensure_stall(summary, policy: int) -> dict:
     state.setdefault("consecutive", 0)
     state.setdefault("last_signature", "")
     state.setdefault("last_text", "")
+    state.setdefault("last_outcome", "")
     state.setdefault("paused", False)
     state.setdefault("reason", "")
     state.setdefault("paused_at", "")
@@ -495,12 +500,38 @@ def question_lines(items: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _numbers(text: str) -> str:
+    return ",".join(re.findall(r"\d+", str(text or "")))
+
+
+def outcome_key(text: str, explicit: str = "") -> str:
+    """Identity of an execution result. Counts stay; surrounding words do not.
+
+    ``10 failed`` and ``10 tests failed`` are the same outcome. ``10 failed``
+    and ``5 failed`` are not. An explicit outcome string wins over the text.
+    """
+    given = " ".join(str(explicit or "").casefold().split())
+    if given:
+        return "explicit:" + given
+    raw = str(text or "")
+    numbers = re.findall(r"\d+", raw)
+    folded = raw.casefold()
+    labels = []
+    if re.search(r"failed|failure|失败", folded):
+        labels.append("fail")
+    if re.search(r"passed|通过", folded) and "fail" not in labels:
+        labels.append("pass")
+    if not numbers and not labels:
+        return ""
+    return ",".join(labels) + ":" + ",".join(numbers)
+
+
 def same_failure(left: str, right: str) -> bool:
     if not str(left or "").strip() or not str(right or "").strip():
         return False
     anchors_left, anchors_right = specific_anchors(left), specific_anchors(right)
     if anchors_left and anchors_right and anchors_left == anchors_right:
-        return True
+        return _numbers(left) == _numbers(right)
     fuzzy_left, fuzzy_right = _fuzzy(left), _fuzzy(right)
     if fuzzy_left and fuzzy_left == fuzzy_right:
         return True
@@ -514,9 +545,9 @@ def same_failure(left: str, right: str) -> bool:
 
 def signature(text: str) -> str:
     anchors = specific_anchors(text)
-    if anchors:
-        return "anchor:" + "|".join(sorted(anchors))
-    return "text:" + _fuzzy(text)[:180]
+    base = "anchor:" + "|".join(sorted(anchors)) if anchors else "text:" + _fuzzy(text)[:180]
+    outcome = outcome_key(text)
+    return base + ("|" + outcome if outcome else "")
 
 
 def specific_anchors(text: str) -> frozenset[str]:
@@ -539,6 +570,9 @@ def _note(summary, state: dict, item: dict, *, now: str, service) -> str:
     kind = str(item.get("kind") or "attempt")
     exit_code = item.get("exit_code")
     note = _scrub(text, summary, service)[:240]
+    cur_outcome = outcome_key(text, str(item.get("outcome_key") or ""))
+    prev_outcome = str(state.get("last_outcome") or "")
+    route_same = bool(specific_anchors(text)) and specific_anchors(text) == specific_anchors(str(state.get("last_text") or ""))
     if kind == "done":
         _append_log(summary, state, {
             "at": now, "effect": "noted", "kind": kind, "signature": signature(text),
@@ -546,16 +580,23 @@ def _note(summary, state: dict, item: dict, *, now: str, service) -> str:
         })
         return "noted"
     same = _matches_streak(state, text)
-    if exit_code == 0 or (kind == "evidence" and not same):
+    outcome_changed = bool(
+        kind in {"attempt", "verify"} and route_same
+        and _numbers(text) and _numbers(str(state.get("last_text") or ""))
+        and _numbers(text) != _numbers(str(state.get("last_text") or ""))
+    )
+    if exit_code == 0 or (kind == "evidence" and not same) or outcome_changed:
         state["consecutive"] = 0
-        state["last_signature"] = ""
-        state["last_text"] = ""
+        state["last_signature"] = signature(text)
+        state["last_text"] = note
+        state["last_outcome"] = cur_outcome
         state["streak_notes"] = []
-        effect = "progress" if exit_code == 0 else "new-evidence"
+        effect = "progress" if exit_code == 0 else ("outcome" if outcome_changed else "new-evidence")
     else:
         state["consecutive"] = int(state.get("consecutive") or 0) + 1
         state["last_signature"] = signature(text)
         state["last_text"] = note
+        state["last_outcome"] = cur_outcome or prev_outcome
         streak = [str(item) for item in (state.get("streak_notes") or []) if str(item).strip()]
         streak.append(note)
         state["streak_notes"] = streak[-20:]
@@ -960,7 +1001,7 @@ def _confirmation_source(summary, operation: dict, *, who: str) -> dict:
     source = str(operation.get("source") or "").strip().upper()
     match = re.fullmatch(r"U(\d+)", source)
     if not match:
-        raise ValueError("confirm 需要 source，指向用户原话编号，例如 U2。不能由保存操作自行认定已经确认")
+        raise ValueError("需要 source，指向用户原话编号，例如 U2。不能由保存操作自行认定")
     number = int(match.group(1))
     found = next((item for item in summary.sections.get("用户指令", []) if int(item.get("number") or 0) == number), None)
     if found is None:
@@ -968,9 +1009,7 @@ def _confirmation_source(summary, operation: dict, *, who: str) -> dict:
     text = str(found.get("text") or "").strip()
     if not text or naming.is_low_information(text):
         raise ValueError("这句用户原话不能当作确认")
-    if who not in text:
-        raise ValueError("决定人必须出现在这句用户原话里，不能由保存操作自行写上")
-    return {"id": source, "text": text}
+    return {"id": source, "text": text, "recorded_name": who}
 
 
 def _accepts_default(text: str) -> bool:

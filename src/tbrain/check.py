@@ -78,35 +78,52 @@ def starter_config_path(folder: Path) -> Path:
 
 
 def write_starter_config(folder: Path) -> Path:
+    """Write a starter only when the project has no check config yet.
+
+    An existing ``tbrain.check.yaml`` is the user's gate. Creating
+    ``.tbrain/check.yaml`` beside it would hide those commands.
+    """
+    folder = Path(folder)
+    user = folder / "tbrain.check.yaml"
+    if user.is_file():
+        return user
     path = starter_config_path(folder)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(STARTER_CONFIG, encoding="utf-8")
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(STARTER_CONFIG, encoding="utf-8")
     return path
 
 
-def find_config(start: Path) -> Path | None:
+def find_configs(start: Path) -> list[Path]:
+    """Every supported check file from ``start`` up to the git root."""
     current = Path(start).expanduser()
     try:
         current = current.resolve()
     except OSError:
-        return None
+        return []
     if current.is_file():
-        return current
+        return [current]
     if not current.is_dir():
-        return None
+        return []
+    found: list[Path] = []
     for _ in range(8):
         for name in CONFIG_NAMES:
             candidate = current / name
             if candidate.is_file():
-                return candidate
+                found.append(candidate)
         if (current / ".git").exists():
             break
         parent = current.parent
         if parent == current:
             break
         current = parent
-    return None
+    return found
+
+
+def find_config(start: Path) -> Path | None:
+    found = find_configs(start)
+    return found[0] if found else None
 
 
 def iter_markdown(root: Path):
@@ -324,16 +341,28 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
     if not folder.is_dir():
         return {"ok": False, "root": str(folder), "config": "", "checks": [], "lints": [],
                 "error": "项目目录不存在"}
-    chosen = Path(config_path).expanduser() if config_path else find_config(folder)
-    if config_path and chosen and not chosen.is_file():
-        return {"ok": False, "root": str(folder), "config": str(chosen), "checks": [],
-                "lints": [], "error": "找不到检查配置"}
-    config, error = _load_config(chosen if chosen and chosen.is_file() else None)
+    chosen = Path(config_path).expanduser() if config_path else None
+    if config_path:
+        configs = [chosen] if chosen is not None else []
+        if not chosen or not chosen.is_file():
+            return {"ok": False, "root": str(folder), "config": str(chosen or ""), "checks": [],
+                    "lints": [], "error": "找不到检查配置"}
+    else:
+        configs = find_configs(folder)
     checks = []
-    if config and not error:
-        raw_checks = config.get("checks") or []
-        if not isinstance(raw_checks, list):
-            error = "checks 必须是数组"
+    lint_rows = []
+    errors = []
+    lint_ids: list[str] = []
+    if not configs:
+        lint_ids = list(DEFAULT_LINTS)
+    for path in configs:
+        config, error = _load_config(path if path.is_file() else None)
+        if error:
+            errors.append(error)
+            continue
+        raw_checks = (config or {}).get("checks") or []
+        if config is not None and "checks" in config and not isinstance(raw_checks, list):
+            errors.append("checks 必须是数组")
             raw_checks = []
         for index, item in enumerate(raw_checks):
             if not isinstance(item, dict):
@@ -352,9 +381,12 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
                 timeout = 120
             timeout = max(1, min(timeout, 600))
             checks.append(_run_command(folder, name, command, timeout))
-    lint_rows = []
-    if not error:
         for lint_id in _enabled_lints(config):
+            if lint_id not in lint_ids:
+                lint_ids.append(lint_id)
+    error = "；".join(errors)
+    if not error:
+        for lint_id in lint_ids:
             fn = LINTS.get(lint_id)
             if fn is None:
                 lint_rows.append({"id": lint_id, "ok": False, "findings": [
@@ -367,5 +399,5 @@ def run_check(root: Path, *, config_path: Path | None = None) -> dict:
             lint_rows.append({"id": lint_id, "ok": not findings, "findings": findings})
     ok = not error and all(item.get("ok") for item in checks) and all(item.get("ok") for item in lint_rows)
     return {"ok": ok, "root": str(folder),
-            "config": str(chosen) if chosen and chosen.is_file() else "",
+            "config": " | ".join(str(path) for path in configs),
             "checks": checks, "lints": lint_rows, "error": error}

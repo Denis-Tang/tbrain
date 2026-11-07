@@ -39,7 +39,7 @@ _LABELS = {
 _FIELD_LIMIT = 2000
 
 
-def normalize(operation: dict) -> dict:
+def normalize(operation: dict, *, host_windows_proof: bool = False) -> dict:
     """Build a report dict from a save operation. Raises ValueError when it cannot be stored."""
     if not isinstance(operation, dict):
         raise ValueError("acceptance 必须是对象")
@@ -54,7 +54,7 @@ def normalize(operation: dict) -> dict:
         "windows_evidence": _clean(operation.get("windows_evidence")),
         "windows_gap": _clean(operation.get("windows_gap")),
     }
-    problems = validate(fields)
+    problems = validate(fields, host_windows_proof=host_windows_proof)
     if problems:
         raise ValueError("；".join(problems))
     return fields
@@ -129,7 +129,25 @@ def parse_report(text: str) -> dict | None:
     }
 
 
-def validate(fields: dict) -> list[str]:
+def host_windows_proof(summary) -> bool:
+    """True only for a host-collected command that this process recorded on Windows.
+
+    The model cannot set ``platform``. Tbrain writes it when a tool result arrives.
+    A sentence or a ``windows_verified`` flag is not this record. This function does
+    not contact a Windows machine and does not prove a human saw the window.
+    """
+    verify = getattr(summary, "header", {}).get("last_verify") if summary is not None else None
+    if not isinstance(verify, dict):
+        return False
+    return (
+        verify.get("source") == "tool"
+        and verify.get("platform") == "Windows"
+        and verify.get("exit_code") == 0
+        and bool(str(verify.get("command") or "").strip())
+    )
+
+
+def validate(fields: dict, *, host_windows_proof: bool = False) -> list[str]:
     """Return human-readable problems. Empty means the report may be stored and can pass wrap-up."""
     problems: list[str] = []
     for key, label in _LABELS.items():
@@ -143,12 +161,12 @@ def validate(fields: dict) -> list[str]:
         problems.append("E 结论只能是 PASS、CONDITIONAL PASS 或 FAIL")
     if conclusion == "CONDITIONAL PASS" and not fields.get("residual_pending", True):
         problems.append("CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成")
-    if fields.get("windows_installable") and not _windows_verified(fields):
-        claimed = bool(fields.get("windows_verified")) and not _names_windows_install_run(fields.get("windows_evidence") or "")
-        if claimed:
-            problems.append("Windows 真机证据要写明在 Windows 机器上安装并运行该产物，不能只写 pytest")
+    if fields.get("windows_installable") and not host_windows_proof:
         if conclusion == "PASS":
-            problems.append("桌面或 Windows 安装包没有真机安装并运行的证据，结论不能是 PASS")
+            problems.append(
+                "桌面或 Windows 安装包的 PASS 需要宿主在 Windows 上采集的执行记录"
+                "（平台、命令、退出码 0）。模型填写的 windows_verified 不能代替，结论不能是 PASS"
+            )
         if not str(fields.get("windows_gap") or "").strip():
             problems.append("Windows 真机验证未做，必须写明缺口")
     return problems
@@ -161,7 +179,7 @@ def gaps(summary) -> list[str]:
     parsed = parse_report(text)
     if not parsed:
         return ["最终验收不是 A–E 结构。", STYLE_NOTE]
-    problems = validate(parsed)
+    problems = validate(parsed, host_windows_proof=host_windows_proof(summary))
     if problems:
         problems.append(STYLE_NOTE)
     return problems

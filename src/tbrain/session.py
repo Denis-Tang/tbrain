@@ -507,7 +507,8 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                 return HookResult(additional_context='工具结果缺少 command 或整数 exit_code，未记录验证结果。')
             summary.header["last_verify"] = {"command": str(result["command"]),
                                               "exit_code": result["exit_code"],
-                                              "at": _utc_iso(service.now().utc), "source": "tool"}
+                                              "at": _utc_iso(service.now().utc), "source": "tool",
+                                              "platform": platform.system()}
             progress.observe_saved(service, summary, attempts=[], dead_ends=[], evidence=[], done=[],
                                    verify=result, now=summary.header["last_verify"]["at"])
             write_session(service, summary, path)
@@ -768,8 +769,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             continue
         op = str(operation.get("op") or "")
         try:
-            if progress.is_paused(summary) and op not in {"confirm", "continue"}:
-                raise ValueError("已暂停，不再继续自主改动。要继续先提交 continue，写明新路线、理由、取舍和决定人。")
+            if progress.is_paused(summary) and op not in {"confirm", "continue", "append", "replace"}:
+                raise ValueError("已暂停。可以保存证据和理由；解除暂停需要用户原话里的新路线。")
             if op == "append":
                 section_key = str(operation.get("section") or "").strip()
                 section = SECTION_ALIASES.get(section_key)
@@ -778,6 +779,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 items = operation.get("items")
                 if not isinstance(items, list) or not items:
                     raise ValueError("items 必须是非空数组")
+                if progress.is_paused(summary) and section not in {"证据", "决策", "未走通的路"}:
+                    raise ValueError("已暂停。可以保存证据、走不通的路和决定理由，不能把实现写成已完成。")
                 if section == "已完成" and progress.approval_block(service, summary):
                     raise ValueError(
                         "目标或完成标准还没确认，不能把实现写成已完成。"
@@ -804,6 +807,8 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             elif op == "replace":
                 section = str(operation.get("section") or "")
                 text = str(operation.get("text") or "").strip()
+                if progress.is_paused(summary) and section != "next_step":
+                    raise ValueError("已暂停。可以记下下一步提议，不能改写目标。")
                 if section in protected:
                     summary.conflicts.append(
                         f"- 用户手改过本会话总结，{section} 的模型更新未覆盖（{_utc_iso(service.now().utc)}），待用户确认")
@@ -996,9 +1001,9 @@ def _supersede_decisions(service, summary, references):
 
 
 def _save_acceptance(service, summary, operation: dict) -> dict:
-    from .acceptance import apply_report, normalize
+    from .acceptance import apply_report, host_windows_proof, normalize
 
-    fields = normalize(operation)
+    fields = normalize(operation, host_windows_proof=host_windows_proof(summary))
     blocked = progress.approval_block(service, summary)
     if blocked:
         raise ValueError(blocked + " 验收不能代替目标确认。")

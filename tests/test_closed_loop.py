@@ -307,18 +307,18 @@ def test_windows_installable_cannot_pass_without_a_real_windows_run(env):
     assert service.save(sid, [named])["ok"]
     assert service.hook("codex", stop) == {}
 
-    verified = _pass_report(
+    prose = _pass_report(
         conclusion="PASS",
         verification="Windows 真机安装并运行过安装包；Linux pytest 只是附加检查",
         windows_installable=True,
         windows_verified=True,
         windows_evidence="在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe",
     )
-    assert service.save(sid, [verified])["ok"]
+    prose_saved = service.save(sid, [prose])
+    assert prose_saved["ok"] is False
+    assert any("宿主" in item["reason"] for item in prose_saved["rejected"])
     _, path = _load(service, sid)
-    text = path.read_text(encoding="utf-8")
-    assert "Windows 真机验证：已做" in text
-    assert "在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe" in text
+    assert "\nPASS\n" not in path.read_text(encoding="utf-8")
     assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "安装包", "cwd": str(folder)}) == {}
 
 

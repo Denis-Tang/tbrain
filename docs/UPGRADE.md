@@ -38,7 +38,7 @@
 1. 把新版本解压到 `versions\<新版本>`；
 2. 原子改写 `current.txt`（并尽力更新 `current` junction）。
 
-因此 **Claude Code / Codex / DSH 的 hook 与 MCP 配置、pi 的扩展文件都不需要重新写**，新会话（或 DSH 的 MCP 热重连、pi 的 `/reload`）即使用新版本。
+因此 **Claude Code / Codex / DSH 的 hook 与 MCP 配置不需要重新写**，新会话或 DSH 的 MCP 热重连即使用新版程序。Pi 扩展通过固定入口调用新版程序；若扩展本身有更新，需重新运行 `tbrain connect pi` 复制新版扩展，再新开会话或执行 `/reload`。**0.7.3 的自动确认弹窗需要这一步。**
 
 桌面、开始菜单、任务栏固定的 Tbrain 快捷方式都指向 `<安装目录>\current\...`（junction），所以同一个图标在升级或回退后自动启动新版本。早期版本创建的、仍指向 `versions\<版本>\...` 的快捷方式，会在下次切版本时自动改写到 `current`（原快捷方式保留一份 `.bak`）；快捷方式里没有参数时，窗口宿主也会读 `current.txt` 启动当前版本。
 

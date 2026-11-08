@@ -36,7 +36,7 @@ def _prompt(service, session, cwd, text, host="codex"):
     assert service.save(f"{host}:{session}", [{"op": "understanding", "goal": text,
         "scope": "本次任务", "deliverables": "任务结果", "done": "可用证据核对"}])["ok"]
     service.hook(host, {"hook_event_name": "UserPromptSubmit", "session_id": session,
-                      "cwd": str(cwd), "prompt": "确认你的任务理解"})
+                      "cwd": str(cwd), "prompt": "确认"})
     assert service.save(f"{host}:{session}", [{"op": "confirm", "question": "Q1", "source": "U2",
         "why": "用户确认目标", "tradeoffs": "只做本次范围", "decided_by": "用户"}])["ok"]
 

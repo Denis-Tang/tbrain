@@ -142,6 +142,59 @@ console.log(JSON.stringify({stop_reminders: steered.length, precompact: injected
 
 
 @pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
+def test_pi_confirmation_dialog_through_real_cli(brain, tmp_path):
+    brain.settings.update({"task_mode": True})
+    entry = tmp_path / 'pi entry.cmd'
+    entry.write_text(f'@echo off\n"{sys.executable}" -m tbrain %*\n', encoding='utf-8')
+    driver = tmp_path / 'pi-confirm-driver.mjs'
+    driver.write_text(r'''
+import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
+const [source, entry, home, cwd] = process.argv.slice(2);
+process.env.TBRAIN_ENTRY = entry;
+process.env.TBRAIN_HOME = home;
+let code = stripTypeScriptTypes(readFileSync(source, 'utf8'));
+code = code.replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => () => ({}) });');
+const { default: extension } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
+const handlers = {}, tools = {};
+extension({ on: (name, fn) => handlers[name] = fn, registerTool: tool => tools[tool.name] = tool });
+const ctx = { cwd, hasUI: false, sessionManager: { getSessionId: () => 'dialog', getSessionFile: () => '' } };
+await handlers.input({ text: '把错误提示改成中文' }, ctx);
+let answer, dialogs = 0;
+ctx.ui = { select: async (title, options) => {
+  dialogs++;
+  if (!title.includes('任务目标：把错误提示改成中文') || !title.includes('完成标准：提示使用中文')) throw Error(title);
+  if (options.join(',') !== '继续补充,确认') throw Error('wrong confirmation options');
+  return answer;
+} };
+const operations = [{ op: 'understanding', goal: '把错误提示改成中文', scope: '全部错误提示',
+  deliverables: '修改后的代码', done: '提示使用中文' }];
+let saved = await tools.tbrain_save.execute('no-ui', { operations }, null, null, ctx);
+if (!saved.details.ok || dialogs || saved.details.written.confirms.length) throw Error('headless session confirmed');
+if (!saved.content.some(item => item.text.includes('单独回复“确认”'))) throw Error('headless session did not wait');
+ctx.hasUI = true;
+for (answer of [undefined, '继续补充', '确认']) {
+  saved = await tools.tbrain_save.execute('dialog', { operations }, null, null, ctx);
+  if (!saved.details.ok) throw Error(JSON.stringify(saved));
+  const expected = answer === '确认' ? ['Q1'] : [];
+  if (JSON.stringify(saved.details.written.confirms) !== JSON.stringify(expected)) throw Error('wrong confirmation result');
+  if (answer !== '确认' && !saved.content.some(item => item.text.includes('停止执行'))) throw Error('missing wait instruction');
+}
+await tools.tbrain_save.execute('ordinary', { operations: [{ op: 'replace', section: 'next_step', text: '执行确认的任务' }] }, null, null, ctx);
+if (dialogs !== 3) throw Error('unexpected dialog count: ' + dialogs);
+console.log('OK: headless waited; dismissal waited; supplement waited; explicit confirmation accepted');
+''', encoding='utf-8')
+    source = Path(__file__).resolve().parents[1] / 'integrations/pi/tbrain.ts'
+    result = subprocess.run([shutil.which('node'), str(driver), str(source), str(entry), str(brain.home), str(tmp_path)],
+                            capture_output=True, text=True, encoding='utf-8', timeout=40)
+    assert result.returncode == 0, result.stderr
+    summary, _ = flow.load_session(brain, 'pi:dialog')
+    assert len(summary.users) == 1
+    assert summary.header['goal_questions'][0]['status'] == 'confirmed'
+    assert '确认来源：弹窗' in summary.extra['任务理解']
+
+
+@pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
 def test_pi_extension_tools_through_real_cli(brain, tmp_path):
     entry = tmp_path / 'pi entry.cmd'
     entry.write_text(f'@echo off\n"{sys.executable}" -m tbrain %*\n', encoding='utf-8')

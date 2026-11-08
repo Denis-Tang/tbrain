@@ -58,7 +58,7 @@ def test_toggle_affects_new_sessions_and_keeps_running_sessions_fixed(tmp_path, 
     assert "待确认的任务理解" in json.dumps(notice, ensure_ascii=False)
     assert service.save(f"{host}:enabled", [{"op": "understanding", "goal": "完成本次修改",
         "scope": "遵守业务规则", "deliverables": "修改结果", "done": "通过约定的检查"}])["ok"]
-    message(service, host, "enabled", tmp_path, "确认你的任务理解")
+    message(service, host, "enabled", tmp_path, "确认")
     assert service.save(f"{host}:enabled", [{"op": "confirm", "question": "Q1", "source": "U2",
         "why": "用户确认目标", "tradeoffs": "不扩大范围", "decided_by": "用户"}])["ok"]
     service.save_settings({"task_mode": False})

@@ -46,7 +46,7 @@ save 操作示例（operations 是对象数组，一次可提交多个操作）�
    "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
 以下11～15项仅供任务模式会话使用；以启动包的“工作模式”为准，普通记忆模式不要求执行。
 11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
-12. 首条用户消息后，先按任务目标、本次范围与业务规则、交付结果、完成标准复述；用 {"op":"understanding","goal":"用户需要的结果","scope":"本次范围及已确认的业务口径","deliverables":"交付结果","done":"可核对的完成标准"} 保存同一份复述，再等用户确认。用户纠正后更新复述；确认后仅用户指出整体理解有误时重做 understanding 并引用 source；新的关键业务缺口按第5项集中补问，不重新确认整个任务。确认目标：{"op":"confirm","question":"Q1","source":"U2","why":"用户确认任务目标理解","tradeoffs":"先不扩大范围","decided_by":"用户"}
+12. 首条用户消息后，先按任务目标、本次范围与业务规则、交付结果、完成标准复述；用 {"op":"understanding","goal":"用户需要的结果","scope":"本次范围及已确认的业务口径","deliverables":"交付结果","done":"可核对的完成标准"} 保存并展示同一份复述。支持原生确认弹窗时优先弹窗，仅用户主动提交“确认”后用 confirm 的 dialog_answer="确认" 记录；默认选中、取消、关闭或未提交不算确认。没有弹窗则提示“请单独回复：确认”，结束回复并等待，只接受后续用户原话完整等于“确认”（可去首尾空白），不猜近义句或长消息中的关键词。用户补充或更正后更新并展示复述，再等待确认；同一消息含更正和确认也不能直接开工。提交 confirm 前不要重存未变复述；确认后仅用户指出整体理解有误时重做 understanding 并引用 source；新的关键业务缺口按第5项集中补问，不重新确认整个任务。确认目标：{"op":"confirm","question":"Q1","source":"U2","why":"用户确认任务目标理解","tradeoffs":"先不扩大范围","decided_by":"用户"}。弹窗确认改用 {"op":"confirm","question":"Q1","dialog_answer":"确认","why":"用户主动提交弹窗确认","tradeoffs":"仅执行展示的任务理解","decided_by":"用户"}；dialog_answer 只记录真实提交的确认选项，自由文本补充不算确认。
 13. 记录一次尝试：{"op":"attempt","route":"pytest -q","evidence":"AssertionError test_parse","productive":false}
 14. 暂停后换路：先把下一步写成具体路线，再 {"op":"continue","source":"U2","route":"与下一步相同的路线","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"用户"}。source 必须指向这次暂停之后、同意该路线的用户原话。
 15. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。

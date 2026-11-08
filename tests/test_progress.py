@@ -80,6 +80,7 @@ def test_first_message_requires_task_understanding_even_with_project_memory(tmp_
     assert "待确认的任务理解" in package
     assert all(label in package for label in ("任务目标", "本次范围", "交付结果", "完成标准"))
     assert "不是具体技术方案" in package
+    assert "原生确认弹窗" in package and "不猜确认意图" in package
     assert path.read_bytes() == before
     blocked = service.save("codex:one", [
         {"op": "append", "section": "done", "items": [{"text": "改完了"}]},
@@ -89,7 +90,7 @@ def test_first_message_requires_task_understanding_even_with_project_memory(tmp_
     assert not blocked["ok"] and len(blocked["rejected"]) == 3
     assert service.save("codex:one", [_understanding()])["ok"]
     assert not service.save("codex:one", [_confirm("Q1", source="U1")])["ok"]
-    _prompt(service, "one", folder, "是的，你的理解是对的")
+    _prompt(service, "one", folder, "确认")
     assert service.save("codex:one", [_confirm("Q1", source="U2")])["ok"]
     later = _prompt(service, "one", folder, "继续完成任务")
     assert "待确认的任务理解" not in json.dumps(later, ensure_ascii=False)
@@ -109,7 +110,7 @@ def test_user_correction_reopens_only_that_sessions_understanding(tmp_path, monk
     _prompt(service, "one", folder, "你的理解不对，需要修改所有错误提示")
     assert not service.save("codex:one", [_confirm("Q1", source="U2")])["ok"]
     assert service.save("codex:one", [_understanding(scope="所有错误提示")])["ok"]
-    _prompt(service, "one", folder, "对")
+    _prompt(service, "one", folder, "确认")
     assert service.save("codex:one", [_confirm("Q1", source="U3")])["ok"]
     assert not service.save("codex:one", [_understanding()])["ok"]
     _prompt(service, "one", folder, "查看验证结果")
@@ -120,9 +121,45 @@ def test_user_correction_reopens_only_that_sessions_understanding(tmp_path, monk
     assert service.save("codex:one", [_understanding(goal="统一全部提示的语言", source="U5")])["ok"]
     assert not service.save("codex:one", [{"op": "set_status", "status": "已完成"}])["ok"]
     assert not service.save("codex:one", [_confirm("Q1", source="U3")])["ok"]
-    _prompt(service, "one", folder, "确认你的任务理解")
+    _prompt(service, "one", folder, "确认")
     assert service.save("codex:one", [_confirm("Q1", source="U6")])["ok"]
     assert service.save("codex:one", [{"op": "set_status", "status": "已完成"}])["ok"]
+
+
+def test_text_confirmation_requires_a_separate_exact_reply(tmp_path, monkeypatch):
+    service, _, _ = _service(tmp_path, monkeypatch)
+    _prompt(service, "exact", tmp_path, "把错误提示改成中文")
+    assert service.save("codex:exact", [_understanding()])["ok"]
+    for number, text in enumerate(("对", "可以", "开始吧", "ok", "确认。", "确认你的任务理解",
+                                   "没有确认任务理解", "等我确认任务理解后再开始",
+                                   "补充：保留原文", "范围改为所有错误提示，确认。"), start=2):
+        _prompt(service, "exact", tmp_path, text)
+        result = service.save("codex:exact", [_confirm("Q1", source=f"U{number}")])
+        assert not result["ok"]
+        assert "单独回复“确认”" in result["rejected"][0]["reason"]
+    assert service.save("codex:exact", [_understanding(scope="所有错误提示，保留原文")])["ok"]
+    stale = service.save("codex:exact", [_confirm("Q1", source="U11")])
+    assert not stale["ok"] and "不要重试旧来源" in stale["rejected"][0]["reason"]
+    _prompt(service, "exact", tmp_path, " 确认\n")
+    assert service.save("codex:exact", [_confirm("Q1", source="U12")])["ok"]
+    summary, _ = _load(service, "codex:exact")
+    assert "所有错误提示，保留原文" in summary.extra["任务理解"]
+    assert "确认来源：U12" in summary.extra["任务理解"]
+
+
+def test_dialog_confirmation_requires_the_submitted_confirm_option(tmp_path, monkeypatch):
+    service, _, _ = _service(tmp_path, monkeypatch)
+    _prompt(service, "dialog", tmp_path, "把错误提示改成中文")
+    assert not service.save("codex:dialog", [_confirm("Q1", dialog_answer="确认")])["ok"]
+    assert service.save("codex:dialog", [_understanding()])["ok"]
+    for answer in (None, False, True, "", "继续补充", "同意", "确认。"):
+        result = service.save("codex:dialog", [_confirm("Q1", dialog_answer=answer)])
+        assert not result["ok"] and "弹窗尚未确认" in result["rejected"][0]["reason"]
+    assert service.save("codex:dialog", [_confirm("Q1", dialog_answer="确认")])["ok"]
+    summary, _ = _load(service, "codex:dialog")
+    assert len(summary.users) == 1
+    assert "确认来源：弹窗" in summary.extra["任务理解"]
+    assert summary.header["goal_questions"][0]["status"] == "confirmed"
 
 
 def test_business_gaps_keep_task_confirmed_and_allow_independent_work(tmp_path, monkeypatch):
@@ -132,7 +169,7 @@ def test_business_gaps_keep_task_confirmed_and_allow_independent_work(tmp_path, 
     _prompt(service, "business", folder, "按规定的口径整理表格")
     assert service.save("codex:business", [_understanding(
         goal="按业务口径整理表格", scope="转换及导出，保留规则按用户决定")])["ok"]
-    _prompt(service, "business", folder, "确认你的任务理解")
+    _prompt(service, "business", folder, "确认")
     assert service.save("codex:business", [_confirm("Q1", source="U2")])["ok"]
     questions = ["业务缺口：同义条目以什么条件合并？影响：合并逻辑。",
                  "业务缺口：原文与来源须保留哪些信息？影响：内容导出。"]
@@ -284,7 +321,7 @@ def test_pause_saves_handoff_and_resume_keeps_it(tmp_path, monkeypatch):
     _clear(vault, "交接项目")
     _prompt(service, "work", folder, "把热交接写进会话")
     assert service.save("codex:work", [_understanding(goal="把热交接写进会话")])["ok"]
-    _prompt(service, "work", folder, "确认任务理解")
+    _prompt(service, "work", folder, "确认")
     assert service.save("codex:work", [_confirm("Q1", source="U2")])["ok"]
     assert service.save("codex:work", [
         {"op": "append", "section": "evidence", "items": [{"kind": "commit", "text": "4c8fa05"}]},

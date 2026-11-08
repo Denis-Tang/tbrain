@@ -176,7 +176,6 @@ def apply_confirm(service, summary, operation: dict) -> str:
         raise ValueError("确认目标不附带权限。权限仍按 permission 单独记录，默认只有读代码、日志和测试。")
     if not why or not tradeoffs or not who:
         raise ValueError("确认决定要写理由、取舍、决定人")
-    source = _confirmation_source(summary, operation, who=who)
     questions = _header_questions(summary)
     found = next((item for item in questions if item["id"] == question_id), None)
     if found is None:
@@ -186,10 +185,16 @@ def apply_confirm(service, summary, operation: dict) -> str:
     answer = str(found.get("default") or "")
     if not answer:
         raise ValueError("请先用 understanding 保存任务目标复述，并向用户说明后等待确认")
-    if int(source["id"][1:]) <= int(summary.header["understanding_users"]):
-        raise ValueError("确认必须来自任务复述之后的用户原话")
-    if not _assents_to_question(source["text"], question_id, answer):
-        raise ValueError("这句原话没有确认这个具体问题的任务理解")
+    if "dialog_answer" in operation:
+        if operation["dialog_answer"] != "确认":
+            raise ValueError("弹窗尚未确认。只有用户主动提交“确认”选项后才能开工；取消、关闭或补充信息时继续等待。")
+        source = {"id": "弹窗", "text": "确认"}
+    else:
+        source = _confirmation_source(summary, operation, who=who)
+        if int(source["id"][1:]) <= int(summary.header["understanding_users"]):
+            raise ValueError("确认必须来自任务复述之后的用户原话。请展示已保存的复述，结束回复，等待用户单独回复“确认”；不要重试旧来源。")
+        if source["text"] != "确认":
+            raise ValueError("这个具体问题只接受用户单独回复“确认”。补充或更正信息后先更新复述，再弹窗确认；无弹窗则结束回复并等待“确认”。")
     goal = answer.splitlines()[0].removeprefix("任务目标：")
     found.update(status="confirmed", answer=answer, why=why, tradeoffs=tradeoffs, decided_by=who)
     summary.header["understanding_users"] = len(summary.users)
@@ -467,9 +472,12 @@ def question_lines(items: list[dict]) -> str:
         "本次范围与业务规则：这次包含哪些内容、必须遵守的处理口径和信息保留要求；只写用户明确的边界。",
         "交付结果：最后交给用户什么。",
         "完成标准：用户怎样判断任务做完。未知内容写“待确认”，不要自行补成事实。",
-        "末尾请求确认完整任务理解；已知的关键业务缺口放在同一轮集中询问，不能只确认笼统目标就当规则齐全。",
+        "已知的关键业务缺口放在同一轮集中询问，不能只确认笼统目标就当规则齐全。",
         "借鉴 ASD-STE100：短句、主动句、一句一件事；同一概念用同一名称，使用通俗中文。",
-        "已经保存复述时，先处理用户回复：明确确认就调用 confirm，不要再次要求确认；用户纠正时才修改复述再等待。",
+        "展示并保存复述后，支持原生确认弹窗的 Agent 必须优先弹窗；仅用户主动选中并提交“确认”才调用 confirm，dialog_answer 填“确认”。默认选中、取消、关闭或未提交都不算确认。",
+        "没有确认弹窗时，明确提示“请单独回复：确认”，结束本轮回复并等待；仅后续用户原话去除首尾空白后完全等于“确认”才用 confirm 引用 U#。不接受近义句或长消息中的确认字样，不猜确认意图。",
+        "用户补充或更正信息时，先纳入信息，更新并展示复述，再按上述方式等待确认；同一消息含补充或更正及“确认”也不能直接开工。弹窗的自由文本补充同样不是确认。",
+        "已经明确确认就调用 confirm，不要再次要求确认；不要为提交 confirm 重存没有变化的复述。",
         "确认后不因新消息、压缩、接续或项目模板缺项重复确认整个任务。",
         "只有用户指出整体理解有误时，才重做 understanding 并引用 source；新业务缺口不重启整项任务确认。",
         "执行中发现会改变业务结果、现有资料又不能确定的新缺口，集中列出问题及影响范围，只暂停依赖该决定的部分。",
@@ -804,15 +812,6 @@ def _positive_assent(text: str, marks: tuple[str, ...]) -> bool:
         return False
     folded = raw.casefold()
     return any(mark.casefold() in folded or mark in raw for mark in marks)
-
-
-def _assents_to_question(text: str, question_id: str, default: str) -> bool:
-    raw = str(text or "").strip().rstrip("。.!！")
-    if raw.casefold() in {"对", "是", "是的", "确认", "同意", "可以", "继续", "没问题", "yes", "ok", "correct"}:
-        return True
-    return (_positive_assent(raw, ("确认", "同意", "接受", "准确", "正确", "对的", "理解对了", "accept"))
-            and (question_id in raw.upper() or default in raw
-                 or any(word in raw for word in ("理解", "复述", "任务目标"))))
 
 
 def _assents_to_proposal(text: str, proposal: str) -> bool:

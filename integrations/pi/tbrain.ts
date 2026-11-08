@@ -284,7 +284,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 		name: "tbrain_save",
 		label: "Tbrain Save",
 		description:
-			"保存会话总结与进度。以下任务流程仅在启动包显示任务模式已开启时适用；普通记忆模式不要求执行。首条用户消息后，先用 understanding 保存目标、范围及业务规则、交付物、完成标准的复述，等用户确认后再用 confirm。" +
+			"保存会话总结与进度。以下任务流程仅在启动包显示任务模式已开启时适用；普通记忆模式不要求执行。首条用户消息后，先用 understanding 保存目标、范围及业务规则、交付物、完成标准的复述。交互模式下扩展自动弹窗，用户提交“确认”后才记录 confirm；取消或选择继续补充时停止执行。没有交互界面时结束回复，等待用户单独回复“确认”，不猜近义句或长消息的意思。补充或更正后更新并展示复述，再等待确认。" +
 			'understanding 字段为 goal、scope、deliverables、done；用户指出理解有误后重新复述时用 source 引用原话。' +
 			'confirm 字段为 question="Q1"、source="U2"、why、tradeoffs、decided_by。确认后不重复确认整个任务。新的关键业务缺口先查已有资料，再集中询问问题及影响范围；用 append goal 记录，用户回答后保存决定及来源，再用 set_status 的 complete_goals 关闭相应 G#，不依赖答案的工作继续。' +
 			"operations 为 JSON 数组，元素形如 " +
@@ -299,7 +299,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 			last_test: Type.Optional(Type.Any({ description: "仅无宿主采集结果时补报：{command, exit_code}" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = await callTool("save", {
+			let result = await callTool("save", {
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				operations: Array.isArray(params?.operations) ? params.operations : [],
 				last_test: params?.last_test ?? null,
@@ -308,7 +308,23 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 				roundsSinceSave = 0;
 				changedOrTested = false;
 			}
-			return { content: [{ type: "text", text: toolText(result) }], details: result };
+			const content = [{ type: "text" as const, text: toolText(result) }];
+			if (result.ok && result.written?.understanding) {
+				const answer = ctx.hasUI
+					? await ctx.ui.select(`确认任务理解\n\n${result.written.understanding}`, ["继续补充", "确认"])
+					: undefined;
+				if (answer === "确认") {
+					result = await callTool("save", {
+						session_id: `${HOST}:${sessionIdOf(ctx)}`,
+						operations: [{ op: "confirm", question: "Q1", dialog_answer: answer,
+							why: "用户在原生弹窗中提交确认", tradeoffs: "仅按弹窗展示的任务理解执行", decided_by: "用户" }],
+					});
+					content.push({ type: "text", text: toolText(result) });
+				} else {
+					content.push({ type: "text", text: "任务理解尚未确认。停止执行并结束本轮回复，等待用户补充或单独回复“确认”。" });
+				}
+			}
+			return { content, details: result };
 		},
 	});
 

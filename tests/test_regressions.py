@@ -230,7 +230,7 @@ def test_assent_does_not_require_the_users_name_in_the_sentence(tmp_path):
     _prompt(service, "ask", folder, "说明本次任务")
     assert service.save("codex:ask", [{"op": "understanding", "goal": "完成本次任务",
         "scope": "本次需求", "deliverables": "任务结果", "done": "有证据可核对"}])["ok"]
-    _prompt(service, "ask", folder, "同意 Q1 的建议默认")
+    _prompt(service, "ask", folder, "确认")
     missing = service.save("codex:ask", [{
         "op": "confirm", "question": "Q1",
         "why": "按建议做", "tradeoffs": "先不扩大", "decided_by": "用户",
@@ -249,7 +249,6 @@ def test_assent_does_not_require_the_users_name_in_the_sentence(tmp_path):
     summary = _load(service, "codex:ask")[0]
     assert "确认来源：U2" in summary.extra["任务理解"]
     assert summary.header["goal_questions"][0]["decided_by"] == "用户"
-    assert "用户" not in "同意 Q1 的建议默认"
     grants = _load(service, "codex:ask")[0].header.get("permission_grants") or ["auto"]
     assert "auth-required" not in grants
 
@@ -327,7 +326,7 @@ def test_windows_acceptance_records_a_report_without_claiming_automatic_verifica
     _prompt(service, "accept", folder, "准备交最终验收")
     assert service.save("codex:accept", [{"op": "understanding", "goal": "完成本次任务",
         "scope": "本次需求", "deliverables": "任务结果", "done": "有证据可核对"}])["ok"]
-    _prompt(service, "accept", folder, "确认任务理解")
+    _prompt(service, "accept", folder, "确认")
     assert service.save("codex:accept", [{"op": "confirm", "question": "Q1", "source": "U2",
         "why": "目标已确认", "tradeoffs": "不扩大范围", "decided_by": "用户"}])["ok"]
     report = {
@@ -448,7 +447,7 @@ def test_unrelated_agreement_does_not_accept_another_question(tmp_path):
         "decided_by": "用户",
     }])
     assert refused["ok"] is False
-    _prompt(service, "agree", folder, "同意 Q1 的建议默认")
+    _prompt(service, "agree", folder, "确认")
     accepted = service.save("codex:agree", [{
         "op": "confirm", "question": "Q1",
         "source": "U4", "why": "这句原话指向 Q1", "tradeoffs": "不另写答案",

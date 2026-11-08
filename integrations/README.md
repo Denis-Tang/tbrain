@@ -70,6 +70,8 @@ Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定�
 
 Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程；返回顺序和原有超时保持不变。
 
+任务模式下，Pi 扩展成功保存 `understanding` 后，在 `ctx.hasUI` 为真时用原生选择框展示完整复述，选项为“继续补充”和“确认”。用户提交“确认”后才保存 `confirm`；取消或选择继续补充时停止执行。没有交互界面时，模型必须结束回复，等待用户单独回复“确认”。其他宿主优先使用各自的原生确认工具，规则与记录方式见 [LOCAL-LOOP](../docs/LOCAL-LOOP.md#首条消息先确认任务理解--confirm-the-task-once)。
+
 `pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功保存后重置计数；重载扩展也会重置计数，shell 的其他文件修改不会被识别。
 
 ## 升级后旧进程

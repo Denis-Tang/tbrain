@@ -88,6 +88,15 @@
     return result == null ? {} : result;
   }
 
+  async function saveProject(...args) {
+    let saved = await call("project_save", ...args);
+    while (saved.running) {
+      await new Promise(resolve => window.setTimeout(resolve, 200));
+      saved = await call("project_save_status");
+    }
+    return saved;
+  }
+
   function errorText(error) {
     return error && error.message ? String(error.message) : String(error || "操作失败");
   }
@@ -712,7 +721,7 @@
         const desired = toggle.checked;
         withBusy(toggle, async () => {
           try {
-            const saved = await call("project_save", project.name, project.paths || [], project.parent || "", desired, "");
+            const saved = await saveProject(project.name, project.paths || [], project.parent || "", desired, "");
             project.allow_child = !!(saved && saved.allow_child !== undefined ? saved.allow_child : desired);
             toast("已保存");
           } catch (error) {
@@ -725,6 +734,35 @@
       switchRow.append(switchText, switchLabel);
       body.append(switchRow);
     }
+
+    const standaloneRow = el("div", "switch-row");
+    const standaloneText = el("div", "switch-text");
+    standaloneText.append(el("h3", "", "全局共享（读取非项目会话）"));
+    standaloneText.append(el("p", "", "仅用于主动检索和手动接续，不加入启动推荐。公共池与全局提示词始终可读。"));
+    const standaloneLabel = el("label", "switch");
+    const standaloneToggle = document.createElement("input");
+    standaloneToggle.type = "checkbox";
+    standaloneToggle.checked = !!project.read_standalone;
+    standaloneToggle.setAttribute("role", "switch");
+    standaloneToggle.setAttribute("aria-label", "全局共享（读取非项目会话）");
+    standaloneToggle.addEventListener("change", () => {
+      const previous = !!project.read_standalone;
+      const desired = standaloneToggle.checked;
+      withBusy(standaloneToggle, async () => {
+        try {
+          const saved = await call("project_set_read_standalone", project.name, desired);
+          project.read_standalone = !!saved.project.read_standalone;
+          standaloneToggle.checked = project.read_standalone;
+          toast("已保存");
+        } catch (error) {
+          standaloneToggle.checked = previous;
+          throw error;
+        }
+      });
+    });
+    standaloneLabel.append(standaloneToggle, el("span"));
+    standaloneRow.append(standaloneText, standaloneLabel);
+    body.append(standaloneRow);
 
     const footer = el("div", "project-footer");
     const prompt = el("button", "button secondary small", "项目提示词");
@@ -1111,6 +1149,7 @@
     $("timeout-hours").value = Number.isFinite(hours) && hours > 0 ? hours : 6;
     $("ntp-enabled").checked = settings.ntp_enabled !== false;
     $("reminder-context-switch").checked = !!settings.reminder_context_switch;
+    $("task-mode").checked = !!settings.task_mode;
     renderTimezoneOptions(settings.timezone || "");
   }
 
@@ -1120,6 +1159,7 @@
     $("timeout-hours").value = "";
     $("ntp-enabled").checked = false;
     $("reminder-context-switch").checked = false;
+    $("task-mode").checked = false;
     renderTimezoneOptions("");
     updateStatusUI(null);
     renderHosts(null);
@@ -1524,7 +1564,7 @@
         if (path && !paths.includes(path)) paths.push(path);
       }
       withBusy($("save-project"), async () => {
-        const saved = await call("project_save", name, paths, state.editing.parent || "", $("project-allow-child").checked, state.editing.original);
+        const saved = await saveProject(name, paths, state.editing.parent || "", $("project-allow-child").checked, state.editing.original);
         $("project-dialog").close();
         await loadProjects(true);
         const sync = saved.workspace_sync || [];
@@ -1576,6 +1616,18 @@
     }, true);
     window.addEventListener("resize", () => closeMenu());
 
+    $("task-mode").addEventListener("change", async (event) => {
+      const control = event.currentTarget;
+      if (!hasBridge()) { control.checked = false; return; }
+      const enabled = control.checked;
+      const result = await withBusy(control, () => call("save_settings", { task_mode: enabled }));
+      if (result && result.settings) {
+        state.settings = result.settings;
+        control.checked = !!result.settings.task_mode;
+        toast(`${enabled ? "任务模式已开启" : "普通记忆模式已开启"}，新会话生效`);
+      } else control.checked = !enabled;
+    });
+
     $("settings-form").addEventListener("submit", (event) => {
       event.preventDefault();
       if (!hasBridge()) return;
@@ -1587,6 +1639,7 @@
         ntp_enabled: $("ntp-enabled").checked,
         timeout_hours: timeoutHours,
         reminder_context_switch: $("reminder-context-switch").checked,
+        task_mode: $("task-mode").checked,
       };
       withBusy(event.submitter || $("save-settings"), async () => {
         const result = await call("save_settings", values);

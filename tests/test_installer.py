@@ -87,6 +87,76 @@ def test_install_upgrade_and_prune_keeps_two_versions(tmp_path):
     assert installer.verify_layout(root=root)["ok"] is True
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows directory sharing')
+def test_install_recovers_after_a_real_package_handle_is_released(tmp_path, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    copytree, rename = installer.shutil.copytree, installer.os.rename
+    handle = None
+    denied = []
+
+    def copy_and_hold(source, destination, *args, **kwargs):
+        nonlocal handle
+        result = copytree(source, destination, *args, **kwargs)
+        if Path(destination).name == 'package':
+            handle = kernel.CreateFileW(str(Path(destination) / 'tbrain.exe'), 0x80000000, 3, None, 3, 0, None)
+            assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+        return result
+
+    def rename_and_release(source, destination):
+        nonlocal handle
+        try:
+            return rename(source, destination)
+        except OSError as error:
+            denied.append(error.winerror)
+            kernel.CloseHandle(handle)
+            handle = None
+            raise
+
+    monkeypatch.setattr(installer.shutil, 'copytree', copy_and_hold)
+    monkeypatch.setattr(installer.os, 'rename', rename_and_release)
+    root = tmp_path / 'install'
+    try:
+        result = installer.install_from_dir(make_package(tmp_path, '0.6.2'), '0.6.2', root=root)
+    finally:
+        if handle is not None:
+            kernel.CloseHandle(handle)
+    assert result['ok'] and denied == [5]
+    assert installer.current_version(root) == '0.6.2'
+    assert installer.verify_layout(root=root)['ok']
+
+
+def test_persistent_staging_denial_restores_the_existing_version(tmp_path, monkeypatch):
+    root = tmp_path / 'install'
+    package = make_package(tmp_path, '0.6.2', 'original')
+    installer.install_from_dir(package, '0.6.2', root=root)
+    (package / 'marker.txt').write_text('replacement', encoding='utf-8')
+    rename = installer.os.rename
+    attempts = []
+
+    def deny_staging(source, destination):
+        if Path(source).name == 'package':
+            attempts.append(source)
+            error = PermissionError('staging directory is still in use')
+            error.winerror = 5
+            raise error
+        return rename(source, destination)
+
+    monkeypatch.setattr(installer.os, 'rename', deny_staging)
+    with pytest.raises(installer.InstallError, match='still in use'):
+        installer.install_from_dir(package, '0.6.2', root=root)
+    assert len(attempts) == 4
+    assert (root / 'versions/0.6.2/marker.txt').read_text(encoding='utf-8') == 'original'
+    assert installer.current_version(root) == '0.6.2'
+    assert not list((root / 'versions').glob('.old-*'))
+
+
 def test_switch_current_and_rollback(tmp_path):
     root = tmp_path / "install"
     installer.install_from_dir(make_package(tmp_path, "0.6.0"), "0.6.0", root=root)

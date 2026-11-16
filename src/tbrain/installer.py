@@ -27,7 +27,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import paths
+from . import paths, versions
 
 PACKAGE_ROOT = "tbrain"
 REQUIRED_FILES = ("tbrain.exe", "desktop/Tbrain.Desktop.exe", "runtime/node.exe")
@@ -126,13 +126,7 @@ def _now() -> str:
 
 
 def _version_key(version: str) -> tuple:
-    """Numeric sort key so 0.6.10 sorts after 0.6.9; invalid names sort last."""
-    text = str(version or "").strip()
-    match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:[-+](.*))?", text)
-    if not match:
-        return ((), 0, text)
-    numbers = tuple(int(part) for part in match.group(1).split("."))
-    return (numbers, 1 if not match.group(2) else 0, text)
+    return versions.key(version)
 
 
 def _check_version(version: str) -> str:
@@ -393,7 +387,15 @@ def install_from_dir(source: Path, version: str, root: Path | None = None,
         if replaced:
             os.rename(target, previous)
         try:
-            os.rename(copy_root, target)
+            for attempt in range(4):
+                try:
+                    os.rename(copy_root, target)
+                    break
+                except OSError as exc:
+                    # Windows can briefly hold a newly copied executable open.
+                    if getattr(exc, 'winerror', None) not in (5, 32) or attempt == 3:
+                        raise
+                    time.sleep(0.05)
         except OSError:
             if replaced and previous.exists() and not target.exists():
                 os.rename(previous, target)
@@ -446,24 +448,26 @@ def stage(source: Path, version: str, root: Path | None = None) -> dict:
 
 
 def prune_versions(keep: int = 2, root: Path | None = None) -> dict:
-    """Keep the current version and the newest ``keep - 1`` others."""
+    """Prune stable releases, preserving current and the latest stable release."""
     base = Path(root) if root is not None else paths.install_root()
     keep = max(1, int(keep))
     current = current_version(base)
-    versions = installed_versions(base)
-    if not versions:
-        return {"kept": [], "removed": []}
-    ordered = sorted(versions, key=_version_key, reverse=True)
-    keep_set: list[str] = []
-    if current:
-        keep_set.append(current)
+    installed = installed_versions(base)
+    ordered = sorted((name for name in installed
+                      if (release := versions.parse_release(name)) is not None
+                      and not release.is_prerelease), key=_version_key, reverse=True)
+    # Pre-releases and unsupported directories never consume stable release slots.
+    keep_set = set(installed) - set(ordered)
+    stable_keep = set(ordered[:1])
+    if current in ordered:
+        stable_keep.add(current)
     for name in ordered:
-        if len(keep_set) >= keep:
+        if len(stable_keep) >= keep:
             break
-        if name not in keep_set:
-            keep_set.append(name)
+        stable_keep.add(name)
+    keep_set.update(stable_keep)
     removed: list[str] = []
-    for name in versions:
+    for name in installed:
         if name in keep_set:
             continue
         folder = paths.version_dir(base, name)
@@ -471,17 +475,24 @@ def prune_versions(keep: int = 2, root: Path | None = None) -> dict:
         if folder.exists():  # locked files: report instead of failing the upgrade
             continue
         removed.append(name)
-    return {"kept": keep_set, "removed": removed}
+    kept = sorted(keep_set, key=lambda name: (name == current, _version_key(name)), reverse=True)
+    return {"kept": kept, "removed": removed}
 
 
 def rollback(root: Path | None = None) -> dict:
-    """Switch to the newest installed version that is not currently selected."""
+    """Prefer the nearest older release, staying stable when current is stable."""
     base = Path(root) if root is not None else paths.install_root()
     current = current_version(base)
-    candidates = [name for name in installed_versions(base) if name != current]
+    current_release = versions.parse_release(current)
+    candidates = [(release, name) for name in installed_versions(base)
+                  if name != current and (release := versions.parse_release(name)) is not None
+                  and (current_release is None or current_release.is_prerelease
+                       or not release.is_prerelease)]
     if not candidates:
         raise InstallError("没有可回退的版本")
-    target = sorted(candidates, key=_version_key, reverse=True)[0]
+    older = [item for item in candidates
+             if current_release is not None and item[0] < current_release]
+    _, target = max(older or candidates)
     result = switch_current(target, base)
     result["previous"] = current
     result["message"] = f"已回退到 {target}"

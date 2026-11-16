@@ -43,15 +43,11 @@ vault（用户知识库，默认 `%USERPROFILE%\Documents\TbrainVault`）：
 项目/<项目名>/项目提示词.md
 项目/<项目名>/项目提示词变更日志.md
 项目/<项目名>/会话索引.md
-项目/<项目名>/完成标准.md   # goal / done / evidence / verify
-项目/<项目名>/工作区.md     # 该项目唯一 git 工作区
 公共池/<类型>/<卡片名>.md
 公共池/<类型>/归档/<卡片名>.md
 独立会话池/会话索引.md
 附件/<类型>/<卡片名>.md
 .tbrain/                 # 程序内部：待用户确认、迁移记录等（Obsidian 可读，不要求人工编辑）
-.tbrain/dream-status.json # Dream 路由：pending | running | ready（启动包只读这个小文件）
-.tbrain/dream/            # Dream L1 冷蒸馏 wiki：_index.md + 主题文件（不回写会话总结）
 ```
 
 `paths.py`：`app_home()`、`install_root()`、`default_install_root()`（`%LOCALAPPDATA%\Programs\Tbrain`）、`versions_dir()`、`current_dir()`、`bin_entry()`。
@@ -188,9 +184,9 @@ status: 进行中
 ## 决策
 ### K1
 决策 | 理由
-理由：为什么这样做
-取舍：放弃了什么
-决定人：谁拍板
+理由：为什么这样决定
+取舍：接受哪些代价
+决定人：谁作出决定
 
 ## 未走通的路
 ### X1
@@ -450,8 +446,6 @@ class TbrainService:
 
 启动包先安排项目提示词、全局提示词用户区、公共池 L1、附件卡片和接续视图；有效历史决定（含归档，最多 3 条）与时间、会话身份单独预留空间，会话完成不作废 K。明确的建议/待确认/被取代/已废止 K 不进入有效决定交接；代码现状不能作废用户要求。按宿主字符上限裁剪（claude-code 9000、codex 8000、dsh/pi 12000），更多内容通过 search/resume 读取，重复 bootstrap 不会展开。
 
-Dream L1 不参与上述裁剪的主体。bootstrap 只读 `.tbrain/dream-status.json`：状态不是 `ready` 时启动包与今天相同；`ready` 时在包尾追加最多 480 个字符的索引行，且不突破宿主字符上限。细节、待整理消化和外部分析器操作见 `docs/DREAM.md`。
-
 bootstrap 判断项目：`match_project(cwd)` 最长路径匹配；根项目默认不读子项目内容；根项目 `allow_child=true` 时接续视图附子项目进行中条目并标注来源。
 
 save 操作（JSON 数组，每项一个 dict）：
@@ -470,14 +464,17 @@ save 操作（JSON 数组，每项一个 dict）：
 
 ## 11. mcp_server.py（Lead）
 
-四个工具，会话身份显式传（P9）：
+五个工具，会话身份显式传（P9）：
 
 - `bootstrap(session_id, agent, cwd, host_record="", project="")`
 - `search(query, session_id="", limit=5)`
 - `save(session_id, operations, last_test=None)`
+- `save_decision(session_id, text, source, why="", supersedes=None)`
 - `resume(session_id, target)`
 
-全部返回带 `tbrain_version` 与 `current_time`。工具 description 里写入写作规范、填空模板与《项目提示词写作规范》全文（长 description 可接受）。
+`save` 记录工作进展和本次技术决定；用户长期决定统一由 `save_decision` 写入当前项目的决策日志，`source` 为当前会话 U# 数组，理由可空，`supersedes` 只引用本项目 DL 编号。日志的有效决定进入搜索和启动包，旧记录保留。历史 K# 沿用原有退役入口。
+
+全部返回带 `tbrain_version` 与 `current_time`。工具 description 给出对应职责、参数和必要写作规范。
 
 ## 12. hosts/*（B）
 
@@ -557,15 +554,6 @@ open_document(path) -> {}
 - 真实宿主端到端：构建分发包后，用隔离配置目录（Claude `CLAUDE_CONFIG_DIR`、Codex `CODEX_HOME`、pi `PI_CODING_AGENT_DIR`）先测 Claude/Codex/pi，允许少量真实模型花费；DSH 单独验证。
 - 前端验收：桌面启动截图 + 三页可交互（Lead 用真实桌面程序检查）。
 
-## 16. Dream L1（冷蒸馏）
-
-与第 10 节的热交接分开，契约见 `docs/DREAM.md`。要点：
-
-- 同一 vault。L0 仍是 `会话总结/`、项目提示词、公共池；`tbrain dream run` 只写 `.tbrain/dream/` 和 `.tbrain/dream-status.json`。
-- 状态只有 `pending`、`running`、`ready`。bootstrap / resume 不执行 Dream，也不调用模型。
-- 本地整理器把已完成、已中断、已放弃会话里的决定、待整理和中断目标收成 wiki。明确失效的决定记在冷层「已退役」，不回写原会话。
-- 外部分析器只产出 JSON 操作（`upsert` / `retire` / `digest_pending`），由 `tbrain dream run --ops` 落地。
-
-## 17. 本阶段之外
+## 16. 本阶段之外
 
 第 6 步（迁移/解绑）只做 dry-run 报告与实现；真实迁移、修改用户全局配置、停止旧进程等不可逆操作等用户确认后再执行。

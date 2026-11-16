@@ -71,6 +71,9 @@ def gaps(summary) -> list[str]:
     if len(summary.users) > saved_users:
         missing.append("还有未保存的用户指令，先 save。")
     missing.extend(acceptance.gaps(summary))
+    from .progress import gate_gaps
+
+    missing.extend(gate_gaps(summary))
     return missing
 
 

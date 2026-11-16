@@ -5,7 +5,7 @@
  * its stable command line entry (`<install root>/bin/tbrain.cmd`):
  *
  *   - lifecycle events call `tbrain hook --host pi`   (session start / prompt / stop / compact / end)
- *   - the four tools call `tbrain tool <name>`         (bootstrap / search / save / resume)
+ *   - tools call `tbrain tool <name>` (bootstrap / search / save / save_decision / resume)
  *
  * JSON crosses the process boundary on stdin; the entry therefore never needs
  * shell-quoting for user text. Installed by `tbrain connect pi` into
@@ -19,8 +19,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const HOST = "pi";
-const HOOK_TIMEOUT_MS = 8000;
+const HOOK_TIMEOUT_MS = 15000;
 const TOOL_TIMEOUT_MS = 60000;
+
+const PROJECT_PROMPT_SPEC = `项目提示词规范（project_prompt 操作）：
+- 最终目标最多3行，每行80字；硬规则最多12条，每条80字；当前阶段最多5行，每行80字；关键路径和命令最多10条，每条100字；全文4000字以内。
+- 硬规则每条带来源：（来源：[[会话名]]#U3 或 U3 / E4）；无来源不写入。目标和硬规则写长期约定；当前阶段写“阶段名：完成标准”，随阶段更新。
+- 关键路径和命令写“用途：路径或命令”；命令须已验证。只写确认的事实，不写尝试经过、临时流水、相对时间词或评价；主语写全称。
+- 只提交变化的节，整节替换；旧内容自动进入变更日志。用户补充区和用户手改内容不覆盖。
+- 更新已有章节（空标题也算）必须带读取时的base_sha，例如：{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"},"base_sha":{"当前阶段":"ab12cd34"}}。启动包标题提供sha，取自未过滤原节；继承规则不可用作本项目写入基准。真正缺失的新章节可省略。
+- 缺基准或发生冲突时核对rejected中的head.text，再用head.sha作为该节base_sha重交；只重交失败节，不重复written。
+- 公共池env取代已有卡也必须带base_sha：先search读取公共命中的sha，再提交{"op":"env","items":[{"type":"工具","name":"工具名","base_sha":"ab12cd34","body":"已确认的新内容"}]}；新卡可省略base_sha。公共卡冲突同样先核对head.text，再用head.sha作为该卡base_sha，只重交失败卡。
+执行前核对项目提示词与相关文件；项目目标、阶段、关键路径或命令变化及旧说明失效时，用 save 的 project_prompt 更新对应节，无变化不改写。用户长期决定用 save_decision，勿重复抄入硬规则。空白节只补已确认内容，不推断用户偏好；保存后核对 written/rejected，只补交失败部分。`;
 
 function installRoot(): string {
 	const configured = (process.env.TBRAIN_INSTALL_ROOT || "").trim();
@@ -165,6 +175,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("input", async (event: any, ctx: any) => {
+		if (event?.source === "extension") return;
 		const text = typeof event?.text === "string" ? event.text : "";
 		if (text.trim()) {
 			roundsSinceSave++;
@@ -187,7 +198,8 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	pi.on("agent_end", async (_event: any, ctx: any) => {
 		const response = await hookEvent("Stop", eventPayload({ stop_hook_active: false }, ctx));
 		const hint = await hookEvent("Context", eventPayload({}, ctx));
-		const saveReminder = changedOrTested || roundsSinceSave >= 3 ? response?.additional_context || response?.reason : "";
+		const saveReminder = changedOrTested || roundsSinceSave >= 3
+			? response?.additional_context || response?.reason || (changedOrTested ? "本轮有文件修改或测试，请调用 tbrain_save 保存工作进展。" : "") : "";
 		const reminder = [saveReminder, hint?.additional_context].filter(Boolean).join("\n");
 		if (!reminder.trim()) return;
 		try {
@@ -265,7 +277,7 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "tbrain_search",
 		label: "Tbrain Search",
-		description: "检索 Tbrain 会话总结与公共池卡片；返回带来源路径的少量结果。",
+		description: "主动检索本项目及允许读取的子项目的历史与有效长期决定，再查公共池。项目开启“全局共享（读取非项目会话）”后，才额外检索非项目会话；非项目调用只查公共池与非项目池。返回带来源路径的少量结果，不改变自动接续推荐。公共池命中附sha，更新已有卡时作为env的base_sha。",
 		parameters: Type.Object({
 			query: Type.String({ description: "检索词" }),
 			limit: Type.Optional(Type.Number({ description: "最多返回条数，默认 5" })),
@@ -281,22 +293,48 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "tbrain_save_decision",
+		label: "Tbrain Save Decision",
+		description:
+			"保存当前项目的用户长期决定。清楚就记录；有关键歧义先问，明确后再调用，不要求用户重复确认清楚的决定。" +
+			"source 为当前会话用户原话编号数组。why 仅填写用户说明的理由，未说明留空；text 与 why 合计最多200字。项目、时间和决定人由程序填写。" +
+			"supersedes 仅填写被用户明确取代的本项目 DL-xxxx 编号；含糊冲突先问。临时要求用 tbrain_save，同一长期决定不重复写 K# 或项目硬规则。",
+		parameters: Type.Object({
+			text: Type.String({ description: "准确提炼的用户长期决定" }),
+			source: Type.Array(Type.String(), { description: '当前会话用户原话编号，如 ["U2", "U4"]' }),
+			why: Type.Optional(Type.String({ description: "用户说明的理由，未说明留空" })),
+			supersedes: Type.Optional(Type.Array(Type.String(), { description: "被明确取代的本项目 DL-xxxx 编号" })),
+		}),
+		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+			const result = await callTool("save_decision", {
+				session_id: `${HOST}:${sessionIdOf(ctx)}`,
+				text: params.text,
+				source: params.source,
+				why: params.why || "",
+				supersedes: params.supersedes || [],
+			});
+			return { content: [{ type: "text", text: toolText(result) }], details: result };
+		},
+	});
+
+	pi.registerTool({
 		name: "tbrain_save",
 		label: "Tbrain Save",
 		description:
-			"保存会话总结与进度。operations 为 JSON 数组，元素形如 " +
-			'{"op":"append","section":"decision","items":[{"text":"决定 | 理由"}]}、' +
+			"保存本轮工作进展、证据、问题和下一步；临时要求及本次技术决定也在这里记录。用户长期决定用 tbrain_save_decision，不在这里重复保存。任务模式操作按启动包执行，完整字段说明见 docs/LOCAL-LOOP.md。" +
+			'历史K#被用户明确取代时，用 {"op":"set_status","status":"进行中","supersede":["K1","[[旧会话名]]#K2"]} 退役；包括同项目旧会话和归档条目，原文保留。含糊冲突先问，不自动作废。' +
+			"operations 为 JSON 数组，元素形如 " +
+			'{"op":"append","section":"done","items":[{"text":"完成内容 [证据:E1]"}]}、' +
 			'{"op":"replace","section":"next_step","text":"动作 + 验证"} 或 ' +
-			'{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"}}。' +
-			"按启动包规范维护项目提示词：目标或长期规则、阶段、关键路径命令变化及旧内容失效时更新，无变化不改。" +
+			'{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"},"base_sha":{"当前阶段":"ab12cd34"}}。' +
 			"操作顺序执行，先存证据再引用返回的 E#；正文连引用最多200字。ok=true表示全部通过，" +
-			"ok=false时written仍是已保存部分，只补交rejected，不重复整批。",
+			"ok=false时written仍是已保存部分，只补交rejected，不重复整批。\n\n" + PROJECT_PROMPT_SPEC,
 		parameters: Type.Object({
 			operations: Type.Array(Type.Any(), { description: "save 操作数组" }),
 			last_test: Type.Optional(Type.Any({ description: "仅无宿主采集结果时补报：{command, exit_code}" })),
 		}),
 		async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
-			const result = await callTool("save", {
+			let result = await callTool("save", {
 				session_id: `${HOST}:${sessionIdOf(ctx)}`,
 				operations: Array.isArray(params?.operations) ? params.operations : [],
 				last_test: params?.last_test ?? null,
@@ -305,14 +343,30 @@ export default function tbrainExtension(pi: ExtensionAPI): void {
 				roundsSinceSave = 0;
 				changedOrTested = false;
 			}
-			return { content: [{ type: "text", text: toolText(result) }], details: result };
+			const content = [{ type: "text" as const, text: toolText(result) }];
+			if (result.ok && result.written?.understanding) {
+				const answer = ctx.hasUI
+					? await ctx.ui.select(`确认任务理解\n\n${result.written.understanding}`, ["继续补充", "确认"])
+					: undefined;
+				if (answer === "确认") {
+					result = await callTool("save", {
+						session_id: `${HOST}:${sessionIdOf(ctx)}`,
+						operations: [{ op: "confirm", question: "Q1", dialog_answer: answer,
+							why: "用户在原生弹窗中提交确认", tradeoffs: "仅按弹窗展示的任务理解执行", decided_by: "用户" }],
+					});
+					content.push({ type: "text", text: toolText(result) });
+				} else {
+					content.push({ type: "text", text: "任务理解尚未确认。停止执行并结束本轮回复，等待用户补充或单独回复“确认”。" });
+				}
+			}
+			return { content, details: result };
 		},
 	});
 
 	pi.registerTool({
 		name: "tbrain_resume",
 		label: "Tbrain Resume",
-		description: "读取某个会话的接续视图（下一步、未完成目标、最近进展）。",
+		description: "读取某个会话的接续视图（下一步、未完成目标、最近进展及项目当前有效长期决定）。",
 		parameters: Type.Object({
 			target: Type.String({ description: "会话名或会话 ID" }),
 			fork_user_count: Type.Optional(Type.Number({ description: "历史分支的用户轮次；省略为普通接续" })),

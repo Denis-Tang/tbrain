@@ -55,6 +55,26 @@ def test_handoff_pack_keeps_effective_decisions_after_session_completion(env):
     assert service.handoff_pack('甲项目', limit=1)['items'][0]['text'].startswith('保持 Markdown 事实源')
 
 
+def test_handoff_pack_prioritizes_current_long_term_decisions_and_keeps_total_limit(env):
+    service, repo, _ = env
+    _prompt(service, 'a', repo, '以后默认离线保存')
+    _save(service, 'a', ['先改保存函数 | 已定位实现位置'])
+    first = service.save_decision('pi:a', '默认离线保存', ['U1'])
+    assert first['ok'], first
+    items = service.handoff_pack('甲项目', limit=1)['items']
+    assert [item['id'] for item in items] == ['DL-0001']
+    assert set(items[0]) == {'session', 'id', 'text', 'at', 'source', 'project', 'verified', 'git_head'}
+    assert items[0]['source'].endswith('#DL-0001')
+    assert items[0]['project'] == '甲项目'
+
+    _prompt(service, 'a', repo, '改为长期使用本地数据库，替代旧决定')
+    second = service.save_decision('pi:a', '长期使用本地数据库', ['U2'], supersedes=['DL-0001'])
+    assert second['ok'], second
+    items = service.handoff_pack('甲项目', limit=2)['items']
+    assert [item['id'] for item in items] == ['DL-0002', 'K1']
+    assert items[0]['text'] == '长期使用本地数据库'
+
+
 def test_handoff_pack_missing_project_and_bootstrap(env):
     service, repo, _ = env
     assert TbrainService.handoff_pack(service, "不存在的项目")["ok"] is False
@@ -64,9 +84,12 @@ def test_handoff_pack_missing_project_and_bootstrap(env):
     _prompt(service, "b", repo, "换会话接手")
     created = service.bootstrap("pi:b2", "pi", str(repo))
     package = created["package"]
-    assert "## 待接续决定" in package
-    section = package.split("## 待接续决定", 1)[1]
-    assert "- [[" in section.split("## ", 1)[0]
+    from pathlib import Path
+    assert "## 待接续决定：" in package
+    section = package.split("## 待接续决定：", 1)[1].split("## ", 1)[0]
+    count, path = section.splitlines()[1].split('条；', 1)
+    assert count == '1'
+    assert '返回 dict，字段 ok/items' in Path(path).read_text(encoding='utf-8')
 
 
 def test_handoff_filters_explicit_inactive_entries_and_survives_large_startup(env):
@@ -76,7 +99,12 @@ def test_handoff_filters_explicit_inactive_entries_and_survives_large_startup(en
                          '向量方案 | 尚未确认；建议，待用户确认'])
     service.save_global_prompt('很长的全局说明' * 3000)
     package = service.bootstrap('pi:large', 'pi', str(repo))['package']
-    assert '禁用远程存储' in package
+    from pathlib import Path
+    section = package.split('## 待接续决定：', 1)[1].split('## ', 1)[0]
+    count, path = section.splitlines()[1].split('条；', 1)
+    assert count == '1'
+    assert '禁用远程存储' in Path(path).read_text(encoding='utf-8')
+    assert '禁用远程存储' not in package
     assert '旧实现' not in package and '向量方案' not in package
     assert len(package) <= 12000
     assert service.handoff_pack('甲项目')['items'][0]['source'].endswith('#K1')

@@ -13,7 +13,7 @@ import re
 
 import yaml
 
-STATUSES = ("进行中", "受阻", "待验证", "已完成", "已放弃", "已中断")
+STATUSES = ("进行中", "受阻", "待验证", "已完成", "已放弃", "已中断", "已暂停")
 REASON_KINDS = ("环境/权限限制", "时间不够", "证据不足", "已证实不可行")
 STRENGTHS = ("已排除", "暂缓")
 
@@ -133,10 +133,20 @@ def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: st
     return summary
 
 
+def decision_state(text: str) -> str:
+    """Read explicit suffixes; pending proposals are not retired decisions."""
+    value = str(text).strip().rstrip('。.!！')
+    retired = r'(?:被取代|已被取代|已废止|已废弃|已作废|已失效)'
+    if re.search(rf'[（(]{retired}[）)]\s*$|(?:^|[；;|。])\s*{retired}\s*$', value):
+        return 'inactive'
+    pending = r'(?:建议(?:[，,、 ]*(?:待用户确认|待确认|未确认))?|待用户确认|待确认|未确认)'
+    if re.search(rf'[（(]{pending}[）)]\s*$|(?:^|[；;|。])\s*{pending}\s*$|^(?:建议|待确认|未确认)[：:]', value):
+        return 'pending'
+    return 'active'
+
+
 def decision_active(text: str) -> bool:
-    # 只认显式失效/建议标记，不根据词句相似度或保存时间猜测生效关系。
-    marker = r"(?:被取代|已被取代|已废止|已废弃|已作废|已失效|建议(?:[，,、 ]*(?:待用户确认|待确认|未确认))?|待用户确认|待确认|未确认)"
-    return not re.search(rf"[（(]{marker}[）)]\s*$|(?:^|[；;|])\s*{marker}\s*$|^(?:建议|待确认|未确认)[：:]", text)
+    return decision_state(text) == 'active'
 
 
 def _escape_headings(text: str) -> str:
@@ -175,7 +185,7 @@ def render(summary: Summary) -> str:
     for name, body in summary.extra.items():
         if name in SECTIONS:
             continue
-        lines += [f"## {name}", str(body or ""), ""]
+        lines += [f"## {name}", _escape_headings(str(body or "")), ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -204,7 +214,7 @@ def parse(text: str) -> Summary:
     current_item: dict | None = None
     for line in body.split("\n"):
         escaped_heading = (header.get("body_encoding") == "escaped-headings" and
-                           current in _ESCAPED_SECTIONS and
+                           (current in _ESCAPED_SECTIONS or current_unknown) and
                            line.startswith("\\") and _BODY_HEADING_RE.match(line))
         if escaped_heading:
             line = line[1:]

@@ -21,7 +21,7 @@ def _service(tmp_path):
     home = tmp_path / "home"
     vault = tmp_path / "vault"
     service = TbrainService(home, vault=vault)
-    service.settings.update({"vault_path": str(vault), "ntp_enabled": False, "timezone": "Asia/Shanghai"})
+    service.settings.update({"vault_path": str(vault), "ntp_enabled": False, "timezone": "Asia/Shanghai", "task_mode": True})
     return service, home, vault
 
 
@@ -33,6 +33,12 @@ def _git(cwd, *args):
 def _prompt(service, session, cwd, text, host="codex"):
     service.hook(host, {"hook_event_name": "UserPromptSubmit", "session_id": session,
                         "cwd": str(cwd), "prompt": text})
+    assert service.save(f"{host}:{session}", [{"op": "understanding", "goal": text,
+        "scope": "本次任务", "deliverables": "任务结果", "done": "可用证据核对"}])["ok"]
+    service.hook(host, {"hook_event_name": "UserPromptSubmit", "session_id": session,
+                      "cwd": str(cwd), "prompt": "确认"})
+    assert service.save(f"{host}:{session}", [{"op": "confirm", "question": "Q1", "source": "U2",
+        "why": "用户确认目标", "tradeoffs": "只做本次范围", "decided_by": "用户"}])["ok"]
 
 
 def _load(service, session_id):
@@ -94,25 +100,25 @@ def test_bootstrap_resume_contract_and_decision_reasons(env):
             "reason": "不依赖 GitHub",
             "rationale": "同一类错误要在本机失败",
             "tradeoffs": "远程 CI 留到开拉取请求",
-            "decided_by": "Kai",
+            "decided_by": "用户",
         }],
     }])
     assert saved_decision["ok"] is True
     summary, path = _load(service, "codex:origin")
-    text = summary.items("决策")[0]["text"]
+    text = summary.items("决策")[-1]["text"]
     assert "本地检查做门禁 | 不依赖 GitHub" in text
     assert "理由：同一类错误要在本机失败" in text
     assert "取舍：远程 CI 留到开拉取请求" in text
-    assert "决定人：Kai" in text
+    assert "决定人：用户" in text
     stored = path.read_text(encoding="utf-8")
-    assert "决定人：Kai" in stored
+    assert "决定人：用户" in stored
 
     package = service.bootstrap("codex:origin", "codex", worktree)["package"]
     for phrase in ("工作约定", "只改这个项目", "goal", "done", "evidence", "verify",
-                   "真实证据", "Kai", "数据库迁移", "登录", "对外协议", "安装", "升级",
+                   "真实证据", "用户", "数据库迁移", "登录", "对外协议", "安装", "升级",
                    "小重构", "要不要我继续", "理由", "取舍", "决定人",
                    "推送分支", "拉取请求", "预览", "生产环境", "删除数据", "密钥",
-                   "tbrain check", "small refactors", "CONDITIONAL PASS", "真实 Windows",
+                   "tbrain check", "CONDITIONAL PASS", "真实 Windows",
                    "pytest", "人工剩余风险接受仍未完成", "应该可以", "退出码"):
         assert phrase in package, phrase
     assert worktree in package
@@ -123,17 +129,26 @@ def test_bootstrap_resume_contract_and_decision_reasons(env):
     assert resumed["ok"] is True
     assert "理由：同一类错误要在本机失败" in resumed["handoff"]
     assert "取舍：远程 CI 留到开拉取请求" in resumed["handoff"]
-    assert "决定人：Kai" in resumed["handoff"]
+    assert "决定人：用户" in resumed["handoff"]
     assert "工作约定" in resumed["handoff"]
     pack = service.handoff_pack("演示项目")
     assert "工作约定" in pack["contract"]
-    assert any("决定人：Kai" in item["text"] for item in pack["items"])
+    assert any("决定人：用户" in item["text"] for item in pack["items"])
+
+
+def _clear_criteria(vault, project):
+    path = vault / "项目" / project / "完成标准.md"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("（待填写：这个项目要做成什么样）", "已有目标：把这一轮做完并可交接")
+    text = text.replace("- [ ] （待填写：可以核对的完成条件）", "- [ ] 证据、本地检查和决定理由都齐")
+    path.write_text(text, encoding="utf-8")
 
 
 def test_wrap_up_blocks_missing_gates_and_stop_stays_quiet_while_in_progress(env):
-    service, _, _ = env
-    folder = env[2].parent / "wrap"
+    service, _, vault = env
+    folder = vault.parent / "wrap"
     service.configure_project("收尾项目", [str(folder)])
+    _clear_criteria(vault, "收尾项目")
     _prompt(service, "open", folder, "先做一轮，先不交")
     assert service.save("codex:open", [
         {"op": "append", "section": "decision", "items": [{"text": "先记一笔 | 还没写原因"}]},
@@ -168,7 +183,7 @@ def test_wrap_up_blocks_missing_gates_and_stop_stays_quiet_while_in_progress(env
             "reason": "不依赖 GitHub",
             "rationale": "同一类错误要在本机失败",
             "tradeoffs": "远程 CI 留到开拉取请求",
-            "decided_by": "Kai",
+            "decided_by": "用户",
         }]},
         {"op": "permission", "action": "read tests"},
     ])["ok"]
@@ -198,7 +213,7 @@ def _pass_report(**overrides):
         "op": "acceptance",
         "task": "本地门禁已接到收尾",
         "verification": "tbrain check 退出码 0，证据 E1",
-        "risks": "没有剩下要 Kai 接受的风险",
+        "risks": "没有剩下要 用户 接受的风险",
         "deliverables": "commit 4c8fa05；在项目目录运行 tbrain check",
         "conclusion": "PASS",
     }
@@ -208,6 +223,7 @@ def _pass_report(**overrides):
 
 def _ready_for_acceptance(service, folder, session):
     service.configure_project(session, [str(folder)])
+    _clear_criteria(service.vault_root(), session)
     _prompt(service, session, folder, "准备提交最终验收")
     sid = f"codex:{session}"
     assert service.save(sid, [
@@ -219,7 +235,7 @@ def _ready_for_acceptance(service, folder, session):
             "reason": "结论只能三选一",
             "rationale": "避免含糊的完成声明",
             "tradeoffs": "多写一段验收",
-            "decided_by": "Kai",
+            "decided_by": "用户",
         }]},
         {"op": "permission", "action": "read tests"},
     ])["ok"]
@@ -297,19 +313,27 @@ def test_windows_installable_cannot_pass_without_a_real_windows_run(env):
     assert service.save(sid, [named])["ok"]
     assert service.hook("codex", stop) == {}
 
-    verified = _pass_report(
+    prose = _pass_report(
         conclusion="PASS",
         verification="Windows 真机安装并运行过安装包；Linux pytest 只是附加检查",
         windows_installable=True,
         windows_verified=True,
         windows_evidence="在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe",
     )
-    assert service.save(sid, [verified])["ok"]
+    prose_saved = service.save(sid, [prose])
+    assert prose_saved["ok"] is True
     _, path = _load(service, sid)
-    text = path.read_text(encoding="utf-8")
-    assert "Windows 真机验证：已做" in text
-    assert "在 Windows 机器上安装 tbrain-setup 并运行 tbrain.exe" in text
+    assert "已做（报告者声明）" in path.read_text(encoding="utf-8")
     assert service.hook("codex", {"hook_event_name": "WrapUp", "session_id": "安装包", "cwd": str(folder)}) == {}
+
+
+def test_local_check_skips_local_test_data_but_checks_project_notes(tmp_path):
+    scratch = tmp_path / '.t'
+    scratch.mkdir()
+    (scratch / 'fixture.md').write_text('### K1\n测试夹具缺少理由\n', encoding='utf-8')
+    assert run_check(tmp_path)['ok']
+    (tmp_path / 'decision.md').write_text('### K1\n真实项目笔记缺少理由\n', encoding='utf-8')
+    assert not run_check(tmp_path)['ok']
 
 
 def test_local_check_fails_missing_why_then_passes_when_reasons_exist(tmp_path):
@@ -333,7 +357,7 @@ def test_local_check_fails_missing_why_then_passes_when_reasons_exist(tmp_path):
 
     note.write_text(
         "### K1\n改用工作区 | 一个项目一处工作区\n"
-        "理由：避免同时改两份代码\n取舍：多一个目录，换来隔离\n决定人：Kai\n",
+        "理由：避免同时改两份代码\n取舍：多一个目录，换来隔离\n决定人：用户\n",
         encoding="utf-8",
     )
     assert run_check(root)["ok"] is True
@@ -344,7 +368,7 @@ def test_local_check_fails_missing_why_then_passes_when_reasons_exist(tmp_path):
     marked = decision_missing_why(marker)
     assert marked and marked[0]["line"] == 1
     (marker / "choice.md").write_text(
-        "<!-- tbrain:decision -->\n理由：只留一处工作区\n取舍：不在主目录里堆副本\n决定人：Kai\n",
+        "<!-- tbrain:decision -->\n理由：只留一处工作区\n取舍：不在主目录里堆副本\n决定人：用户\n",
         encoding="utf-8",
     )
     assert decision_missing_why(marker) == []
@@ -394,8 +418,117 @@ def test_cli_project_add_and_check_exit_code(env, capsys):
     assert json.loads(failed_out)["ok"] is False
     note.write_text(
         "### K1\n改用工作区 | 一个项目一处工作区\n"
-        "理由：避免同时改两份代码\n取舍：多一个目录\n决定人：Kai\n",
+        "理由：避免同时改两份代码\n取舍：多一个目录\n决定人：用户\n",
         encoding="utf-8",
     )
     assert cli.main(["check", "--path", str(folder), "--home", str(home)]) == 0
     assert service.store.project("命令行项目")["name"] == "命令行项目"
+
+
+@pytest.mark.parametrize("option", ["on", "off", None])
+def test_cli_project_set_only_changes_explicit_switch(env, capsys, option):
+    service, home, _ = env
+    service.configure_project("命令行项目", [], allow_child=True)
+    service.store.set_project_read_standalone("命令行项目", option != "on")
+    before = service.store.project("命令行项目")
+    card = service.store.project_card_path("命令行项目")
+    before_bytes = card.read_bytes()
+    arguments = ["project", "set", "--name", "命令行项目", "--home", str(home)]
+    if option is not None:
+        arguments += ["--read-standalone", option]
+    assert cli.main(arguments) == 0
+    saved = json.loads(capsys.readouterr().out)
+    assert saved["ok"] is True
+    after = service.store.project("命令行项目")
+    assert after["read_standalone"] is (option != "off")
+    assert {key: value for key, value in after.items() if key != "read_standalone"} == {
+        key: value for key, value in before.items() if key != "read_standalone"
+    }
+    if option is None:
+        assert card.read_bytes() == before_bytes
+    assert cli.main(["project", "set", "--name", "不存在", "--home", str(home)]) == 1
+    assert "项目不存在" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_cli_project_ids_applies_the_preview_and_keeps_original_bytes(env, tmp_path, capsys):
+    service, home, _ = env
+    card = service.store.project_card_path("旧项目")
+    card.parent.mkdir(parents=True)
+    before = b"\xef\xbb\xbf" + "---\r\nname: 旧项目\r\npaths: []\r\nx_unknown: keep\r\n---\r\n\r\n保留原文。\r\n".encode("utf-8")
+    card.write_bytes(before)
+    assert cli.main(["project", "ids", "--preview", "--home", str(home)]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert card.read_bytes() == before
+    assert len(preview["assignments"]) == 1
+    approved_id = preview["assignments"][0]["project_id"]
+    preview_file = tmp_path / "ids-preview.json"
+    preview_file.write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
+    assert cli.main(["project", "ids", "--apply", str(preview_file), "--backup", str(tmp_path / "backup"),
+                     "--home", str(home)]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["updated"] == 1
+    assert service.store.project("旧项目")["project_id"] == approved_id
+    assert any(path.read_bytes() == before for path in Path(applied["backup"]).rglob("项目卡.md"))
+    restored = b"".join(line for line in card.read_bytes().splitlines(keepends=True)
+                        if not line.startswith(b"project_id:"))
+    assert restored == before
+
+
+@pytest.fixture()
+def cold_export(tmp_path):
+    home, vault = tmp_path / "cold-home", tmp_path / "cold-vault"
+    home.mkdir()
+    project = vault / "项目" / "导出项目"
+    project.mkdir(parents=True)
+    (home / "settings.json").write_text(json.dumps({"vault_path": str(vault)}), encoding="utf-8")
+    (project / "项目卡.md").write_text("---\nname: 导出项目\npaths: []\n---\n", encoding="utf-8")
+    (project / "项目提示词.md").write_text(
+        "<!-- owner:user -->\n用户补充说明。\n<!-- /owner:user -->\n"
+        "<!-- owner:model -->\n## 最终目标\n保留 Tbrain 和 session_id 两个业务术语。\n"
+        "## 硬规则\n- 导出使用 UTF-8 无 BOM（来源：U1）\n"
+        "## 当前阶段\n验证只读导出。\n## 关键路径和命令\n- 验证命令：python -m pytest -q\n"
+        "<!-- /owner:model -->\n", encoding="utf-8")
+    return home, vault
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+def test_cli_export_is_cold_and_writes_plain_utf8(cold_export, tmp_path, capsys, monkeypatch, to_file):
+    home, vault = cold_export
+    monkeypatch.setattr(cli, "_service", lambda *_args: pytest.fail("export must not initialize a service"))
+    before = {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    output = tmp_path / "AGENTS.md"
+    arguments = ["export", "--project", "导出项目", "--home", str(home)]
+    if to_file:
+        arguments += ["--out", str(output)]
+    assert cli.main(arguments) == 0
+    printed = capsys.readouterr().out
+    if to_file:
+        assert json.loads(printed)["path"] == str(output)
+        assert not output.read_bytes().startswith(b"\xef\xbb\xbf")
+        text = output.read_text(encoding="utf-8")
+    else:
+        text = printed
+        assert not text.startswith(("{", '"'))
+    assert "Tbrain 和 session_id" in text
+    assert "UTF-8 无 BOM" in text
+    assert "owner:" not in text
+    assert {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+    assert {path.name for path in home.iterdir()} == {"settings.json"}
+
+
+@pytest.mark.parametrize("case,message", [("no-settings", "知识库路径"), ("missing-project", "项目"),
+                                         ("vault-output", "知识库外")])
+def test_cli_export_rejects_missing_input_and_vault_output(cold_export, capsys, case, message):
+    home, vault = cold_export
+    card = vault / "项目" / "导出项目" / "项目提示词.md"
+    before = card.read_bytes()
+    arguments = ["export", "--project", "导出项目", "--home", str(home)]
+    if case == "no-settings":
+        (home / "settings.json").write_text("{}", encoding="utf-8")
+    elif case == "missing-project":
+        arguments[2] = "不存在的项目"
+    else:
+        arguments += ["--out", str(card)]
+    assert cli.main(arguments) == 1
+    assert message in json.loads(capsys.readouterr().out)["error"]
+    assert card.read_bytes() == before

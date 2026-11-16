@@ -180,8 +180,10 @@ def test_scenario6_without_maintenance_round_basic_io_still_works(brain):
         {"op": "append", "section": "done", "items": [{"text": "写入一条完成项"}]},
     ])
     assert saved["ok"] is True
-    found = brain.service.search("基础读写", "claude-code:sc6-session-1")
+    claude.first_message("sc6-session-2", work, "读取前一个会话的记录")
+    found = brain.service.search("基础读写", "claude-code:sc6-session-2")
     assert found["ok"] and found["results"]
+    assert any(item.get("session_id") == "claude-code:sc6-session-1" for item in found["results"])
     summary, path = _summary_of(brain, "claude-code:sc6-session-1")
     assert summary.items("已完成")[0]["text"] == "写入一条完成项"
     assert "## 已完成" in path.read_text(encoding="utf-8")

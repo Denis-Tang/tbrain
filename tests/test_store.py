@@ -429,6 +429,34 @@ def test_project_prompt_preserves_user_area_and_protects_hand_edited_model(store
     assert store.block_state(path, "model")["owner"] == "user"
 
 
+@pytest.mark.parametrize("location", ["outside", "custom_section"])
+def test_project_prompt_update_preserves_unmanaged_content(store: Store, location):
+    store.save_project("P1", [r"D:\p1"])
+    store.save_project_prompt("P1", {"最终目标": "原目标", "当前阶段": "原阶段"})
+    path = store.project_prompt_path("P1")
+    text = path.read_text(encoding="utf-8")
+    if location == "outside":
+        text = text.replace("<!-- owner:user -->", "区块前的笔记\n\n<!-- owner:user -->")
+        text = text.replace("<!-- owner:model -->", "区块间的笔记\n\n<!-- owner:model -->")
+        text += "\n区块后的笔记\n"
+        retained = ["区块前的笔记", "区块间的笔记", "区块后的笔记"]
+    else:
+        note = "## 备注\n用户保留的第一行\n\n用户保留的第二行"
+        text = text.replace("## 当前阶段", note + "\n\n## 当前阶段")
+        retained = [note]
+    path.write_text(text, encoding="utf-8")
+
+    result = store.save_project_prompt("P1", {"当前阶段": "新阶段"})
+
+    assert result["rejected"] == []
+    after = path.read_text(encoding="utf-8")
+    assert all(part in after for part in retained)
+    assert store.project_prompt("P1")["sections"]["当前阶段"] == "新阶段"
+    assert after.index(retained[0]) < after.index("## 当前阶段")
+    if location == "outside":
+        assert after.index(retained[-1]) > after.index("<!-- /owner:model -->")
+
+
 # ---------------------------------------------------------------------------
 # 公共池
 
@@ -515,7 +543,7 @@ def test_attachments_are_read_only_and_filtered_by_project(store: Store):
     )
     before = card.read_bytes()
     all_cards = store.attachments()
-    assert {item["name"] for item in all_cards} == {"项目技能", "索引技能"}
+    assert {item["name"] for item in all_cards} == {"索引技能"}
     p1_cards = store.attachments("P1")
     assert {item["name"] for item in p1_cards} == {"索引技能", "项目技能"}
     p2_cards = store.attachments("P2")

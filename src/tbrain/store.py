@@ -15,23 +15,21 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import time
 import uuid
-import threading
-from contextlib import contextmanager
 from functools import wraps
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
 import yaml
+from filelock import FileLock
 
 from . import clock, naming
 from .index import Index
-
-_WRITE_LOCK = threading.RLock()
-_WRITE_LOCAL = threading.local()
 
 
 def serialized(method):
@@ -226,6 +224,12 @@ def block_fingerprint(text: str) -> str:
     return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
 
 
+def public_card_sha(text: str) -> str:
+    data, body = split_front_matter(text)
+    data.pop('model_fingerprint', None)
+    return block_fingerprint(render_note(data, body))[:8]
+
+
 def _wikilink_pattern(name: str) -> re.Pattern[str]:
     return re.compile(r"\[\[" + re.escape(name) + r"(?=[#|\]])")
 
@@ -255,38 +259,13 @@ class Store:
         self.app_home = Path(app_home)
         self.index = Index(self.app_home, now_fn=now_fn)
         self._now_fn = now_fn
+        self._write_lock = FileLock((self.vault / INTERNAL_DIR / 'write.lock').resolve(),
+                                    timeout=10, is_singleton=True, preserve_lock_file=True)
 
-    @contextmanager
     def write_lock(self):
         """跨宿主串行化 Markdown 读改写；同线程的嵌套保存复用锁。"""
-        path = (self.vault / INTERNAL_DIR / 'write.lock').resolve()
-        with _WRITE_LOCK:
-            held = getattr(_WRITE_LOCAL, 'held', set())
-            if path in held:
-                yield
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open('a+b') as stream:
-                if not path.stat().st_size:
-                    stream.write(b'\0')
-                    stream.flush()
-                stream.seek(0)
-                if os.name == 'nt':
-                    import msvcrt
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-                _WRITE_LOCAL.held = held | {path}
-                try:
-                    yield
-                finally:
-                    _WRITE_LOCAL.held = held
-                    stream.seek(0)
-                    if os.name == 'nt':
-                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        Path(self._write_lock.lock_file).parent.mkdir(parents=True, exist_ok=True)
+        return self._write_lock
 
     # -- 时间 ---------------------------------------------------------------
 
@@ -606,6 +585,8 @@ class Store:
         if not card.exists():
             return None
         data, _body = split_front_matter(self.read_text(card))
+        if str(data.get('name') or card.parent.name).strip() != value:
+            return None
         return self._project_payload(value, data, card)
 
     def _project_payload(self, name: str, data: dict, card: Path) -> dict:
@@ -621,6 +602,8 @@ class Store:
             "paths": paths,
             "parent": str(data.get("parent") or ""),
             "allow_child": bool(data.get("allow_child", False)),
+            "read_standalone": data.get("read_standalone") is True,
+            "project_id": str(data.get("project_id") or "") or None,
             "created_at": str(data.get("created_at") or ""),
             "session_count": len(self._index_rows(self.project_index_path(name))),
             "path": str(card),
@@ -630,6 +613,7 @@ class Store:
             "worktree_branch": str(data.get("worktree_branch") or ""),
             "worktree_status": str(data.get("worktree_status") or ""),
             "worktree_error": str(data.get("worktree_error") or ""),
+            "worktree_limitation": str(data.get("worktree_limitation") or ""),
             "check_config": str(data.get("check_config") or ""),
             "completion_criteria": str(data.get("completion_criteria") or ""),
             "completion_fields": [str(item) for item in fields if str(item).strip()],
@@ -644,45 +628,132 @@ class Store:
         rename_from: str = "",
     ) -> dict:
         target_name = self._validate_project_name(name)
-        rename_from = str(rename_from or "").strip()
-        if rename_from and rename_from != target_name:
-            self._rename_project(rename_from, target_name)
-            _ = self.project(target_name)  # 重新读取改名后的卡片（若有）
-        path_values = [self._normalize_path(item) for item in (paths or []) if str(item).strip()]
-        parent_name = str(parent or "").strip()
-        if parent_name and parent_name == target_name:
-            raise ValueError("父项目不能是项目自身")
-        if parent_name and self.project(parent_name) is None:
-            raise ValueError(f"父项目不存在：{parent_name}")
-        ancestors = {target_name}
-        ancestor = parent_name
-        while ancestor:
-            if ancestor in ancestors:
-                raise ValueError('父项目关系不能形成循环')
-            ancestors.add(ancestor)
-            ancestor = (self.project(ancestor) or {}).get('parent', '')
-        card = self.project_card_path(target_name)
-        existing_data, existing_body = split_front_matter(self.read_text(card))
-        created_at = str(existing_data.get("created_at") or "") or self._stamp()
-        data = {
-            "name": target_name,
-            "paths": path_values,
-            "parent": parent_name,
-            "allow_child": bool(allow_child),
-            "created_at": created_at,
-        }
-        self.write_text(card, render_note(data, existing_body))
-        self._ensure_project_files(target_name)
-        return self.project(target_name) or {
-            "name": target_name,
-            "paths": path_values,
-            "parent": parent_name,
-            "allow_child": bool(allow_child),
-            "created_at": created_at,
-            "session_count": 0,
-            "path": str(card),
-        }
+        with self.write_lock():
+            if self.project_card_path(target_name).exists() and self.project(target_name) is None:
+                raise ValueError(f'项目目录已属于其他项目：{self.project_dir(target_name)}')
+            rename_from = str(rename_from or "").strip()
+            if rename_from and rename_from != target_name:
+                if self.project(rename_from) is None:
+                    raise ValueError(f'项目不存在：{rename_from}')
+                self._rename_project(rename_from, target_name)
+            path_values = [self._normalize_path(item) for item in (paths or []) if str(item).strip()]
+            parent_name = str(parent or "").strip()
+            if parent_name and parent_name == target_name:
+                raise ValueError("父项目不能是项目自身")
+            if parent_name and self.project(parent_name) is None:
+                raise ValueError(f"父项目不存在：{parent_name}")
+            ancestors = {target_name}
+            ancestor = parent_name
+            while ancestor:
+                if ancestor in ancestors:
+                    raise ValueError('父项目关系不能形成循环')
+                ancestors.add(ancestor)
+                ancestor = (self.project(ancestor) or {}).get('parent', '')
+            card = self.project_card_path(target_name)
+            is_new = not card.exists()
+            existing_data, existing_body = split_front_matter(self.read_text(card))
+            created_at = str(existing_data.get("created_at") or "") or self._stamp()
+            data = {
+                **existing_data,
+                "name": target_name,
+                "paths": path_values,
+                "parent": parent_name,
+                "allow_child": bool(allow_child),
+                "created_at": created_at,
+            }
+            if is_new:
+                data["project_id"] = 'p-' + secrets.token_hex(6)
+            self.write_text(card, render_note(data, existing_body))
+            self._ensure_project_files(target_name)
+            return self.project(target_name)
 
+    @serialized
+    def set_project_read_standalone(self, name: str, enabled: bool) -> dict:
+        """Only controls active access to non-project sessions; public knowledge is unchanged."""
+        if not isinstance(enabled, bool):
+            raise ValueError('read_standalone 必须是布尔值')
+        project = self.project(name)
+        if project is None:
+            raise ValueError(f'项目不存在：{name}')
+        card = Path(project['path'])
+        data, body = split_front_matter(self.read_text(card))
+        data['read_standalone'] = enabled
+        self.write_text(card, render_note(data, body))
+        return self.project(name)
+
+    def project_ids(self, *, apply: bool = False, backup_dir: str = '', assignments=None) -> dict:
+        """Preview missing IDs; apply the same explicit assignments after a directory backup."""
+        requested = {}
+        if apply:
+            if not backup_dir or not isinstance(assignments, list):
+                raise ValueError('应用项目 ID 需要预览清单和备份目录')
+            for item in assignments:
+                if not isinstance(item, dict):
+                    raise ValueError('ID 清单条目必须包含 name 和 project_id')
+                name = str(item.get('name') or '').strip()
+                project_id = str(item.get('project_id') or '')
+                if not name or not re.fullmatch(r'p-[0-9a-f]{12}', project_id) or name in requested:
+                    raise ValueError('ID 清单包含无效或重复条目')
+                requested[name] = project_id
+            if len(set(requested.values())) != len(requested):
+                raise ValueError('ID 清单不能给不同项目分配相同 project_id')
+            owners = {project['project_id']: project['name'] for project in self.projects() if project['project_id']}
+            if any(value in owners and owners[value] != name for name, value in requested.items()):
+                raise ValueError('ID 清单中的 project_id 已属于其他项目')
+        with self.write_lock() if apply else nullcontext():
+            projects, planned, edits = [], [], []
+            known = set()
+            for project in self.projects():
+                name, current = project['name'], project['project_id']
+                known.add(name)
+                if current:
+                    if name in requested and requested[name] != current:
+                        raise ValueError('不能改写项目已有的 project_id')
+                    projects.append({'name': name, 'project_id': current, 'existing': True, 'source': 'card'})
+                    continue
+                recovered = set()
+                for filename in ('地图.md', '决策日志.md'):
+                    data, _ = split_front_matter(self.read_text(self.project_dir(name) / filename))
+                    value = str(data.get('project_id') or '')
+                    if re.fullmatch(r'p-[0-9a-f]{12}', value):
+                        recovered.add(value)
+                if len(recovered) > 1:
+                    raise ValueError('项目地图与决策日志的 project_id 不一致')
+                prior_id = next(iter(recovered), '')
+                value = requested.get(name) if apply else prior_id or 'p-' + secrets.token_hex(6)
+                if prior_id and value and value != prior_id:
+                    raise ValueError('预览清单与既有项目产物的 project_id 不一致')
+                projects.append({'name': name, 'project_id': value, 'existing': False,
+                                 'source': 'recovered' if prior_id else 'generated' if value else 'unassigned'})
+                if not value:
+                    continue
+                planned.append({'name': name, 'project_id': value})
+                if apply:
+                    path = Path(project['path'])
+                    raw = path.read_bytes()
+                    opening = re.match(rb'(?:\xef\xbb\xbf)?---[ \t]*(\r?\n)', raw)
+                    if opening is None or not split_front_matter(raw.decode('utf-8-sig'))[0]:
+                        raise ValueError('项目卡缺少有效的 YAML 文件头')
+                    line = f'project_id: {value}'.encode() + opening[1]
+                    edits.append((path, (raw[:opening.end()] + line + raw[opening.end():]).decode('utf-8')))
+            if requested.keys() - known:
+                raise ValueError('预览清单中有不存在的项目')
+            backup = ''
+            if apply and edits:
+                destination = Path(backup_dir).expanduser().resolve()
+                if destination.is_relative_to(self.vault.resolve()):
+                    raise ValueError('备份目录不能位于知识库内')
+                backup_path = destination / PROJECTS_DIR
+                shutil.copytree(self.vault / PROJECTS_DIR, backup_path)
+                backup = str(backup_path)
+                for path, text in edits:
+                    self.write_text(path, text)
+                for project in projects:
+                    project['existing'] = bool(project['project_id'])
+            return {'ok': True, 'projects': projects, 'assignments': planned, 'applied': apply,
+                    'updated': len(edits), 'backup': backup}
+
+    @serialized
     def record_execution(self, name: str, setup: dict) -> dict:
         """Record the worktree and write the completion-criteria template once."""
         value = str(name or "").strip()
@@ -698,6 +769,11 @@ class Store:
             data["worktree_error"] = error
         else:
             data.pop("worktree_error", None)
+        limitation = str((setup or {}).get("worktree_limitation") or "").strip()
+        if limitation:
+            data["worktree_limitation"] = limitation
+        else:
+            data.pop("worktree_limitation", None)
         data["completion_criteria"] = COMPLETION_FILE
         data["completion_fields"] = list(COMPLETION_FIELDS)
         self.write_text(card, render_note(data, body))
@@ -723,6 +799,7 @@ class Store:
                 if not index_path.exists():
                     raise
 
+    @serialized
     def delete_project(self, name: str) -> dict:
         value = str(name or "").strip()
         project = self.project(value)
@@ -759,6 +836,7 @@ class Store:
             "sessions_kept": sessions_kept,
         }
 
+    @serialized
     def _rename_project(self, old_name: str, new_name: str) -> dict:
         old = str(old_name or "").strip()
         new = self._validate_project_name(new_name)
@@ -781,11 +859,22 @@ class Store:
             if new_sessions.exists():
                 raise ValueError(f"目标项目会话目录已存在：{new_sessions}")
             shutil.move(str(old_sessions), str(new_sessions))
-            for session_file in sorted(new_sessions.rglob("*.md")):
-                self._set_front_matter_field(session_file, "project", new)
-                moved_sessions += 1
             rows = self._index_rows(self.project_index_path(new))
             self.write_project_index(new, rows)
+        for session_file in sorted((self.vault / SESSIONS_DIR).rglob('*.md')):
+            data, _ = split_front_matter(self.read_text(session_file))
+            if data.get('project') == old:
+                self._set_front_matter_field(session_file, 'project', new)
+                moved_sessions += 1
+        for attachment in sorted((self.vault / ATTACHMENTS_DIR).rglob('*.md')):
+            data, body = split_front_matter(self.read_text(attachment))
+            projects = data.get('projects')
+            if isinstance(projects, list) and old in projects:
+                data['projects'] = [new if item == old else item for item in projects]
+                self.write_text(attachment, render_note(data, body))
+            elif projects == old:
+                data['projects'] = new
+                self.write_text(attachment, render_note(data, body))
         # 子项目改父项目名
         for child in self.projects():
             if child.get("parent") == old:
@@ -799,6 +888,8 @@ class Store:
         value = str(name or "").strip()
         if not value:
             raise ValueError("项目名不能为空")
+        if value == '__standalone__':
+            raise ValueError('项目名不能使用保留名 __standalone__')
         if len(value) > 80:
             raise ValueError("项目名不能超过 80 个字符")
         if value in (".", ".."):
@@ -824,7 +915,10 @@ class Store:
         best_name = ""
         best_length = -1
         for project in self.projects():
-            for path in project.get("paths") or []:
+            candidates = list(project.get("paths") or [])
+            if project.get("worktree_status") == "worktree" and project.get("worktree"):
+                candidates.append(project["worktree"])
+            for path in candidates:
                 candidate = _path_key(path)
                 if not candidate:
                     continue
@@ -852,48 +946,80 @@ class Store:
         return {"sections": sections, "user": user}
 
     @serialized
-    def save_project_prompt(self, name: str, sections: dict, *, summary=None) -> dict:
-        value = str(name or '').strip()
-        if self.project(value) is None:
-            raise ValueError(f'项目不存在：{value}')
-        accepted, rejected, warnings = self._validate_prompt_sections(value, sections, summary)
-        path = self.project_prompt_path(value)
-        original = self.read_text(path)
-        front, _ = split_front_matter(original)
-        blocks = parse_blocks(original)
-        current = self.project_prompt(value)
-        old_sections = current['sections']
-        fingerprints = front.get('model_fingerprints') or {}
-        protected = set(front.get('user_owned_sections') or [])
-        model = blocks.get('model', {})
-        state = self.index.block_state(self._rel(path), 'model') or {}
-        for section, content in old_sections.items():
-            if section in fingerprints and fingerprints[section] != block_fingerprint(content):
-                protected.add(section)
-            elif not fingerprints and content and (model.get('owner') == 'user' or
-                    state.get('fingerprint') != block_fingerprint(model.get('body', ''))):
-                protected.add(section)
-        pending = ''
-        for section in list(accepted):
-            if section in protected:
-                proposed = accepted.pop(section)
-                pending = self.record_conflict(value, f'{value} 项目提示词「{section}」已被用户修改，待用户确认', proposed)
-                rejected.append({'section': section, 'reason': pending, 'example': _SECTION_EXAMPLES[section]})
-        merged = {**old_sections, **accepted}
-        front['user_owned_sections'] = sorted(protected)
-        front['model_fingerprints'] = {section: fingerprints.get(section, block_fingerprint(old_sections[section]))
-                                      if section in protected else block_fingerprint(content)
-                                      for section, content in merged.items()}
-        blocks['model'] = {'owner': 'model', 'body': _render_sections(merged)}
-        if accepted or protected:
-            self.write_text(path, render_note(front, render_blocks(blocks)))
-            self.index.set_block_state(self._rel(path), 'model', 'user' if protected else 'model',
-                                       block_fingerprint(blocks['model']['body']))
-        changed = [section for section in accepted if accepted[section] != old_sections[section]]
-        if changed:
-            self.append_changelog(self.project_changelog_path(value), '替换项目提示词：' + '、'.join(changed),
-                                  '\n\n'.join(f'## {section}\n{old_sections[section]}' for section in changed))
-        return {'written': accepted, 'rejected': rejected, 'warnings': warnings, 'pending_confirm': pending}
+    def save_project_prompt(self, name: str, sections: dict, *, summary=None,
+                            base_sha: dict | None = None, session_id: str = '') -> dict:
+        results = {section: 'rejected' for section in sections}
+        try:
+            value = str(name or '').strip()
+            if self.project(value) is None:
+                raise ValueError(f'项目不存在：{value}')
+            accepted, rejected, warnings = self._validate_prompt_sections(value, sections, summary)
+            path = self.project_prompt_path(value)
+            original = self.read_text(path)
+            front, original_body = split_front_matter(original)
+            blocks = parse_blocks(original)
+            current = self.project_prompt(value)
+            old_sections = current['sections']
+            fingerprints = front.get('model_fingerprints') or {}
+            protected = set(front.get('user_owned_sections') or [])
+            model = blocks.get('model', {})
+            model_body = model.get('body', '') if blocks else original_body
+            existing_sections = {re.sub(r'\s*〔sha:[^〕]*〕\s*$', '', line[3:].strip())
+                                 for line in model_body.splitlines() if line.startswith('## ')}
+            state = self.index.block_state(self._rel(path), 'model') or {}
+            for section, content in old_sections.items():
+                if section in fingerprints and fingerprints[section] != block_fingerprint(content):
+                    protected.add(section)
+                elif not fingerprints and content and (model.get('owner') == 'user' or
+                        state.get('fingerprint') != block_fingerprint(model.get('body', ''))):
+                    protected.add(section)
+            pending = ''
+            for section in list(accepted):
+                if section in protected:
+                    proposed = accepted.pop(section)
+                    pending = self.record_conflict(value, f'{value} 项目提示词「{section}」已被用户修改，待用户确认', proposed)
+                    rejected.append({'section': section, 'reason': pending, 'example': _SECTION_EXAMPLES[section]})
+                elif base_sha is not None and section in base_sha and section in existing_sections:
+                    base = base_sha[section]
+                    head = {'sha': block_fingerprint(old_sections[section])[:8], 'text': old_sections[section]}
+                    if not base or base[:8] != head['sha']:
+                        proposed = accepted.pop(section)
+                        conflict = bool(base)
+                        reason = '写入冲突' if conflict else '缺少 base_sha'
+                        if conflict:
+                            pending = self.record_conflict(value, f'写入冲突：{value} 项目提示词「{section}」',
+                                                           f'当前生效版本：\n{head["text"]}\n\n己方草稿：\n{proposed}')
+                            results[section] = 'conflict'
+                        rejected.append({'section': section, 'reason': reason, 'conflict': conflict,
+                                         'base': base, 'head': head})
+            merged = {**old_sections, **accepted}
+            front['user_owned_sections'] = sorted(protected)
+            front['model_fingerprints'] = {section: fingerprints.get(section, block_fingerprint(old_sections[section]))
+                                          if section in protected else block_fingerprint(content)
+                                          for section, content in merged.items()}
+            model_body = _replace_sections(model_body, accepted)
+            if accepted or protected:
+                rendered_model = render_blocks({'model': {'owner': 'model', 'body': model_body}}).rstrip('\n')
+                if 'model' in blocks:
+                    body = _BLOCK_RE.sub(lambda match: rendered_model if match['owner'] == 'model' else match[0],
+                                         original_body)
+                elif blocks:
+                    body = original_body.rstrip() + '\n\n' + rendered_model
+                else:
+                    body = rendered_model
+                self.write_text(path, render_note(front, body))
+                self.index.set_block_state(self._rel(path), 'model', 'user' if protected else 'model',
+                                           block_fingerprint(model_body))
+            changed = [section for section in accepted if accepted[section] != old_sections[section]]
+            if changed:
+                self.append_changelog(self.project_changelog_path(value), '替换项目提示词：' + '、'.join(changed),
+                                      '\n\n'.join(f'## {section}\n{old_sections[section]}' for section in changed))
+            results.update({section: 'ok' for section in accepted})
+            return {'written': accepted, 'rejected': rejected, 'warnings': warnings, 'pending_confirm': pending}
+        finally:
+            for section, result in results.items():
+                self._log_w3_write(session_id or getattr(summary, 'session_id', ''), f'{name}/{section}',
+                                   bool(base_sha and base_sha.get(section)), result)
 
     def _validate_prompt_sections(self, project_name: str, sections: dict, summary=None):
         from . import prompt
@@ -910,19 +1036,13 @@ class Store:
         return result['written'], result['rejected'], result['warnings']
 
     def _prompt_resolver(self, project_name: str, summary=None):
-        from . import handoff
-        def usable(source, reference):
-            if reference.startswith('K'):
-                return reference in {item['id'] for item in source.active_decisions()}
-            return source.has_reference(reference)
-        def resolve(session_name: str, reference: str) -> bool:
-            if not session_name or (summary is not None and session_name == summary.name):
-                return summary is not None and usable(summary, reference)
-            matches = [row for row in self.index.sessions() if row['name'] == session_name]
-            if len(matches) != 1:
-                return False
-            return usable(handoff.parse(self.read_text(self.vault / matches[0]['path'])), reference)
-        return resolve
+        resolve = _rule_resolver(self.vault, project_name, summary, rows=self.index.sessions())
+        return lambda name, reference: resolve(name, reference)['state'] == 'active'
+
+    def classify_project_rules(self, project_name: str) -> dict[str, list[str]]:
+        from .prompt import classify_rules
+        resolve = _rule_resolver(self.vault, project_name, rows=self.index.sessions())
+        return classify_rules(self.project_prompt(project_name)['sections']['硬规则'], resolve)
 
     def record_conflict(self, project: str, title: str, proposed: str) -> str:
         path = (self.project_dir(project) if project else self.vault / PUBLIC_DIR) / '待用户确认.md'
@@ -938,7 +1058,8 @@ class Store:
 
     # -- 公共池 ------------------------------------------------------------
 
-    def handoff_items(self, project_name: str | list[str], limit: int = 3) -> list[dict]:
+    def handoff_items(self, project_name: str | list[str], limit: int = 3, *,
+                      decision_projects: list[str] | None = None) -> list[dict]:
         """有效历史决定，供 bootstrap 与 CLI 交接；会话结束不代表决定失效。
 
         传入项目列表时用于项目树（根项目 + 子项目），每条结果带 ``project``，
@@ -947,10 +1068,23 @@ class Store:
         from . import handoff
 
         limit = max(1, min(int(limit or 3), 10))
+        projects = decision_projects if decision_projects is not None else (
+            [project_name] if isinstance(project_name, str) else project_name)
+        decisions = [entry for project in projects for entry in reversed(self.project_decisions(project))
+                     if entry['active']]
+        decisions.sort(key=lambda entry: entry['at'], reverse=True)
+        items: list[dict] = []
+        for decision in decisions[:limit]:
+            row = self.index.session(decision.get('session_id', '')) or {}
+            items.append({
+                'session': row.get('name') or decision.get('session_id', ''),
+                'id': decision['id'], 'text': decision['text'], 'at': decision['at'],
+                'source': f"[[{Path(decision['path']).with_suffix('').as_posix()}]]#{decision['id']}",
+                'project': decision['project'], 'verified': False, 'git_head': '',
+            })
         rows = self.index.sessions(project_name)
         rows.sort(key=lambda row: (str(row.get("updated_at") or ""), float(row.get("file_mtime") or 0)),
                   reverse=True)
-        items: list[dict] = []
         for row in rows:
             if len(items) >= limit:
                 break
@@ -993,10 +1127,12 @@ class Store:
         if not base.exists():
             return []
         kinds = [str(kind)] if kind else sorted(
-            [child.name for child in base.iterdir() if child.is_dir() and child.name != ARCHIVE_DIR]
+            [child.name for child in base.iterdir() if child.is_dir() and child.name not in {ARCHIVE_DIR, '冲突'}]
         )
         cards: list[dict] = []
         for kind_name in kinds:
+            if kind_name == '冲突':
+                continue
             directory = base / kind_name
             if not directory.is_dir():
                 continue
@@ -1017,133 +1153,130 @@ class Store:
         return cards
 
     @serialized
+    def _log_w3_write(self, session_id: str, target: str, has_base: bool, result: str) -> None:
+        try:
+            with (self.app_home / 'w3-writes.jsonl').open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps({'at': self._stamp(), 'session_id': session_id, 'target': target,
+                                         'has_base': has_base, 'result': result}, ensure_ascii=False) + '\n')
+        except OSError:
+            pass
+
+    @serialized
     def save_public_card(
         self,
         kind: str,
         name: str,
         meta: dict | None = None,
-        source_session: str = "",
+        source_session: str = '',
+        *,
+        base_sha: str | None = None,
+        session_id: str = '',
     ) -> dict:
-        """同对象（kind + name）新卡生效；旧卡标 ``已被取代`` 移入 ``归档/``。"""
-        kind_value = str(kind or "").strip()
-        if kind_value not in PUBLIC_KINDS:
-            raise ValueError("公共池类型必须是：" + "、".join(PUBLIC_KINDS))
-        name_value = str(name or "").strip()
-        if not name_value:
-            raise ValueError("公共池卡片名称不能为空")
+        """同对象新卡生效；旧卡先写归档副本，现行路径始终存在。"""
+        kind_value = str(kind or '').strip()
+        name_value = str(name or '').strip()
         meta = dict(meta or {})
-        stamp = self._stamp()
-        replaced: dict | None = None
-        archived_path = ""
-        existing = [
-            card
-            for card in self.public_cards(kind_value)
-            if str(card.get("name") or "").strip().casefold() == name_value.casefold()
-            or str(card.get("id") or "") == f"{kind_value}-{name_value}"
-        ]
-        if existing:
-            old = existing[0]
-            old_path = Path(str(old["path"]))
-            old_data, old_body = split_front_matter(self.read_text(old_path))
-            fingerprint = old_data.pop("model_fingerprint", "")
-            if old_data.get("owner") == "user" or fingerprint != block_fingerprint(render_note(old_data, old_body)):
-                message = self.record_conflict("", f"公共池 {kind_value}/{name_value} 已被用户修改或缺少原写入指纹，待用户确认",
-                                               render_note(meta, str(meta.get("body") or "")))
-                raise ValueError(message)
-            old_data["state"] = "已被取代"
-            old_data["updated_at"] = stamp
-            history = old_data.get("history") or []
-            if not isinstance(history, list):
-                history = []
-            history.append(
-                {
-                    "at": stamp,
-                    "action": "已被取代",
-                    "note": f"新卡 {kind_value}-{name_value} 生效",
-                }
-            )
-            old_data["history"] = history
-            archive_dir = self._public_kind_dir(kind_value) / ARCHIVE_DIR
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            archive_path = archive_dir / old_path.name
-            suffix = 2
-            while archive_path.exists():
-                archive_path = archive_dir / f"{old_path.stem}-{suffix}{old_path.suffix}"
-                suffix += 1
-            os.replace(str(old_path), str(archive_path))
-            self.write_text(archive_path, render_note(old_data, old_body))
-            replaced = {"id": str(old.get("id") or ""), "path": str(old_path)}
-            archived_path = str(archive_path)
-            self.index.upsert_public(
-                {
-                    "id": str(old.get("id") or f"{kind_value}-{name_value}"),
-                    "kind": kind_value,
-                    "name": str(old.get("name") or name_value),
-                    "state": "已被取代",
-                    "path": str(archive_path),
-                    "updated_at": stamp,
-                },
-                old_body,
-            )
-        card_path = self._public_card_path(kind_value, name_value)
-        if card_path.exists():
-            suffix = 2
-            while card_path.exists():
-                card_path = self._public_kind_dir(kind_value) / (
-                    f"{naming.sanitize_filename(name_value)}-{suffix}.md"
-                )
-                suffix += 1
-        created_at = str(meta.get("created_at") or "") or str((existing[0] if existing else {}).get("created_at") or "") or stamp
-        data: dict[str, Any] = {
-            "id": f"{kind_value}-{name_value}",
-            "kind": kind_value,
-            "name": name_value,
-            "version": str(meta.get("version") or ""),
-            "install": str(meta.get("install") or ""),
-            "package_id": str(meta.get("package_id") or ""),
-            "location": str(meta.get("location") or ""),
-            "scope": str(meta.get("scope") or ""),
-            "uninstall": str(meta.get("uninstall") or ""),
-            "verify": str(meta.get("verify") or ""),
-            "source_session": str(meta.get("source_session") or source_session or ""),
-            "created_at": created_at,
-            "updated_at": stamp,
-            "state": "生效",
-            "history": [
-                {
-                    "at": stamp,
-                    "action": "创建" if not existing else "取代旧卡",
-                    "note": str(meta.get("note") or ""),
-                }
-            ],
-        }
-        for key, value in meta.items():
-            if key in ("body", "note") or key in data or key in PUBLIC_YAML_FIELDS:
-                continue
-            data[key] = value
-        body = str(meta.get("body") or "")
-        data["owner"] = "model"
-        data.pop("model_fingerprint", None)
-        data["model_fingerprint"] = block_fingerprint(render_note(data, body))
-        self.write_text(card_path, render_note(data, body))
-        self.index.upsert_public(
-            {
-                "id": data["id"],
-                "kind": kind_value,
-                "name": name_value,
-                "state": "生效",
-                "path": str(card_path),
-                "updated_at": stamp,
-            },
-            body,
-        )
-        return {
-            "id": str(data["id"]),
-            "path": str(card_path),
-            "state": "生效",
-            "replaced": replaced,
-            "archived_path": archived_path,
-        }
+        base_sha = meta.pop('base_sha', base_sha)
+        result = 'rejected'
+        is_replacement = False
+        try:
+            if kind_value not in PUBLIC_KINDS:
+                raise ValueError('公共池类型必须是：' + '、'.join(PUBLIC_KINDS))
+            if not name_value:
+                raise ValueError('公共池卡片名称不能为空')
+            stamp = self._stamp()
+            replaced = None
+            archived_path = ''
+            existing = [card for card in self.public_cards(kind_value)
+                        if str(card.get('name') or '').strip().casefold() == name_value.casefold()
+                        or str(card.get('id') or '') == f'{kind_value}-{name_value}']
+            if existing:
+                is_replacement = True
+                old = existing[0]
+                old_path = Path(old['path'])
+                old_text = self.read_text(old_path)
+                old_data, old_body = split_front_matter(old_text)
+                fingerprint = old_data.pop('model_fingerprint', '')
+                current_fingerprint = block_fingerprint(render_note(old_data, old_body))
+                if old_data.get('owner') == 'user' or fingerprint != current_fingerprint:
+                    message = self.record_conflict('', f'公共池 {kind_value}/{name_value} 已被用户修改或缺少原写入指纹，待用户确认',
+                                                   render_note(meta, str(meta.get('body') or '')))
+                    raise ValueError(message)
+                if base_sha is not None and (not base_sha or base_sha[:8] != current_fingerprint[:8]):
+                    conflict = bool(base_sha)
+                    rejection = {'id': str(old['id']), 'path': str(old_path), 'base': base_sha,
+                                 'reason': '写入冲突' if conflict else '缺少 base_sha', 'conflict': conflict,
+                                 'head': {'sha': current_fingerprint[:8], 'text': old_text}}
+                    if conflict:
+                        conflict_dir = self.vault / PUBLIC_DIR / '冲突'
+                        conflict_name = naming.sanitize_filename(f'{stamp}-{kind_value}-{name_value}')
+                        conflict_path = conflict_dir / f'{conflict_name}.md'
+                        suffix = 2
+                        while conflict_path.exists():
+                            conflict_path = conflict_dir / f'{conflict_name}-{suffix}.md'
+                            suffix += 1
+                        draft = render_note({key: value for key, value in meta.items() if key != 'body'},
+                                            str(meta.get('body') or ''))
+                        self.write_text(conflict_path, f'# 写入冲突：{kind_value}/{name_value}\n\n'
+                                        f'## 当前生效版本\n\n{old_text}\n\n## 己方草稿\n\n{draft}')
+                        rejection['conflict_path'] = str(conflict_path)
+                        result = 'conflict'
+                    return rejection
+                old_data['state'] = '已被取代'
+                old_data['updated_at'] = stamp
+                history = old_data.get('history') or []
+                if not isinstance(history, list):
+                    history = []
+                history.append({'at': stamp, 'action': '已被取代', 'note': f'新卡 {kind_value}-{name_value} 生效'})
+                old_data['history'] = history
+                archive_dir = self._public_kind_dir(kind_value) / ARCHIVE_DIR
+                archive_path = archive_dir / old_path.name
+                suffix = 2
+                while archive_path.exists():
+                    archive_path = archive_dir / f'{old_path.stem}-{suffix}{old_path.suffix}'
+                    suffix += 1
+                self.write_text(archive_path, render_note(old_data, old_body))
+                replaced = {'id': str(old.get('id') or ''), 'path': str(old_path)}
+                archived_path = str(archive_path)
+                card_path = old_path
+            else:
+                card_path = self._public_card_path(kind_value, name_value)
+                suffix = 2
+                while card_path.exists():
+                    card_path = self._public_kind_dir(kind_value) / f'{naming.sanitize_filename(name_value)}-{suffix}.md'
+                    suffix += 1
+            created_at = str(meta.get('created_at') or '') or str((existing[0] if existing else {}).get('created_at') or '') or stamp
+            data: dict[str, Any] = {
+                'id': f'{kind_value}-{name_value}', 'kind': kind_value, 'name': name_value,
+                'version': str(meta.get('version') or ''), 'install': str(meta.get('install') or ''),
+                'package_id': str(meta.get('package_id') or ''), 'location': str(meta.get('location') or ''),
+                'scope': str(meta.get('scope') or ''), 'uninstall': str(meta.get('uninstall') or ''),
+                'verify': str(meta.get('verify') or ''),
+                'source_session': str(meta.get('source_session') or source_session or ''),
+                'created_at': created_at, 'updated_at': stamp, 'state': '生效',
+                'history': [{'at': stamp, 'action': '创建' if not existing else '取代旧卡',
+                             'note': str(meta.get('note') or '')}],
+            }
+            for key, value in meta.items():
+                if key not in ('body', 'note') and key not in data and key not in PUBLIC_YAML_FIELDS:
+                    data[key] = value
+            body = str(meta.get('body') or '')
+            data['owner'] = 'model'
+            data.pop('model_fingerprint', None)
+            data['model_fingerprint'] = block_fingerprint(render_note(data, body))
+            self.write_text(card_path, render_note(data, body))
+            if replaced:
+                self.index.upsert_public({'id': str(old.get('id') or f'{kind_value}-{name_value}'),
+                                          'kind': kind_value, 'name': str(old.get('name') or name_value),
+                                          'state': '已被取代', 'path': archived_path, 'updated_at': stamp}, old_body)
+            self.index.upsert_public({'id': data['id'], 'kind': kind_value, 'name': name_value,
+                                      'state': '生效', 'path': str(card_path), 'updated_at': stamp}, body)
+            result = 'ok'
+            return {'id': str(data['id']), 'path': str(card_path), 'state': '生效',
+                    'replaced': replaced, 'archived_path': archived_path}
+        finally:
+            if is_replacement:
+                self._log_w3_write(session_id, f'公共池/{kind_value}/{name_value}', bool(base_sha), result)
 
     def public_l1(self, max_lines: int = 40) -> str:
         """公共池 L1 索引（程序生成，≤40 行）：每类一行 + 热点事实。"""
@@ -1185,6 +1318,14 @@ class Store:
         if not base.exists():
             return []
         project = str(project_name or "").strip()
+        identities = {project} if project else set()
+        if project:
+            record = self.project(project) or next(
+                (item for item in self.projects() if item.get('project_id') == project), None)
+            if record:
+                identities.add(record['name'])
+                if record.get('project_id'):
+                    identities.add(record['project_id'])
         cards: list[dict] = []
         for directory in sorted(child for child in base.iterdir() if child.is_dir()):
             for card_path in sorted(directory.glob("*.md")):
@@ -1194,7 +1335,7 @@ class Store:
                 if isinstance(projects, str):
                     projects = [projects]
                 projects = [str(item) for item in projects]
-                if project and projects and project not in projects:
+                if projects and not identities.intersection(projects):
                     continue
                 cards.append(
                     {
@@ -1267,6 +1408,7 @@ class Store:
 
     # -- 重命名与链接 -------------------------------------------------------
 
+    @serialized
     def rename_session(self, old_path: Path, new_name: str) -> Path:
         """移动文件 + 同步索引/其他总结中的 ``[[旧名]]`` + 更新 blocks 表 path。"""
         old = Path(old_path)
@@ -1283,13 +1425,20 @@ class Store:
         if new_path.exists():
             raise ValueError(f"同名会话已存在：{new_stem}")
         original_text = self.read_text(old)
-        project = str(split_front_matter(original_text)[0].get("project") or "")
+        front, body = split_front_matter(original_text)
+        project = str(front.get("project") or "")
+        aliases = front.get('aliases') or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        previous_name = str(front.get('name') or old_name)
+        front['aliases'] = list(dict.fromkeys([name for name in aliases if name != previous_name] + [previous_name]))[-10:]
+        front['name'] = new_stem
+        front['provisional_name'] = False
         os.replace(str(old), str(new_path))
         old_rel = self._rel(old)
         new_rel = self._rel(new_path)
         self.index.move_block_path(old_rel, new_rel)
-        # 只更新文件头的 name 字段，正文内容不动
-        self._set_front_matter_field(new_path, "name", new_stem)
+        self.write_text(new_path, render_note(front, body))
         targets: list[Path] = [new_path]
         sessions_root = self.vault / SESSIONS_DIR
         if sessions_root.exists():
@@ -1319,6 +1468,65 @@ class Store:
 
     # -- 变更日志 -----------------------------------------------------------
 
+    @serialized
+    def write_memory_map(self, project: str, text: str) -> Path:
+        if self.project(project) is None:
+            raise ValueError(f'项目不存在：{project}')
+        path = self.project_dir(project) / '地图.md'
+        self.write_text(path, text)
+        return path
+
+    def project_decisions(self, project: str) -> list[dict]:
+        path = self.project_dir(project) / '决策日志.md'
+        entries = []
+        for match in re.finditer(r'^## (DL-\d+) — ([^\n]+)\n(.*?)(?=^## DL-\d+ — |\Z)',
+                                 self.read_text(path), re.MULTILINE | re.DOTALL):
+            entry = {'id': match[1], 'at': match[2], 'project': project, 'path': self._rel(path)}
+            field = None
+            for line in match[3].splitlines():
+                value = re.match(r'^([a-z_]+): ?(.*)$', line)
+                if value:
+                    field = value[1]
+                    entry[field] = value[2]
+                elif field and line.startswith('  '):
+                    entry[field] += '\n' + line[2:]
+            entry['supersedes'] = str(entry.get('supersedes') or '').split(', ') if entry.get('supersedes') else []
+            entries.append(entry)
+        retired = {identifier for entry in entries for identifier in entry['supersedes']}
+        for entry in entries:
+            entry['active'] = entry['id'] not in retired
+        return entries
+
+    @serialized
+    def append_decision_log(self, project: str, text: str, why: str, decided_by: str,
+                            session_id: str, source: str = '', supersedes: list[str] | None = None) -> dict:
+        card = self.project(project)
+        if card is None:
+            raise ValueError(f'项目不存在：{project}')
+        text, why = str(text or '').strip(), str(why or '').strip()
+        if not text or len(text) + len(why) > 200:
+            raise ValueError('决策正文必填，与理由合计不超过 200 字；未说明理由时留空')
+        path = self.project_dir(project) / '决策日志.md'
+        existing = self.read_text(path)
+        supersedes = supersedes or []
+        identifiers = {entry['id'] for entry in self.project_decisions(project)}
+        if any(identifier not in identifiers for identifier in supersedes):
+            raise ValueError('supersedes 必须引用当前项目已有的 DL-xxxx 决定')
+        number = max((int(value) for value in re.findall(r'^## DL-(\d+) —', existing, re.MULTILINE)), default=0) + 1
+        entry = {'id': f'DL-{number:04d}', 'at': self._stamp(), 'session_id': session_id,
+                 'text': text, 'why': why, 'decided_by': decided_by}
+        if source:
+            entry['source'] = source
+        if supersedes:
+            entry['supersedes'] = ', '.join(supersedes)
+        if not existing.strip():
+            existing = render_note({'project_id': card.get('project_id') or '未回填'},
+                                   '# 决策日志\n\n程序只追加，用户不手改；删除文件后编号重新开始。')
+        fields = [f'{key}: ' + '\n  '.join(str(value).splitlines())
+                  for key, value in entry.items() if key not in ('id', 'at')]
+        self.write_text(path, existing.rstrip() + f'\n\n## {entry["id"]} — {entry["at"]}\n\n' + '\n'.join(fields) + '\n')
+        return {**entry, 'path': str(path)}
+
     def append_changelog(self, path: Path, title: str, old: str) -> None:
         """追加一条变更记录（含旧内容，便于还原）；整体仍走原子写。"""
         path = Path(path)
@@ -1341,6 +1549,158 @@ class Store:
 # 模块级辅助
 
 
+def _rule_resolver(vault: Path, project: str, summary=None, *, rows=None):
+    from . import handoff
+    vault = Path(vault).resolve()
+    parsed = {}
+    if rows is None:
+        rows = []
+        for path in sorted((vault / SESSIONS_DIR).rglob('*.md')):
+            source = handoff.parse(path.read_text(encoding='utf-8-sig'))
+            if source.session_id:
+                parsed[str(path)] = source
+                rows.append({'path': str(path), 'session_id': source.session_id,
+                             'name': source.name, 'project': source.project})
+    else:
+        rows = [dict(row) for row in rows]
+    if summary is not None:
+        rows = [row for row in rows if row['session_id'] != summary.session_id]
+        rows.append({'path': '', 'session_id': summary.session_id,
+                     'name': summary.name, 'project': summary.project})
+
+    def load(row):
+        if summary is not None and row['session_id'] == summary.session_id:
+            return summary
+        path = vault / row['path']
+        key = str(path)
+        if key not in parsed:
+            try:
+                parsed[key] = handoff.parse(path.read_text(encoding='utf-8-sig'))
+            except FileNotFoundError:
+                parsed[key] = None
+        return parsed[key]
+
+    def result(source, name, reference):
+        item = None
+        if source is not None:
+            if reference.startswith('U'):
+                item = next((item for item in source.users if item['id'] == reference), None)
+            else:
+                section = next((key for key, value in handoff.ITEM_PREFIXES.items() if reference.startswith(value)), None)
+                if section:
+                    item = next((item for item in source.all_items(section) if item['id'] == reference), None)
+        state = handoff.decision_state(item['text']) if item and reference.startswith('K') else 'active' if item else 'unresolved'
+        return {'state': state, 'text': item['text'] if item else '',
+                'session': source.name if source else name, 'reference': reference}
+
+    def alias_matches(row, name):
+        source = load(row)
+        aliases = (source.header.get('aliases') or []) if source else []
+        return name == aliases if isinstance(aliases, str) else name in aliases
+
+    def resolve(name, reference):
+        if not name:
+            return result(summary, name, reference)
+        local = [row for row in rows if row['project'] == project]
+        for candidates, aliases in ((local, False), (local, True), (rows, False), (rows, True)):
+            matches = [row for row in candidates if (alias_matches(row, name) if aliases else row['name'] == name)]
+            if matches:
+                return result(load(matches[0]) if len(matches) == 1 else None, name, reference)
+        return result(None, name, reference)
+    return resolve
+
+
+def export_project(vault: Path, project_name: str) -> str:
+    """Read a portable Markdown fragment without constructing a store, index, or service."""
+    from . import prompt
+    from .check import find_configs
+    vault = Path(vault).resolve()
+    project_name = str(project_name or '').strip()
+    if not project_name:
+        raise ValueError('导出需要项目名')
+
+    def project_files(name):
+        directory = vault / PROJECTS_DIR / naming.sanitize_filename(name)
+        card = directory / PROJECT_CARD_FILE
+        if not card.is_file():
+            raise ValueError(f'项目不存在：{name}')
+        data, _ = split_front_matter(card.read_text(encoding='utf-8-sig'))
+        text = (directory / PROJECT_PROMPT_FILE).read_text(encoding='utf-8-sig')
+        front, body = split_front_matter(text)
+        blocks = parse_blocks(body)
+        model = str((blocks.get('model') or {}).get('body') or '') if blocks else body
+        parsed = {'sections': _parse_sections(model),
+                  'user': str((blocks.get('user') or {}).get('body') or '')}
+        if front.get('body_encoding') == 'escaped-headings':
+            parsed['sections'] = {key: re.sub(r'(?m)^\\(?=## |###\s+[UDKXEG]\d+\s*$)', '', value)
+                                  for key, value in parsed['sections'].items()}
+            parsed['user'] = re.sub(r'(?m)^\\(?=## |###\s+[UDKXEG]\d+\s*$)', '', parsed['user'])
+        return data, parsed
+
+    def plain(text):
+        text = prompt._WIKI_REF_RE.sub(lambda match: f'{match[1]} {match[3]}', str(text))
+        text = re.sub(r'\[\[([^\]|]+)(?:\|([^\]]+))?\]\]', lambda match: match[2] or match[1], text)
+        text = prompt._SOURCE_RE.sub(lambda match: f'（来源说明：{match[1]}）', text)
+        return re.sub(r'\s*〔sha:[^〕]*〕', '', text)
+
+    card, data = project_files(project_name)
+    parts = [f'# {project_name} 项目说明']
+    if data['user'].strip():
+        user = re.sub(r'^##\s*用户补充\s*', '', data['user']).strip()
+        parts.append('## 用户补充\n' + plain(user))
+    for section in ('最终目标', '当前阶段', '关键路径和命令'):
+        if data['sections'][section]:
+            parts.append(f'## {section}\n' + plain(data['sections'][section]))
+    pending, inactive = [], []
+    name, ancestors = project_name, set()
+    while name:
+        if name in ancestors:
+            raise ValueError('项目卡父级关系形成循环，请修正项目卡')
+        ancestors.add(name)
+        current_card, current = (card, data) if name == project_name else project_files(name)
+        groups = prompt.classify_rules(current['sections']['硬规则'], _rule_resolver(vault, name))
+        active = [plain(line) for line in groups['active']]
+        active.extend(plain(line) + '（来源待核对）' for line in groups['unresolved'])
+        if active:
+            heading = '有效硬规则' if name == project_name else f'继承硬规则（来源项目：{name}）'
+            parts.append('## ' + heading + '\n' + '\n'.join(active))
+        prefix = '' if name == project_name else f'（来源项目：{name}）'
+        pending.extend(plain(line) + prefix for line in groups['pending'])
+        inactive.extend(plain(line) + prefix for line in groups['inactive'])
+        name = str(current_card.get('parent') or '')
+    attachment_names = []
+    identities = {project_name, str(card.get('project_id') or '')} - {''}
+    for path in sorted((vault / ATTACHMENTS_DIR).glob('*/*.md')):
+        attachment, _ = split_front_matter(path.read_text(encoding='utf-8-sig'))
+        projects = attachment.get('projects') or []
+        projects = [projects] if isinstance(projects, str) else projects
+        if not projects or identities.intersection(projects):
+            attachment_names.append('- ' + str(attachment.get('name') or path.stem))
+    if attachment_names:
+        parts.append('## 附件\n' + '\n'.join(attachment_names))
+    configs = [Path(card['check_config'])] if card.get('check_config') else []
+    if not configs:
+        roots = card.get('paths') or []
+        roots = [roots] if isinstance(roots, str) else roots
+        for root in roots:
+            configs.extend(path for path in find_configs(Path(root)) if path not in configs)
+    commands = []
+    for path in configs:
+        config = yaml.safe_load(path.read_text(encoding='utf-8-sig')) or {}
+        cwd = path.parent.parent if path.parent.name == '.tbrain' else path.parent
+        for item in config.get('checks') or []:
+            command = str(item.get('run') or item.get('command') or '').strip()
+            if command:
+                commands.append(f'- 在 `{cwd}` 运行：`{command}`')
+    if commands:
+        parts.append('## 验证命令\n' + '\n'.join(commands))
+    if pending:
+        parts.append('## 来源待确认规则\n以下原文保留，尚不作为有效硬规则。\n' + '\n'.join(pending))
+    if inactive:
+        parts.append('## 已失效规则（仅供参考）\n' + '\n'.join(inactive))
+    return '\n\n'.join(parts).rstrip() + '\n'
+
+
 def _parse_sections(model_body: str) -> dict[str, str]:
     sections = {section: "" for section in PROMPT_SECTIONS}
     current: str | None = None
@@ -1349,7 +1709,7 @@ def _parse_sections(model_body: str) -> dict[str, str]:
         if line.startswith("## "):
             if current in sections:
                 sections[current] = "\n".join(buffer).strip()
-            heading = line[3:].strip()
+            heading = re.sub(r'\s*〔sha:[^〕]*〕\s*$', '', line[3:].strip())
             current = heading if heading in sections else None
             buffer = []
             continue
@@ -1360,12 +1720,19 @@ def _parse_sections(model_body: str) -> dict[str, str]:
     return sections
 
 
-def _render_sections(sections: dict[str, str]) -> str:
-    parts: list[str] = []
-    for section in PROMPT_SECTIONS:
-        value = str(sections.get(section) or "").strip()
-        parts.append(f"## {section}\n{value}".rstrip())
-    return "\n\n".join(parts)
+def _replace_sections(body: str, sections: dict[str, str]) -> str:
+    remaining = dict(sections)
+
+    def replace(match):
+        heading = re.sub(r'\s*〔sha:[^〕]*〕\s*$', '', match[0].split('\n', 1)[0][3:].strip())
+        if heading not in remaining:
+            return match[0]
+        return f'## {heading}\n{remaining.pop(heading)}'.rstrip() + '\n\n'
+
+    body = re.sub(r'^## [^\n]*(?:\n|$).*?(?=^## |\Z)', replace, body, flags=re.M | re.S)
+    for heading, value in remaining.items():
+        body = body.rstrip() + f'\n\n## {heading}\n{value}'
+    return body.strip('\n')
 
 
 def _render_index_table(rows: Sequence[dict]) -> str:

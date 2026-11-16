@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import math
 import sqlite3
 import threading
@@ -32,13 +34,14 @@ BM25_CANDIDATES = 50
 
 STATUS_PRIORITY = {
     "已中断": 0,
+    "已暂停": 0,
     "进行中": 1,
     "受阻": 2,
     "待验证": 3,
     "已完成": 4,
     "已放弃": 4,
 }
-UNFINISHED_STATUSES = ("已中断", "进行中", "受阻", "待验证")
+UNFINISHED_STATUSES = ("已中断", "已暂停", "进行中", "受阻", "待验证")
 TAU_UNFINISHED_DAYS = 7.0
 TAU_FINISHED_DAYS = 30.0
 HISTORY_DAYS = 90.0
@@ -532,6 +535,22 @@ class Index:
 
     # -- 检索内部 -----------------------------------------------------------
 
+    def _log_search_error(self, table: str, callsite: str, error: sqlite3.OperationalError) -> None:
+        try:
+            handler = RotatingFileHandler(self.app_home / 'tbrain.log', maxBytes=1024 * 1024,
+                                          backupCount=1, encoding='utf-8')
+            handler.handleError = lambda record: None
+            try:
+                record = logging.LogRecord('tbrain.index', logging.ERROR, __file__, 0,
+                    '%s %s %s %s %s',
+                    (clock.utc_now().isoformat(), table, callsite, type(error).__name__,
+                     getattr(error, 'sqlite_errorname', 'SQLITE_ERROR')), None)
+                handler.emit(record)
+            finally:
+                handler.close()
+        except OSError:
+            pass
+
     def _fts_session_hits(
         self,
         conn: sqlite3.Connection,
@@ -557,7 +576,8 @@ class Index:
         args.append(int(limit))
         try:
             rows = conn.execute(sql, args).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            self._log_search_error('sessions_fts', '_fts_session_hits', exc)
             return []
         return [(str(row["session_id"]), float(row["rank"])) for row in rows]
 
@@ -581,7 +601,8 @@ class Index:
             args.extend(names)
         try:
             rows = conn.execute(sql, args).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            self._log_search_error('sessions_fts', '_like_session_ids', exc)
             return []
         return [str(row["session_id"]) for row in rows]
 
@@ -787,7 +808,8 @@ class Index:
                         "FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT ?",
                         (self._match_expression(terms), BM25_CANDIDATES),
                     ).fetchall()
-                except sqlite3.OperationalError:
+                except sqlite3.OperationalError as exc:
+                    self._log_search_error('public_fts', 'search_public', exc)
                     return []
                 ids = [str(row["id"]) for row in hits]
                 rows = self._public_by_ids(conn, ids)

@@ -61,7 +61,7 @@ def normalize(operation: dict) -> dict:
 
 
 def render_report(fields: dict) -> str:
-    verified = bool(fields.get("windows_verified")) and _names_windows_install_run(fields.get("windows_evidence") or "")
+    verified = _windows_verified(fields)
     residual = PENDING_LINE if fields.get("conclusion") == "CONDITIONAL PASS" else SETTLED_LINE
     lines = [
         "### A 任务状态",
@@ -80,7 +80,7 @@ def render_report(fields: dict) -> str:
         fields.get("conclusion") or "",
         "",
         f"Windows 安装包：{'是' if fields.get('windows_installable') else '否'}",
-        f"Windows 真机验证：{'已做' if verified else '未做'}",
+        f"Windows 真机验证：{'已做（报告者声明）' if verified else '未做'}",
         f"Windows 真机证据：{fields.get('windows_evidence') or ''}",
         f"Windows 缺口：{fields.get('windows_gap') or ''}",
         residual,
@@ -114,7 +114,7 @@ def parse_report(text: str) -> dict | None:
             conclusion = line.strip()
             break
     evidence = _meta(meta, "Windows 真机证据：")
-    verified_flag = _meta(meta, "Windows 真机验证：") == "已做"
+    verified_flag = _meta(meta, "Windows 真机验证：") in {"已做", "已做（报告者声明）"}
     return {
         "task": "\n".join(buckets["A"]).strip(),
         "verification": "\n".join(buckets["B"]).strip(),
@@ -122,7 +122,7 @@ def parse_report(text: str) -> dict | None:
         "deliverables": "\n".join(buckets["D"]).strip(),
         "conclusion": conclusion,
         "windows_installable": _meta(meta, "Windows 安装包：") == "是",
-        "windows_verified": verified_flag and _names_windows_install_run(evidence),
+        "windows_verified": verified_flag,
         "windows_evidence": evidence,
         "windows_gap": _meta(meta, "Windows 缺口："),
         "residual_pending": PENDING_LINE in raw,
@@ -144,11 +144,8 @@ def validate(fields: dict) -> list[str]:
     if conclusion == "CONDITIONAL PASS" and not fields.get("residual_pending", True):
         problems.append("CONDITIONAL PASS 必须写明人工剩余风险接受仍未完成")
     if fields.get("windows_installable") and not _windows_verified(fields):
-        claimed = bool(fields.get("windows_verified")) and not _names_windows_install_run(fields.get("windows_evidence") or "")
-        if claimed:
-            problems.append("Windows 真机证据要写明在 Windows 机器上安装并运行该产物，不能只写 pytest")
         if conclusion == "PASS":
-            problems.append("桌面或 Windows 安装包没有真机安装并运行的证据，结论不能是 PASS")
+            problems.append("没有记录 Windows 安装运行结果，或仍有验证缺口，结论不能是 PASS")
         if not str(fields.get("windows_gap") or "").strip():
             problems.append("Windows 真机验证未做，必须写明缺口")
     return problems
@@ -172,18 +169,10 @@ def apply_report(summary, fields: dict) -> None:
 
 
 def _windows_verified(fields: dict) -> bool:
-    if not fields.get("windows_verified"):
-        return False
-    return _names_windows_install_run(str(fields.get("windows_evidence") or ""))
-
-
-def _names_windows_install_run(text: str) -> bool:
-    raw = str(text or "")
-    lowered = raw.casefold()
-    has_windows = "windows" in lowered
-    has_install = "安装" in raw or "install" in lowered
-    has_run = "运行" in raw or re.search(r"\brun\b", lowered) is not None
-    return bool(raw.strip()) and has_windows and has_install and has_run
+    """Validate the report fields; this does not execute or certify an installation."""
+    return (bool(fields.get("windows_verified"))
+            and bool(str(fields.get("windows_evidence") or "").strip())
+            and not str(fields.get("windows_gap") or "").strip())
 
 
 def _clean(value) -> str:

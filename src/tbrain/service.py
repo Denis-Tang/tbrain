@@ -14,6 +14,8 @@ import subprocess
 import threading
 from zoneinfo import ZoneInfo, available_timezones
 
+from filelock import Timeout as FileLockTimeout
+
 from . import __version__, clock, handoff, hooks, identity, session as flow, prompt as prompt_mod
 from . import paths
 from .settings import SettingsStore
@@ -253,6 +255,26 @@ class TbrainService:
             return []
         return [item["name"] for item in self.store.projects() if item.get("parent") == project]
 
+    def visible_projects_for_project(self, name: str) -> tuple[list[str], bool]:
+        if not name:
+            return [], True
+        project = self.store.project(name)
+        return [name] + self.child_projects(name), bool(project and project.get("read_standalone"))
+
+    def visible_projects(self, session_id: str) -> tuple[list[str], bool]:
+        row = self.index.session(session_id) if session_id else None
+        return self.visible_projects_for_project(str(row.get("project") or "") if row else "")
+
+    def decision_projects(self, name: str) -> list[str]:
+        projects, _ = self.visible_projects_for_project(name)
+        parent = (self.store.project(name) or {}).get('parent') if name else ''
+        while parent:
+            if parent in projects:
+                raise ValueError('项目卡父级关系形成循环，请修正项目卡')
+            projects.insert(0, parent)
+            parent = (self.store.project(parent) or {}).get('parent')
+        return projects
+
     def git_info(self, cwd: str) -> dict:
         info = {"branch": "", "head": "", "dirty": 0}
         if not cwd or not Path(cwd).is_dir():
@@ -314,7 +336,7 @@ class TbrainService:
         return hosts.render(host, result, raw_event)
 
     # ------------------------------------------------------------------
-    # 四个工具
+    # Agent 工具
     # ------------------------------------------------------------------
     def _agent_disabled(self, session_id: str) -> dict | None:
         from .hosts import config
@@ -339,38 +361,31 @@ class TbrainService:
         if not name or not self.store.project(name):
             return {"ok": False, "error": "项目不存在"}
         self.refresh_index()
-        scope = [name] + self.child_projects(name)
+        scope, _ = self.visible_projects_for_project(name)
         from .contract import render_contract
 
         payload = {"ok": True, "project": name, "scope": scope,
-                   "items": self.store.handoff_items(scope, limit),
-                   "contract": render_contract(self, name)}
-        extra = self._dream_snippet()
-        if extra:
-            payload["dream"] = extra
+                   "items": self.store.handoff_items(scope, limit, decision_projects=self.decision_projects(name))}
+        if self.settings.load().task_mode:
+            payload["contract"] = render_contract(self, name, task_mode=True)
         return payload
 
-    def _dream_snippet(self) -> str:
-        try:
-            from . import dream
-
-            return dream.bootstrap_snippet(self.vault_root(), room=dream.SNIPPET_BUDGET + 2)
-        except Exception:
-            return ""
-
-    def dream_status(self) -> dict:
-        from . import dream
-
-        return dream.status_view(self.vault_root())
-
-    def dream_run(self, ops_path: str = "", project: str = "") -> dict:
-        from . import dream
-
-        return dream.run(self, ops_path=ops_path, project=project)
-
     def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
-        with self.store.write_lock():
-            return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
+        try:
+            with self.store.write_lock():
+                return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
+        except FileLockTimeout as exc:
+            return {"ok": False, "written": {},
+                    "rejected": [{"op": "save", "reason": str(exc)}]}
+
+    def save_decision(self, session_id: str, text: str, source: list[str], why: str = '',
+                      supersedes: list[str] | None = None) -> dict:
+        try:
+            with self.store.write_lock():
+                return self._agent_disabled(session_id) or flow.save_decision(
+                    self, session_id, text, source, why, supersedes)
+        except (ValueError, OSError, FileLockTimeout) as exc:
+            return {"ok": False, "error": str(exc)}
 
     def resume(self, session_id: str, target: str, fork_user_count: int | None = None, fork_revision: str = "") -> dict:
         with self.store.write_lock():
@@ -387,6 +402,10 @@ class TbrainService:
         if name == "save":
             return self.save(arguments.get("session_id", ""), arguments.get("operations") or [],
                              arguments.get("last_test"))
+        if name == "save_decision":
+            return self.save_decision(arguments.get("session_id", ""), arguments.get("text", ""),
+                                      arguments.get("source"), arguments.get("why", ""),
+                                      arguments.get("supersedes"))
         if name == "resume":
             return self.resume(arguments.get("session_id", ""), arguments.get("target", ""),
                                arguments.get("fork_user_count"), arguments.get("fork_revision", ""))
@@ -443,10 +462,12 @@ class TbrainService:
         detail = self.session_detail(path_or_id)
         if not detail.get("ok"):
             return detail
-        path = Path(detail["path"])
-        summary = handoff.parse(self.store.read_text(path))
-        new_path = flow.rename_session(self, summary, path, str(new_name or "").strip())
-        return {"ok": True, "name": new_path.stem, "path": str(new_path)}
+        # session_detail refreshes the whole index; keep that existing scan outside.
+        with self.store.write_lock():
+            path = Path(detail["path"])
+            summary = handoff.parse(self.store.read_text(path))
+            new_path = flow.rename_session(self, summary, path, str(new_name or "").strip())
+            return {"ok": True, "name": new_path.stem, "path": str(new_path)}
 
     # ------------------------------------------------------------------
     # 设置 / 时间 / 项目 / 提示词
@@ -530,18 +551,17 @@ class TbrainService:
         is_new = not self.store.project(str(rename_from or name).strip())
         result = self.store.save_project(name, paths_list, parent=parent,
                                            allow_child=allow_child, rename_from=rename_from)
-        setup = prepare(result.get("name") or name, list(result.get("paths") or []))
-        worktree = self.store._normalize_path(str(setup.get("worktree") or ""))
-        paths = list(result.get("paths") or [])
-        if worktree and Path(worktree).exists() and worktree not in paths:
-            result = self.store.save_project(result["name"], paths + [worktree],
-                                              parent=str(result.get("parent") or ""),
-                                              allow_child=bool(result.get("allow_child")))
-        recorded = self.store.record_execution(result["name"], setup)
+        recorded = result
+        if self.settings.load().task_mode:
+            setup = prepare(result.get("name") or name, list(result.get("paths") or []))
+            recorded = self.store.record_execution(result["name"], setup)
         self.refresh_index()
         if is_new:
             recorded["workspace_sync"] = create_workspaces(recorded, self.home)
         return recorded
+
+    def set_project_read_standalone(self, name: str, enabled: bool) -> dict:
+        return {"ok": True, "project": self.store.set_project_read_standalone(name, enabled)}
 
     def delete_project(self, name: str) -> dict:
         result = self.store.delete_project(name)
@@ -559,8 +579,9 @@ class TbrainService:
         return {"ok": True, "project": project, "user": data.get("user") or "",
                 "sections": data.get("sections") or prompt_mod.empty_sections()}
 
-    def save_project_prompt(self, project: str, sections: dict) -> dict:
-        result = self.store.save_project_prompt(str(project or ""), sections if isinstance(sections, dict) else {})
+    def save_project_prompt(self, project: str, sections: dict, base_sha: dict | None = None) -> dict:
+        result = self.store.save_project_prompt(str(project or ""), sections if isinstance(sections, dict) else {},
+                                                base_sha=base_sha)
         result["ok"] = not result.get("rejected")
         return result
 
@@ -770,7 +791,7 @@ def _installed_version(settings) -> str:
 
 
 def _priority(status) -> int:
-    return {"已中断": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}.get(str(status), 5)
+    return {"已中断": 0, "已暂停": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}.get(str(status), 5)
 
 
 def _display(service, iso_text) -> str:

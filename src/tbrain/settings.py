@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+
+from filelock import FileLock
 
 try:  # tzlocal is a declared dependency; degrade gracefully if it is absent.
     import tzlocal
@@ -71,7 +75,7 @@ def validate_timezone(name: str) -> str:
 
 @dataclass
 class Settings:
-    """The six fixed settings keys; an empty string means "not configured"."""
+    """Machine-local settings; an empty string means "not configured"."""
 
     vault_path: str = ""
     timezone: str = ""
@@ -79,13 +83,14 @@ class Settings:
     timeout_hours: float = 6.0
     reminder_context_switch: bool = True
     install_root: str = ""
+    task_mode: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
 KNOWN_KEYS = tuple(field.name for field in fields(Settings))
-_BOOL_KEYS = {"ntp_enabled", "reminder_context_switch"}
+_BOOL_KEYS = {"ntp_enabled", "reminder_context_switch", "task_mode"}
 _EXPAND_KEYS = {"vault_path", "install_root"}
 
 
@@ -146,6 +151,8 @@ class SettingsStore:
 
         self.home = Path(home) if home is not None else app_home()
         self.path = self.home / "settings.json"
+        self._write_lock = FileLock(self.path.with_name('settings.json.lock').resolve(),
+                                    timeout=5, is_singleton=True)
 
     # -- reading -----------------------------------------------------------
     def read_raw(self) -> dict:
@@ -163,12 +170,15 @@ class SettingsStore:
 
     # -- writing -----------------------------------------------------------
     def save(self, values: dict) -> Settings:
-        raw = self.read_raw()
-        merged = normalize(values, raw)
-        record = dict(raw)  # preserve unknown/legacy keys on disk untouched
-        record.update(merged)
-        self._write(record)
-        return Settings(**merged)
+        self.home.mkdir(parents=True, exist_ok=True)
+        # Lock order: vault -> settings. This leaf never acquires a vault lock.
+        with self._write_lock:
+            raw = self.read_raw()
+            merged = normalize(values, raw)
+            record = dict(raw)  # preserve unknown/legacy keys on disk untouched
+            record.update(merged)
+            self._write(record)
+            return Settings(**merged)
 
     # Older services called this ``update``; keep the name working.
     def update(self, values: dict, api_key: str | None = None) -> Settings:
@@ -178,8 +188,20 @@ class SettingsStore:
 
     def _write(self, record: dict) -> None:
         path = self.path
-        temporary = path.with_name(path.name + ".tmp")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         text = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
+        try:
+            with temporary.open('w', encoding='utf-8', newline='\n') as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            for attempt in range(6):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except OSError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            temporary.unlink(missing_ok=True)

@@ -38,3 +38,4 @@ desktop/obj/
 
 # Research scratch (isolated host experiments; not part of the product).
 /.research/
+/.t/

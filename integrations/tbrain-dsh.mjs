@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { mkdir, writeFile, unlink } from "node:fs/promises";
 
 export const name = "tbrain-native";
-export const inject = { required: ["agents", "tokenMeter", "sessionProjections"], optional: ["workspaceController"] };
+export const inject = ["agents", "tokenMeter", "sessionProjections"];
 
 const HOOK_TIMEOUT_MS = 10000;
 const CONTEXT_RATIO = 0.65;
@@ -91,7 +91,7 @@ function message(text) {
 	return Object.freeze({
 		id: randomUUID(),
 		role: "user",
-		source: { kind: "tbrain-native" },
+		source: { kind: "plugin", plugin: "tbrain-native" },
 		content: [{ type: "text", text }],
 	});
 }
@@ -113,7 +113,8 @@ function sourceOf(value) {
 
 export function apply(ctx, config = {}) {
 	const settings = resolveSettings(config);
-	if (ctx.workspaceController) {
+	const workspaceController = ctx.get("workspaceController");
+	if (workspaceController) {
 		const portFile = join(settings.home, "dsh-workspace-port");
 		const server = createServer(async (request, response) => {
 			response.setHeader("Content-Type", "application/json");
@@ -129,12 +130,12 @@ export function apply(ctx, config = {}) {
 				if (typeof project.path !== "string" || typeof project.name !== "string" || !project.name.trim()) {
 					throw new Error("项目名称和目录不能为空");
 				}
-				const result = await ctx.workspaceController.create({ path: project.path });
+				const result = await workspaceController.create({ path: project.path });
 				if (result.created) {
 					try {
-						await ctx.workspaceController.rename({ workspaceId: result.workspace.id, title: project.name });
+						await workspaceController.rename({ workspaceId: result.workspace.id, title: project.name });
 					} catch (error) {
-						await ctx.workspaceController.delete({ workspaceId: result.workspace.id });
+						await workspaceController.delete({ workspaceId: result.workspace.id });
 						throw error;
 					}
 				}
@@ -180,7 +181,7 @@ export function apply(ctx, config = {}) {
 		return next();
 	});
 
-	ctx.on("agent/created", async ({ agent, source }) => {
+	ctx.on("agent/session-start", async ({ agent, source }) => {
 		if (!isRoot(agent)) return;
 		trackedRoots.add(agent.session.header.id);
 		const result = await callHook(settings, { ...payload(agent, "SessionStart"), source: sourceOf(source) });
@@ -192,7 +193,7 @@ export function apply(ctx, config = {}) {
 		trackedRoots.add(agent.session.header.id);
 		const contexts = [];
 		for (const incoming of messages) {
-			if (incoming.role !== "user" || incoming.source?.kind === "tbrain-native") continue;
+			if (incoming.role !== "user" || incoming.source?.kind !== "user") continue;
 			const prompt = incoming.content.filter(block => block.type === "text").map(block => block.text).join("");
 			if (!prompt) continue;
 			reminded.delete(agent.session.header.id);

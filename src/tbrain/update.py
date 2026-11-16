@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import __version__, installer, paths, proc
+from . import __version__, installer, paths, proc, versions
 
 REPOSITORY = "Denis-Tang/tbrain"
 RELEASE_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
@@ -41,19 +41,13 @@ class UpdateError(RuntimeError):
 
 
 def parse_version(text: str) -> tuple:
-    """Sort key for a release tag: a pre-release sorts before the same numbers without one."""
-    value = str(text or "").strip().lstrip("vV")
-    match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:[-+](.*))?", value)
-    if not match:
-        return ()
-    numbers = tuple(int(part) for part in match.group(1).split("."))
-    return numbers, 0 if match.group(2) else 1
+    return versions.key(text)
 
 
 def is_newer(candidate: str, current: str) -> bool:
-    """Compare numerically so 0.4.10 is newer than 0.4.9."""
-    remote, local = parse_version(candidate), parse_version(current)
-    if not remote or not local:
+    """Compare releases without upgrading a stable installation to a pre-release."""
+    remote, local = versions.parse_release(candidate), versions.parse_release(current)
+    if remote is None or local is None or (remote.is_prerelease and not local.is_prerelease):
         return False
     return remote > local
 

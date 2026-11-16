@@ -71,6 +71,7 @@ def test_dsh_workspace_bridge(tmp_path):
 const handlers = {};
 let workspace;
 const ctx = {
+  get: name => ctx[name],
   agents: { roots: () => [] },
   on: (name, handler) => { handlers[name] = handler; },
   workspaceController: {

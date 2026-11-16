@@ -1,4 +1,4 @@
-"""Tbrain MCP server: four deterministic tools for coding agents.
+"""Tbrain MCP server: deterministic memory tools for coding agents.
 
 The tools never call a model.  The model submits incremental operations; the
 program validates, numbers, indexes and writes them.
@@ -31,23 +31,20 @@ WRITING_SPEC = """\
 SAVE_TEMPLATE = """\
 save 操作示例（operations 是对象数组，一次可提交多个操作）：
 1. 完成项：{"op":"append","section":"done","items":[{"text":"给 index.py 增加中文两字切分影子列 [证据:E1]"}]}
-2. 决策：  {"op":"append","section":"decision","items":[{"decision":"SQLite 只做索引","reason":"Markdown 是唯一事实源","rationale":"索引可以删掉重建","tradeoffs":"多维护一个索引文件","decided_by":"Kai"}]}
+2. 本次技术决定：{"op":"append","section":"decision","items":[{"decision":"先修解析函数","reason":"失败已定位","rationale":"失败已定位","tradeoffs":"暂不改界面","decided_by":"Agent"}]}。用户长期决定用 save_decision，不重复写入 K# 或项目硬规则。
 3. 走不通：{"op":"append","section":"dead_end","items":[{"attempt":"用 trigram 分词","reason_kind":"已证实不可行",
    "conditions":"SQLite 3.45 / FTS5","strength":"已排除","evidence":"E2"}]}
 4. 证据：  {"op":"append","section":"evidence","items":[{"kind":"file","text":"src/tbrain/index.py:88"}]}
-5. 未完成目标：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
+5. 未完成目标（任务模式也用于集中记录关键业务问题及影响范围，继续不依赖答案的工作；用户回答后保存决定及原话来源，再用 set_status 的 complete_goals 关闭相应 G#，不重启任务确认）：{"op":"append","section":"goal","items":[{"text":"把 save 的拒绝重试写入待整理"}]}
 6. 目标：  {"op":"replace","section":"target","text":"……（≤200 字）"}
 7. 下一步：{"op":"replace","section":"next_step","text":"跑 pytest -q，确认中文检索用例全绿"}
 8. 状态：  {"op":"set_status","status":"已完成","complete_goals":["G1"],"supersede":["K1","[[旧会话名]]#K2"]}
    supersede 只用于明确作废的决定，支持本会话或同项目来源；归档条目仍可引用，未确认建议不作为有效规则来源。
 9. 环境变更：{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","location":"venv",
-   "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","state":"生效"}]}
+   "install":"pip install jieba","uninstall":"pip uninstall jieba","verify":"python -c \"import jieba\"","base_sha":"ab12cd34","state":"生效"}]}
 10. 项目提示词：{"op":"project_prompt","sections":{"最终目标":"…","硬规则":"- …（来源：[[会话名]]#U2）",
-   "当前阶段":"…","关键路径和命令":"- 测试命令：…"}}
-11. 权限：{"op":"permission","action":"push branch"}；被允许后再 {"op":"permission","grant":"conditional"}
-12. 最终验收：{"op":"acceptance","task":"本地检查已接上，这一轮可以提交","verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装","risks":"没有还要人接受的风险","deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}。
-   用短句写明命令、路径、退出码，以及验过什么、没验什么。不要写「应该可以」。结论只能是 PASS、CONDITIONAL PASS、FAIL。
-   桌面或 Windows 安装包还要写 windows_installable，以及 windows_verified 与 windows_evidence，或 windows_gap。
+   "当前阶段":"…","关键路径和命令":"- 测试命令：…"},"base_sha":{"最终目标":"ab12cd34","硬规则":"ab12cd34","当前阶段":"ab12cd34","关键路径和命令":"ab12cd34"}}
+任务模式操作按启动包执行，完整字段说明见 docs/LOCAL-LOOP.md；普通记忆模式不要求执行。
 """
 
 
@@ -70,11 +67,11 @@ def create_server(home: Path | None = None, *, service=None):
     server._mcp_server.version = __version__
 
     @server.tool(description=(
-        "启动/恢复本会话并返回启动包（全局提示词、项目提示词、公共池索引、附件卡片、接续视图前 5 条、当前时间）。"
+        "启动/恢复本会话并返回启动包（全局及项目提示词、有效长期决定、公共池索引、附件卡片、接续视图前 5 条、当前时间）。"
         "有 hook 的宿主由 hook 自动完成，本工具用于无 hook 的宿主或需要手动刷新时。"
         "session_id 必须是宿主提供的稳定会话 ID，格式 <宿主名>:<宿主会话ID>（例如 claude-code:3f2a…）；"
         "agent 为 claude-code/codex/dsh/pi。project 仅用于明确切换保存目标，省略表示按 cwd 匹配。"
-        "返回 session_id 后，search/save/resume 必须原样传入。"
+        "返回 session_id 后，search/save/save_decision/resume 必须原样传入。"
     ))
     def bootstrap(session_id: str, agent: str, cwd: str, host_record: str = "", project: str = "") -> dict:
         result = service.bootstrap(session_id=session_id, agent=agent, cwd=cwd,
@@ -82,20 +79,35 @@ def create_server(home: Path | None = None, *, service=None):
         return _with_meta(service, result)
 
     @server.tool(description=(
-        "按需检索：本项目 → 公共池 → 独立会话池，每次最多 5 条并附来源路径与更新时间。"
+        "按需检索本项目及允许读取的子项目的历史与有效长期决定，再查公共池，每次最多 5 条并附来源路径与更新时间。"
+        "项目开启『全局共享（读取非项目会话）』后，才额外检索独立会话池。"
         "session_id 用于确定本项目范围（省略时只搜公共池与独立会话池）。"
         "检索命中不会切换保存目标。涉及已知失败对象时可把对象/方法写进 query。"
+        "公共池命中附sha，更新已有卡时作为env的base_sha。"
     ))
     def search(query: str, session_id: str = "", limit: int = 5) -> dict:
         return _with_meta(service, service.search(query=query, session_id=session_id, limit=limit))
 
-    @server.tool(description=("把本轮增量写入当前会话总结。只提交变化的部分，不要重写整篇。\n\n"
+    @server.tool(description=("保存本轮工作进展、证据、问题和下一步；临时要求及本次技术决定也在这里记录。"
+                              "用户长期决定调用 save_decision，不在本工具重复保存。只提交增量，不重写整篇。\n\n"
                               + WRITING_SPEC + "\n" + SAVE_TEMPLATE + "\n" + prompt.PROJECT_PROMPT_SPEC))
     def save(session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
         return _with_meta(service, service.save(session_id=session_id, operations=operations, last_test=last_test))
 
     @server.tool(description=(
-        "返回旧会话的交接包（原始命令、目标、未完成目标、下一步、最近 3 条用户指令、已完成与证据清单），"
+        "保存当前项目的用户长期决定。含义清楚就记录；有关键歧义先询问，明确后再调用，不要求用户重复确认清楚的决定。"
+        "text 为准确提炼的决定，source 为当前会话用户原话编号数组（如 [\"U2\",\"U4\"]）；"
+        "why 仅填写用户说明的理由，未说明留空；text 与 why 合计最多200字。项目、时间和决定人由程序填写。"
+        "supersedes 仅填写被用户明确取代的本项目 DL-xxxx 编号；含糊冲突先问，不自动作废。"
+        "临时要求用 save；同一长期决定不重复写 K# 或项目硬规则。返回决定编号，供后续引用。"
+    ))
+    def save_decision(session_id: str, text: str, source: list[str], why: str = "",
+                      supersedes: list[str] | None = None) -> dict:
+        return _with_meta(service, service.save_decision(session_id=session_id, text=text, source=source,
+                                                       why=why, supersedes=supersedes))
+
+    @server.tool(description=(
+        "返回旧会话的交接包（原始命令、目标、未完成目标、下一步、最近 3 条用户指令、已完成与证据清单及项目当前有效长期决定），"
         "并在当前会话总结写入“接续自”。target 是会话名或 session_id；旧会话文件不会被修改。"
         "历史分支传 fork_revision（精确保存版本）或 fork_user_count（用户轮次），只继承该保存点。"
     ))

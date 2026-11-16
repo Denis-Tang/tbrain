@@ -35,6 +35,11 @@ def sid(host, session):
     return f"{host}:{session}"
 
 
+def project_bases(service, project):
+    return {name: service.store.block_fingerprint(text)[:8]
+            for name, text in service.project_prompt(project)['sections'].items()}
+
+
 def test_existing_snapshot_does_not_require_another_hardlink(env, monkeypatch):
     import os
 
@@ -72,13 +77,14 @@ def test_refresh_detects_same_metadata_edits_and_deleted_public_cards(env):
 
     service, vault, work = env
     prompt(service, 'codex', 'edit', work, '验证青苹果召回')
+    service.bootstrap('codex:edit-reader', 'codex', str(work))
     row = service.index.session('codex:edit')
     path = vault / row['path']
     service.refresh_index()
     stat = path.stat()
     path.write_text(path.read_text(encoding='utf-8').replace('青苹果', '红苹果'), encoding='utf-8', newline='\n')
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    assert service.search('红苹果', 'codex:edit')['results']
+    assert service.search('红苹果', 'codex:edit-reader')['results']
     card = service.store.save_public_card('工具', '已移除卡', {'body': '幽灵卡片关键词'})
     service.refresh_index()
     assert service.search('幽灵卡片关键词')['results']
@@ -100,10 +106,10 @@ def test_archived_match_has_snippet_and_inactive_decision_is_not_resumed(env):
     service.save('codex:archive', [{'op': 'append', 'section': 'decision', 'items': [
         {'text': '归档专有词 | 仍需查阅'},
         *({'text': f'规则{number} | 约定'} for number in range(handoff.ARCHIVE_THRESHOLD))]}])
-    result = service.search('归档专有词', 'codex:archive')
+    prompt(service, 'codex', 'reader', work, '接续记录')
+    result = service.search('归档专有词', 'codex:reader')
     assert 'K1 归档专有词' in result['results'][0]['snippet']
     assert service.save('codex:archive', [{'op': 'set_status', 'status': '已完成', 'supersede': ['K1']}])['ok']
-    prompt(service, 'codex', 'reader', work, '接续记录')
     assert '归档专有词' not in service.resume('codex:reader', 'codex:archive')['handoff']
 
 
@@ -114,14 +120,14 @@ def test_explicit_cross_session_supersede_and_rule_sources(env):
     service.save('codex:old-rule', [{'op': 'append', 'section': 'decision', 'items': [
         {'text': '保持本地存储 | 用户要求'}, {'text': '采用远程服务 | 理由；建议，待用户确认'}]}])
     old = service.index.session('codex:old-rule')['name']
-    local = service.save('codex:old-rule', [{'op': 'project_prompt', 'sections': {
+    local = service.save('codex:old-rule', [{'op': 'project_prompt', 'base_sha': project_bases(service, 'P1'), 'sections': {
         '硬规则': '- 保持本地存储（来源：K1）'}}])
     assert f'[[{old}]]#K1' in local['written']['project_prompt']['硬规则']
     prompt(service, 'codex', 'new-rule', work, '调整项目约定')
-    good = service.save('codex:new-rule', [{'op': 'project_prompt', 'sections': {
+    good = service.save('codex:new-rule', [{'op': 'project_prompt', 'base_sha': project_bases(service, 'P1'), 'sections': {
         '硬规则': f'- 保持本地存储（来源：[[{old}]]#K1）'}}])
     assert good['ok']
-    rejected = service.save('codex:new-rule', [{'op': 'project_prompt', 'sections': {
+    rejected = service.save('codex:new-rule', [{'op': 'project_prompt', 'base_sha': project_bases(service, 'P1'), 'sections': {
         '硬规则': f'- 采用远程服务（来源：[[{old}]]#K2）'}}])
     assert rejected['rejected']
     bad = service.save('codex:new-rule', [{'op': 'set_status', 'status': '已完成', 'supersede': [f'[[{old}]]#K99']}])
@@ -154,7 +160,8 @@ def test_second_message_appends_u2_and_stop_reminder_blocks_until_saved(env):
     service, vault, work = env
     session = "bbbbbbbb-1111-2222-3333-444444444444"
     prompt(service, "claude-code", session, work, "第一条：把索引改成 SQLite")
-    assert prompt(service, "claude-code", session, work, "第二条：测试必须用临时目录") == {}
+    response = prompt(service, "claude-code", session, work, "第二条：测试必须用临时目录")
+    assert response['hookSpecificOutput']['additionalContext'] == '当前用户原话编号：U2'
     row = service.index.session(sid("claude-code", session))
     summary, _ = _load(service, row)
     assert len(summary.users) == 2
@@ -331,11 +338,16 @@ def test_search_scopes_project_public_and_independent(env):
         {"op": "append", "section": "done", "items": [{"text": "做了中文二字切分检索"}]}])
     service.save(sid("pi", "12345678-0000-0000-0000-000000000002"), [
         {"op": "append", "section": "done", "items": [{"text": "独立会话也试了中文检索"}]}])
-    result = service.search("中文检索", sid("claude-code", "12345678-0000-0000-0000-000000000001"))
+    prompt(service, 'codex', 'scope-reader', project_work, '检索保存的记忆')
+    result = service.search("中文检索", 'codex:scope-reader')
     assert result["ok"] is True
     assert result["results"]
     assert result["results"][0]["project"] == "Tbrain"
+    assert all(item.get('project') == 'Tbrain' for item in result['results'])
     assert len(result["results"]) <= 5
+    service.set_project_read_standalone('Tbrain', True)
+    expanded = service.search('中文检索', 'codex:scope-reader')['results']
+    assert any(item['source'] == '独立会话池' for item in expanded)
 
 
 def test_independent_session_bootstrap_and_resume(env):
@@ -511,6 +523,7 @@ def test_project_prompt_through_save(env):
     prompt(service, "claude-code", session, work, "写项目提示词")
     result = service.save(sid("claude-code", session), [{
         "op": "project_prompt",
+        "base_sha": project_bases(service, 'Tbrain'),
         "sections": {
             "最终目标": "完成 Tbrain 0.6.0 最小闭环",
             "硬规则": "- 所有测试用临时目录（来源：U1）",
@@ -523,7 +536,8 @@ def test_project_prompt_through_save(env):
     stored = service.store.project_prompt("Tbrain")
     for host in ("claude-code", "codex", "dsh", "pi"):
         package = service.bootstrap(f"{host}:prompt-reader", host, str(work))["package"]
-        assert "同次任务" in package and "无变化不改写" in package
+        assert "项目提示词规范见save的project_prompt说明" in package
+        assert str(service.store.project_prompt_path('Tbrain')) in package
         assert stored["sections"]["当前阶段"] in package
     original = service.store.project_prompt_path("Tbrain").read_bytes()
     service.save(sid("claude-code", session), [{"op": "replace", "section": "next_step", "text": "跑相关测试"}])
@@ -586,24 +600,28 @@ def test_parent_rules_prompt_conflicts_and_source_numbers(env):
     service.configure_project('子项目', [str(work / 'child')], parent='父项目')
     prompt(service, 'codex', 'rules', work, '所有测试用临时目录')
     source = service.index.session('codex:rules')['name']
-    result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+    result = service.save('codex:rules', [{'op': 'project_prompt', 'base_sha': project_bases(service, '父项目'), 'sections': {
         '最终目标': '程序目标', '硬规则': f'- 所有测试用临时目录（来源：[[{source}]]#U1）'}}])
     assert not result['rejected']
     child = service.bootstrap('codex:child-rules', 'codex', str(work / 'child'))
     assert '所有测试用临时目录' in child['package']
-    result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+    assert '## 继承 父项目 的硬规则\n' in child['package']
+    result = service.save('codex:rules', [{'op': 'project_prompt', 'base_sha': project_bases(service, '父项目'), 'sections': {
         '硬规则': f'- 无来源规则（来源：[[{source}]]#U999）'}}])
     assert result['rejected'] and not result['written']['project_prompt']
     path = service.store.project_prompt_path('父项目')
     path.write_text(path.read_text(encoding='utf-8').replace('程序目标', '用户手改的目标'), encoding='utf-8')
     for _ in range(2):
-        result = service.save('codex:rules', [{'op': 'project_prompt', 'sections': {
+        result = service.save('codex:rules', [{'op': 'project_prompt', 'base_sha': project_bases(service, '父项目'), 'sections': {
             '最终目标': '模型想覆盖的目标', '当前阶段': '修复阶段：通过回归'}}])
         assert result['written']['project_prompt']['当前阶段'] == '修复阶段：通过回归'
         assert result['rejected']
     restarted = TbrainService(service.home)
     context = restarted.bootstrap('codex:rules-new', 'codex', str(work))['package']
-    assert '待用户确认' in context and '模型想覆盖的目标' in context
+    pending_path = restarted.store.project_dir('父项目') / '待用户确认.md'
+    assert '待用户确认' in context and str(pending_path) in context
+    assert '模型想覆盖的目标' in pending_path.read_text(encoding='utf-8')
+    assert '模型想覆盖的目标' not in context
     assert '用户手改的目标' in context
 
 
@@ -668,6 +686,27 @@ def test_historical_fork_inherits_saved_point_and_keeps_parent_unchanged(env):
     branch, _ = _load(service, service.index.session('codex:auto-fork'))
     assert len(branch.users) == 2 and branch.header['branch_user_count'] == 1
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize('field', ['target', 'next_step'])
+def test_historical_fork_keeps_user_owned_fields(env, field):
+    service, _, work = env
+    prompt(service, 'codex', 'owned-parent', work, '保留用户修改的记忆')
+    assert service.save('codex:owned-parent', [
+        {'op': 'replace', 'section': field, 'text': '模型原稿'}])['ok']
+    _, path = _load(service, service.index.session('codex:owned-parent'))
+    path.write_text(path.read_text(encoding='utf-8').replace('模型原稿', '用户手改'), encoding='utf-8')
+    saved = service.save('codex:owned-parent', [
+        {'op': 'append', 'section': 'goal', 'items': [{'text': '核对手改保护'}]}])
+    parent_bytes = path.read_bytes()
+    prompt(service, 'codex', 'owned-fork', work, '从保存点继续')
+    assert service.resume('codex:owned-fork', 'codex:owned-parent', fork_revision=saved['revision'])['ok']
+    result = service.save('codex:owned-fork', [{'op': 'replace', 'section': field, 'text': '覆盖手改'}])
+    assert not result['ok']
+    branch, _ = _load(service, service.index.session('codex:owned-fork'))
+    assert getattr(branch, field) == '用户手改'
+    assert field in branch.header['user_owned_fields']
+    assert path.read_bytes() == parent_bytes
 
 
 def test_dead_end_becomes_retryable_after_dependency_change(env):
@@ -753,7 +792,8 @@ def test_search_returns_matching_numbered_memory(env):
     prompt(service, 'codex', 'snippet', work, '修复中文索引')
     service.save('codex:snippet', [{'op': 'append', 'section': 'decision', 'items': [
         {'text': '保留中文分词 | 中文索引需要支持二字查询'}]}])
-    result = service.search('二字查询', 'codex:snippet')
+    service.bootstrap('codex:snippet-reader', 'codex', str(work))
+    result = service.search('二字查询', 'codex:snippet-reader')
     hit = next(item for item in result['results'] if item.get('session_id') == 'codex:snippet')
     assert 'K1 保留中文分词' in hit['snippet'] and '二字查询' in hit['snippet']
     assert len(hit['snippet']) <= 500

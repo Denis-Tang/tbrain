@@ -36,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     hook = sub("hook", "读取宿主 hook 的 stdin JSON，输出宿主可消费的 JSON")
     hook.add_argument("--host", required=True, help="claude-code|codex|dsh|pi")
     tool = sub("tool", "以命令行调用 MCP 工具（供 pi 扩展等使用）")
-    tool.add_argument("name", help="bootstrap|search|save|resume")
+    tool.add_argument("name", help="bootstrap|search|save|save_decision|resume")
     tool.add_argument("payload", nargs="?", help="JSON 参数（省略或 - 时从 stdin 读取）")
 
     for name in ("connect", "disconnect"):
@@ -75,16 +75,30 @@ def _parser() -> argparse.ArgumentParser:
     sessions = sub("sessions", "列出会话总结")
     sessions.add_argument("--filter", default="all", help="状态筛选（默认 all）")
     project = sub("project", "查看/维护项目配置")
-    project.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])
+    project.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove", "set", "ids"])
     project.add_argument("--name", default="", help="项目名")
     project.add_argument("--path", dest="paths_", action="append", default=[], help="工作目录（可重复）")
     project.add_argument("--parent", default="", help="父项目名")
     project.add_argument("--allow-child", action="store_true", help="允许读取子项目内容")
     project.add_argument("--rename-from", default="", help="重命名前的旧项目名")
+    project.add_argument("--read-standalone", choices=["on", "off"], help="全局共享（读取非项目会话），仅用于 project set")
+    project_ids = project.add_mutually_exclusive_group()
+    project_ids.add_argument("--preview", action="store_true", help="只读预览缺少稳定 ID 的项目")
+    project_ids.add_argument("--apply", metavar="JSON", help="应用 project ids --preview 输出的 JSON 清单")
+    project.add_argument("--backup", default="", help="应用 ID 前备份项目目录的位置（不得在知识库内）")
     prompt = sub("prompt", "查看/保存全局或项目提示词")
     prompt.add_argument("scope", nargs="?", default="global", choices=["global", "project"])
     prompt.add_argument("--name", default="", help="项目名（scope=project 时）")
     prompt.add_argument("--save", default=None, help="把文件内容保存为提示词（项目用 JSON sections）")
+    export = sub("export", "只读导出项目规则为 AGENTS.md / CLAUDE.md 片段")
+    export.add_argument("--project", required=True, help="项目名")
+    export.add_argument("--out", type=Path, help="输出文件（默认直接输出 Markdown；文件须在知识库外）")
+    memory_map = sub("map", "生成项目的 Git 事实地图")
+    memory_map.add_argument("--project", required=True, help="项目名")
+    memory_map.add_argument("--repo", type=Path, help="只读 Git 仓库路径，不注册项目路径")
+    worktree = sub("worktree", "只读列出工作树事实与名称线索")
+    worktree.add_argument("action", choices=["audit"])
+    worktree.add_argument("--repo", type=Path, default=Path.cwd(), help="Git 仓库路径（默认当前目录）")
     bridge = sub("bridge", "列出项目内未完成会话最近的决策，供接手时对齐")
     bridge.add_argument("action", nargs="?", default="show", choices=["show"])
     bridge.add_argument("--project", default="", help="项目名")
@@ -95,13 +109,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--execute", action="store_true", help="正式执行迁移（写入新 vault，旧数据只读）")
     migrate.add_argument("--to", default="", help="目标 vault（默认 settings.vault_path）")
     sub("version", "显示版本与安装状态")
-    check = sub("check", "运行项目本地检查（不依赖 GitHub CI）")
+    check = sub("check", "运行项目本地检查")
     check.add_argument("--path", type=Path, default=None, help="项目目录（默认当前目录）")
-    check.add_argument("--config", type=Path, default=None, help="检查配置；默认查找 .tbrain/check.yaml 或 tbrain.check.yaml")
-    dream = sub("dream", "冷蒸馏长期记忆（只读本地状态；不调用模型，不阻塞启动包）")
-    dream.add_argument("action", nargs="?", default="status", choices=["status", "run"])
-    dream.add_argument("--ops", default="", help="显式整理操作 JSON（外部分析器产出，本命令不调用模型）")
-    dream.add_argument("--project", default="", help="只蒸馏该项目里已结束的会话")
+    check.add_argument("--config", type=Path, default=None, help="检查配置文件")
     return parser
 
 
@@ -175,12 +185,31 @@ def _cmd_tool(args) -> dict:
 
 def _cmd_project(args) -> dict:
     service = _service(_app_home(args))
+    if args.action == "ids":
+        if args.preview:
+            return service.store.project_ids()
+        if not args.apply:
+            raise RuntimeError("请用 --preview 预览，或 --apply <预览JSON> --backup <目录> 应用")
+        preview = json.loads(Path(args.apply).read_text(encoding="utf-8-sig"))
+        return service.store.project_ids(apply=True, backup_dir=args.backup,
+                                         assignments=preview.get("assignments"))
+    if args.read_standalone is not None and args.action != "set":
+        raise RuntimeError("--read-standalone 仅用于 project set")
     if args.action == "list":
         return {"projects": service.projects()}
     if not args.name:
         raise RuntimeError("请用 --name 指定项目名")
     if args.action == "remove":
         return service.delete_project(args.name)
+    if args.action == "set":
+        if args.paths_ or args.parent or args.allow_child or args.rename_from:
+            raise RuntimeError("project set 只修改开关；工作目录、父项目和名称请用 project add")
+        if args.read_standalone is not None:
+            return service.set_project_read_standalone(args.name, args.read_standalone == "on")
+        project = service.store.project(args.name)
+        if project is None:
+            raise RuntimeError(f"项目不存在：{args.name}")
+        return {"ok": True, "project": project}
     return service.configure_project(args.name, list(args.paths_), parent=args.parent,
                                      allow_child=bool(args.allow_child),
                                      rename_from=args.rename_from)
@@ -203,6 +232,50 @@ def _cmd_prompt(args) -> dict:
             sections = {"最终目标": text}
         return service.save_project_prompt(args.name, sections)
     return service.project_prompt(args.name)
+
+
+def _cmd_export(args) -> dict | str:
+    from .settings import SettingsStore
+    from .store import export_project
+
+    configured = SettingsStore(_app_home(args)).load().vault_path
+    if not configured:
+        raise RuntimeError("请先配置知识库路径")
+    vault = Path(configured).expanduser().resolve()
+    output = args.out.expanduser().resolve() if args.out is not None else None
+    if output is not None and output.is_relative_to(vault):
+        raise RuntimeError("导出文件须在知识库外，不能覆盖输入知识库文件")
+    text = export_project(vault, args.project)
+    if output is None:
+        return text
+    output.write_text(text, encoding="utf-8", newline="\n")
+    return {"ok": True, "project": args.project, "path": str(output)}
+
+
+def _cmd_map(args) -> dict:
+    from .worktree import render_memory_map
+
+    store = _service(_app_home(args)).store
+    project = store.project(args.project)
+    if project is None:
+        raise ValueError("项目不存在")
+    text = render_memory_map(project, args.repo)
+    output = store.write_memory_map(args.project, text)
+    return {"ok": True, "project": args.project, "path": str(output), "bytes": len(text.encode("utf-8"))}
+
+
+def _cmd_worktree(args) -> dict:
+    from .settings import SettingsStore
+    from .store import split_front_matter
+    from .worktree import audit
+
+    configured = SettingsStore(_app_home(args)).load().vault_path
+    projects = []
+    if configured:
+        for path in (Path(configured).expanduser() / "项目").glob("*/项目卡.md"):
+            data, _ = split_front_matter(path.read_text(encoding="utf-8-sig"))
+            projects.append({**data, "name": str(data.get("name") or path.parent.name)})
+    return audit(args.repo, projects)
 
 
 def _cmd_bridge(args) -> dict:
@@ -322,21 +395,6 @@ def _cmd_evict(args) -> dict:
     return proc.evict_old_versions(__version__, timeout=args.timeout, home=home)
 
 
-def _cmd_check(args) -> dict:
-    from .check import run_check
-
-    root = Path(args.path).expanduser() if getattr(args, "path", None) else Path.cwd()
-    config = Path(args.config).expanduser() if getattr(args, "config", None) else None
-    return run_check(root, config_path=config)
-
-
-def _cmd_dream(args) -> dict:
-    service = _service(_app_home(args))
-    if args.action == "run":
-        return service.dream_run(ops_path=str(args.ops or ""), project=str(args.project or ""))
-    return service.dream_status()
-
-
 def _cmd_version(args) -> dict:
     from .settings import SettingsStore
 
@@ -348,7 +406,13 @@ def _cmd_version(args) -> dict:
             "installed": bool(installer.installed_versions(root))}
 
 
-def run_command(command: str, args) -> dict:
+def _cmd_check(args) -> dict:
+    from .check import run_check
+
+    return run_check(Path(args.path) if args.path else Path.cwd(), config_path=args.config)
+
+
+def run_command(command: str, args) -> dict | str:
     handlers = {
         "hook": _cmd_hook,
         "tool": _cmd_tool,
@@ -363,11 +427,13 @@ def run_command(command: str, args) -> dict:
         "sessions": _cmd_sessions,
         "project": _cmd_project,
         "prompt": _cmd_prompt,
+        "export": _cmd_export,
+        "map": _cmd_map,
+        "worktree": _cmd_worktree,
         "bridge": _cmd_bridge,
         "migrate": _cmd_migrate,
         "evict": _cmd_evict,
         "version": _cmd_version,
-        "dream": _cmd_dream,
         "check": _cmd_check,
     }
     return handlers[command](args)
@@ -390,7 +456,10 @@ def main(argv=None) -> int:
             return 0
         result = run_command(command, args)
         compact = command in ("hook", "tool")
-        _print(result, indent=None if compact else 2)
+        if command == "export" and args.out is None:
+            print(result, end="")
+        else:
+            _print(result, indent=None if compact else 2)
         if command in ("bridge", "check") and isinstance(result, dict) and result.get("ok") is False:
             return 1
         return 0

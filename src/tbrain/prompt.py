@@ -25,8 +25,8 @@ MODEL_START = "<!-- owner:model -->"
 MODEL_END = "<!-- /owner:model -->"
 
 MAINTENANCE_GUIDANCE = (
-    "执行前核对项目提示词与相关文件；目标或长期规则变化、阶段完成或切换、关键路径或命令变化、"
-    "旧内容失效时，在同次任务的 save 中提交 project_prompt 更新对应节，无变化不改写。"
+    "执行前核对项目提示词与相关文件；项目目标、阶段、关键路径或命令变化及旧说明失效时，"
+    "用 save 的 project_prompt 更新对应节，无变化不改写。用户长期决定用 save_decision，勿重复抄入硬规则。"
     "空白节只补已确认内容，不推断用户偏好；保存后核对 written/rejected，只补交失败部分。"
 )
 
@@ -36,6 +36,9 @@ PROJECT_PROMPT_SPEC = """\
 - 硬规则每条带来源：（来源：[[会话名]]#U3 或 U3 / E4）；无来源不写入。目标和硬规则写长期约定；当前阶段写“阶段名：完成标准”，随阶段更新。
 - 关键路径和命令写“用途：路径或命令”；命令须已验证。只写确认的事实，不写尝试经过、临时流水、相对时间词或评价；主语写全称。
 - 只提交变化的节，整节替换；旧内容自动进入变更日志。用户补充区和用户手改内容不覆盖。
+- 更新已有章节（空标题也算）必须带读取时的base_sha，例如：{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"},"base_sha":{"当前阶段":"ab12cd34"}}。启动包标题提供sha，取自未过滤原节；继承规则不可用作本项目写入基准。真正缺失的新章节可省略。
+- 缺基准或发生冲突时核对rejected中的head.text，再用head.sha作为该节base_sha重交；只重交失败节，不重复written。
+- 公共池env取代已有卡也必须带base_sha：先search读取公共命中的sha，再提交{"op":"env","items":[{"type":"工具","name":"工具名","base_sha":"ab12cd34","body":"已确认的新内容"}]}；新卡可省略base_sha。公共卡冲突同样先核对head.text，再用head.sha作为该卡base_sha，只重交失败卡。
 """ + MAINTENANCE_GUIDANCE
 
 _SOURCE_RE = re.compile(r"（来源：\s*(.+?)）")
@@ -74,7 +77,7 @@ def parse(text: str) -> dict:
     current = ""
     for line in model.split("\n"):
         if line.startswith("## "):
-            current = line[3:].strip()
+            current = re.sub(r'\s*〔sha:[^〕]*〕\s*$', '', line[3:].strip())
             continue
         if current in sections:
             sections[current] = (sections[current] + "\n" + line).strip("\n")
@@ -203,6 +206,24 @@ def _resolve_sources(item: str, resolve_source) -> bool:
         return all(bool(resolve_source(name.strip(), ref)) for name, _alias, ref in refs)
     local = _LOCAL_REF_RE.findall(sources)
     return bool(local) and all(bool(resolve_source("", ref)) for ref in local)
+
+
+def classify_rules(text: str, resolve_source) -> dict[str, list[str]]:
+    """Keep each original rule; only a known source state changes its category."""
+    result = {state: [] for state in ('active', 'pending', 'inactive', 'unresolved')}
+    for line in str(text or '').splitlines():
+        if not line.strip():
+            continue
+        match = _SOURCE_RE.search(line)
+        refs = _WIKI_REF_RE.findall(match[1]) if match else []
+        sources = [(name.strip(), ref) for name, _alias, ref in refs]
+        if match and not refs:
+            sources = [('', ref) for ref in _LOCAL_REF_RE.findall(match[1])]
+        states = [resolve_source(name, ref)['state'] for name, ref in sources]
+        state = ('inactive' if 'inactive' in states else 'pending' if 'pending' in states else
+                 'unresolved' if not states or 'unresolved' in states else 'active')
+        result[state].append(line)
+    return result
 
 
 def _check_path(item: str, path_exists, warnings: list[str]) -> None:

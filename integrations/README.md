@@ -57,9 +57,9 @@ DSH 多目录、未启动或未更新插件，以及宿主接口失败时，Tbra
 
 ### DSH 说明
 
-- `tbrain-native` 统一处理 `agent/created`、`agent/pre-step`、`agent/turn-stopping`、`session/event` 与 `agent/disposed`；仅记录根 Agent 的用户指令，子代理由根 Agent 汇总。
+- `tbrain-native` 统一处理 `agent/session-start`、`agent/pre-step`、`agent/turn-stopping`、`session/event` 与 `agent/disposed`；仅记录根 Agent 的用户指令，子代理由根 Agent 汇总。
 - 收尾未保存时用 `agent.steer()` 续跑一次，避免重复提醒循环；PreCompact 注入最近用户指令。
-- 原生 CLI 响应使用 `additional_context`；MCP 仍提供四个工具，启动参数必须包含 `--home <目录> mcp`。
+- 原生 CLI 响应使用 `additional_context`；MCP 提供五个工具，包括长期决定入口 `save_decision`，启动参数必须包含 `--home <目录> mcp`。
 - `connect dsh` 仅替换 Tbrain 条目，原生插件放在固定应用数据目录；旧官方桥包不再加载，不自动卸载。
 
 ### Codex 信任
@@ -68,9 +68,11 @@ Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定�
 
 ### pi 扩展
 
-Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程；返回顺序和原有超时保持不变。
+Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程。Hook 等待 15 秒，长于 Tbrain 的 10 秒锁等待；工具调用仍等待 60 秒。
 
-`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_resume` 四个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功保存后重置计数；重载扩展也会重置计数，shell 的其他文件修改不会被识别。
+任务模式下，Pi 扩展成功保存 `understanding` 后，在 `ctx.hasUI` 为真时用原生选择框展示完整复述，选项为“继续补充”和“确认”。用户提交“确认”后才保存 `confirm`；取消或选择继续补充时停止执行。没有交互界面时，模型必须结束回复，等待用户单独回复“确认”。其他宿主优先使用各自的原生确认工具，规则与记录方式见 [LOCAL-LOOP](../docs/LOCAL-LOOP.md#首条消息先确认任务理解--confirm-the-task-once)。
+
+`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_save_decision` / `tbrain_resume` 五个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功调用 `tbrain_save` 后重置计数；保存长期决定不代表已保存工作进展，不重置提醒。重载扩展也会重置计数，shell 的其他文件修改不会被识别。
 
 ## 升级后旧进程
 
@@ -96,6 +98,6 @@ tbrain disconnect <host>           # 只移除 Tbrain 条目
 |---|---|
 | `hooks.json` | DSH 桥使用的 Claude 风格 hook 模板（`__TBRAIN_ENTRY__` 占位） |
 | `tbrain-dsh.mjs` | DSH 原生 cordis 插件（PreCompact / SessionEnd / 上下文提醒） |
-| `pi/tbrain.ts` | pi 扩展（生命周期 hook + 四个工具） |
+| `pi/tbrain.ts` | pi 扩展（生命周期 hook + 五个工具） |
 
 会话记忆适配保存模型接续所需的信息，项目联动另向宿主登记项目名称和工作目录。适配不读取宿主完整会话记录、不收集工具原始输出、不写入任何凭据。

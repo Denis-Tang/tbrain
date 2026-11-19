@@ -40,6 +40,78 @@ def project_bases(service, project):
             for name, text in service.project_prompt(project)['sections'].items()}
 
 
+def test_one_chat_routes_decisions_and_progress_to_their_projects(env):
+    service, vault, work = env
+    service.store.save_project('工程', [str(work)])
+    service.store.save_project('个人', [])
+    host_id = 'pi:mixed'
+    prompt(service, 'pi', 'mixed', work, '导出器按原始行号保留来源')
+    prompt(service, 'pi', 'mixed', work, '我习惯每周五归还图书，这周答应带上借书证')
+    for project, source, text in [('工程', 'U1', '保留原始行号'), ('个人', 'U2', '每周五归还图书')]:
+        result = service.tool('save_decision', dict(session_id=host_id, project=project, source=[source], text=text))
+        assert result['ok'] and result['written']['project'] == project
+        assert result['written']['session_id'] == host_id
+    assert [entry['text'] for entry in service.store.project_decisions('工程')] == ['保留原始行号']
+    assert service.project_memory('个人')['entries'][0]['source_text'] == 'U2: 我习惯每周五归还图书，这周答应带上借书证'
+    prompt(service, 'pi', 'mixed', work, '以后改成每周六归还图书')
+    assert service.save_decision(host_id, '每周六归还图书', ['U3'], supersedes=['DL-0001'], project='个人')['ok']
+    assert service.store.project_decisions('工程')[0]['active']
+    assert not service.store.project_decisions('个人')[0]['active']
+
+    def save_next(project, text):
+        return service.tool('save', dict(session_id=host_id, project=project, operations=[
+            {'op': 'replace', 'section': 'next_step', 'text': text}]))
+
+    assert not save_next('不存在', '不应写入')['ok']
+    assert save_next('', '复核导出器')['session']['session_id'] == host_id
+    note = save_next('个人', '办理借阅延期')['session']['session_id']
+    # 新服务和空 SQLite 索引，从同一个 Markdown 库继续。
+    service = TbrainService(work / 'new-home', vault=vault)
+    service.settings.update({'vault_path': str(vault), 'ntp_enabled': False})
+    service.store.save_project('个人事务', [], rename_from='个人')
+    assert save_next('个人事务', '周五带上借书证')['session']['session_id'] == note
+    assert len(service.index.sessions('个人事务')) == 1
+    assert service.index.session(host_id)['next_step'] == '复核导出器'
+    reader = 'codex:personal'
+    service.bootstrap(reader, 'codex', str(work), project='个人事务')
+    hits = service.search('借书证', reader)['results']
+    assert any(hit.get('session_id') == note for hit in hits)
+    detail = service.read(reader, note)['content']
+    assert host_id in detail and '导出器' not in detail
+    package = service.resume(reader, note)['handoff']
+    assert '周五带上借书证' in package and '每周六归还图书' in package and '导出器' not in package
+    assert not service.read(reader, host_id)['ok']
+
+
+def test_cross_project_evidence_and_test_result_follow_the_saved_progress(env):
+    service, _, work = env
+    project_dir = work / 'export'
+    project_dir.mkdir()
+    (project_dir / 'result.txt').write_text('保留行号 17', encoding='utf-8')
+    service.store.save_project('导出器', [str(project_dir)])
+    prompt(service, 'codex', 'mixed', work, '检查导出器的行号')
+    service.hook('codex', {'hook_event_name': 'ToolResult', 'session_id': 'mixed', 'cwd': str(work),
+                           'last_test': {'command': 'pytest -q', 'exit_code': 1}})
+    ops = [{'op': 'append', 'section': 'evidence', 'items': [{'kind': 'file', 'text': 'result.txt:1'}]},
+           {'op': 'append', 'section': 'done', 'items': [{'text': '查到原始行号 [证据:E1]'}]}]
+    def report(exit_code):
+        return service.save('codex:mixed', ops, {'command': 'pytest -q', 'exit_code': exit_code}, project='导出器')
+
+    rejected = report(0)
+    assert not rejected['ok'] and rejected['written']['evidence'] == ['E1']
+    stop = {'hook_event_name': 'Stop', 'session_id': 'mixed', 'cwd': str(work)}
+    assert service.hook('codex', stop)['decision'] == 'block'
+    accepted = report(1)
+    assert accepted['ok'] and service.hook('codex', stop) == {}
+    assert len(service.index.sessions('导出器')) == 1
+    note = accepted['session']['session_id']
+    reader = 'pi:export'
+    service.bootstrap(reader, 'pi', str(project_dir))
+    assert service.read(reader, note, 'E1', source=True)['content'] == '保留行号 17'
+    assert json.loads(service.index.session(note)['last_verify'])['source'] == 'tool'
+    assert 'D1 查到原始行号' in service.resume(reader, note)['handoff']
+
+
 def test_existing_snapshot_does_not_require_another_hardlink(env, monkeypatch):
     import os
 
@@ -797,3 +869,115 @@ def test_search_returns_matching_numbered_memory(env):
     hit = next(item for item in result['results'] if item.get('session_id') == 'codex:snippet')
     assert 'K1 保留中文分词' in hit['snippet'] and '二字查询' in hit['snippet']
     assert len(hit['snippet']) <= 500
+
+
+def test_read_archived_facts_and_evidence_without_resuming(env):
+    service, vault, work = env
+    service.store.save_project('P', [str(work)])
+    prompt(service, 'codex', 'old-read', work, '雕塑工具是锤子和凿子，安装需要一个月，LIV 连体衣号码是54')
+    evidence = work / 'facts.txt'
+    evidence.write_text('雕塑工具：锤子和凿子\n安装需要一个月\nLIV 连体衣号码是54\n', encoding='utf-8')
+    assert service.save('codex:old-read', [{'op': 'append', 'section': 'evidence',
+        'items': [{'kind': 'file', 'text': 'facts.txt:2'}]}])['ok']
+    facts = ['雕塑工具是锤子和凿子 [证据:E1]', '安装需要一个月 [证据:E1]', 'LIV 连体衣号码是54 [证据:E1]']
+    assert service.save('codex:old-read', [{'op': 'append', 'section': 'done',
+        'items': [{'text': text} for text in facts + [f'其他事实 {i}' for i in range(32)]]}])['ok']
+    prompt(service, 'codex', 'new-read', work, '查历史事实')
+    hit = service.search('雕塑工具', 'codex:new-read')['results'][0]
+    assert 'D1' in hit['entry_ids'] and hit['read'] == {'target': 'codex:old-read'}
+    before = {path: path.read_bytes() for path in (vault / '会话总结').rglob('*.md')}
+    with service.index.connect() as conn:
+        access_before = conn.execute('SELECT COUNT(*) FROM access_log').fetchone()[0]
+    for number, fact in enumerate(facts, 1):
+        result = service.tool('read', {'session_id': 'codex:new-read', **hit['read'], 'entry_id': f'D{number}'})
+        assert result['ok'] and result['content'] == fact and result['evidence'] == ['E1']
+    result = service.read('codex:new-read', 'codex:old-read', 'E1', source=True, limit=7)
+    chunks = [result['content']]
+    assert result['source_line'] == 2 and result['truncated']
+    while result['next_start'] is not None:
+        result = service.read('codex:new-read', 'codex:old-read', 'E1', source=True, start=result['next_start'], limit=7)
+        chunks.append(result['content'])
+    assert ''.join(chunks) == evidence.read_text(encoding='utf-8')
+    assert service.read('codex:new-read', 'codex:old-read', 'U1')['content'].startswith('雕塑工具')
+    assert all(path.read_bytes() == value for path, value in before.items())
+    with service.index.connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM access_log').fetchone()[0] == access_before
+
+
+def test_read_obeys_visibility_and_registered_attachments(env):
+    from tbrain.store import render_note
+    service, vault, work = env
+    service.store.save_project('P', [str(work)])
+    service.store.save_project('Other', [])
+    service.bootstrap('codex:reader', 'codex', str(work))
+    service.bootstrap('codex:other', 'codex', str(work), project='Other')
+    assert not service.read('codex:reader', 'codex:other')['ok']
+    other_path = service.index.session('codex:other')['path']
+    assert not service.read('codex:reader', other_path)['ok']
+    external = work / 'notes.txt'
+    external.write_text('只读附件内容', encoding='utf-8')
+    assert not service.read('codex:reader', str(external))['ok']
+    card = vault / '附件' / '文档' / 'notes.md'
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(render_note({'path': str(external), 'projects': ['Other']}, '附件卡片'), encoding='utf-8')
+    assert not service.read('codex:reader', str(external))['ok']
+    card.write_text(render_note({'path': str(external), 'projects': ['P']}, '附件卡片'), encoding='utf-8')
+    hit = next(item for item in service.search('notes', 'codex:reader')['results'] if item['kind'] == 'attachment')
+    assert service.read('codex:reader', **hit['read'])['ok']
+    assert service.read('codex:reader', str(external))['content'] == '只读附件内容'
+    assert '附件卡片' in service.read('codex:reader', str(card))['content']
+    assert not service.read('codex:reader', str(external), limit=0)['ok']
+    assert not service.read('codex:reader', 'codex:reader', 'D999')['ok']
+    external.unlink()
+    assert not service.read('codex:reader', str(external))['ok']
+
+
+def test_read_scope_goal_state_and_one_refresh(env, monkeypatch):
+    from unittest.mock import Mock
+    from tbrain.store import render_note
+    service, vault, work = env
+    service.store.save_project('P', [str(work)])
+    sid = 'codex:scope'
+    prompt(service, 'codex', 'scope', work, '核对目标')
+    outside = work.parent / 'reference.txt'
+    outside.write_text('登记后可读', encoding='utf-8')
+    assert service.save(sid, [
+        {'op': 'append', 'section': 'goal', 'items': [{'text': '核对记录'}]},
+        {'op': 'append', 'section': 'evidence', 'items': [{'kind': 'file', 'text': f'{outside}:1'}]},
+    ])['ok']
+    assert service.read(sid, sid, 'G1')['done'] is False
+    assert service.save(sid, [{'op': 'set_status', 'status': '已完成', 'complete_goals': ['G1']}])['ok']
+    assert service.read(sid, sid, 'G1')['done'] is True
+    assert service.read(sid, sid, 'E1', source=True)['content'] == f'{outside}:1'
+    service.store.write_text(vault / '附件/文档/reference.md', render_note({'path': str(outside), 'projects': ['P']}, '登记说明'))
+    service.store.save_public_card('工具', '检索样本', {'body': '正文' * 3000 + ' needle'})
+    decision = service.save_decision(sid, '项目按事项记忆', ['U1'])['written']
+    refresh = Mock(wraps=service.refresh_index)
+    monkeypatch.setattr(service, 'refresh_index', refresh)
+    assert service.read(sid, sid, 'E1', source=True)['content'] == '登记后可读'
+    assert service.read(sid, decision['path'], decision['id'])['ok']
+    hit = service.search('needle', sid)['results'][0]
+    assert 'body' not in hit and 'needle' in hit['snippet'] and len(hit['snippet']) <= 500
+    assert refresh.call_count == 3
+
+
+def test_workflow_hook_is_optional_and_old_sessions_keep_their_memory(env, monkeypatch):
+    service, _, work = env
+    prompt(service, 'codex', 'workflow', work, '按事项保存')
+    sid = 'codex:workflow'
+    from tbrain import session
+    summary, path = session.load_session(service, sid)
+    summary.header.update(task_mode=True, status='已暂停')
+    summary.extra['任务理解'] = '旧记录'
+    session.write_session(service, summary, path)
+    assert '工作约定' not in service.bootstrap(sid, 'codex', str(work))['package']
+    assert '旧记录' in service.read(sid, sid)['content']
+    assert service.save(sid, [{'op': 'replace', 'section': 'target', 'text': '继续原任务'}])['ok']
+    plugin = work / 'workflow.py'
+    plugin.write_text("def on_hook(event, result, service):\n"
+                      "    result.additional_context += '\\n插件收到 ' + event.kind\n"
+                      "    return result\n", encoding='utf-8')
+    monkeypatch.setenv('TBRAIN_WORKFLOW', str(plugin))
+    response = prompt(service, 'codex', 'workflow', work, '继续')
+    context = response['hookSpecificOutput']['additionalContext']
+    assert 'U2' in context and '插件收到 user-prompt' in context

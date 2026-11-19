@@ -325,6 +325,13 @@ dialog .switch-row{margin-top:20px}
 .close-button:hover{background:var(--hover);color:var(--text)}
 .hint{font-size:12px;line-height:18px;color:var(--muted);margin:0 0 14px}
 #prompt-dialog{width:min(720px,calc(100vw - 48px))}
+#memory-dialog{width:min(760px,calc(100vw - 48px))}
+#memory-content{user-select:text;overflow-wrap:anywhere}
+.memory-location{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+.memory-location p{flex:1;min-width:180px}
+.memory-entry{border-top:1px solid var(--line);padding:16px 0}
+.memory-text{white-space:pre-wrap;line-height:1.65;margin:8px 0}
+.memory-entry summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:12px}
 #tree-dialog{width:min(880px,calc(100vw - 48px));max-height:min(720px,calc(100vh - 64px));padding:24px;overflow:hidden}
 #tree-dialog[open]{display:flex;flex-direction:column}
 #tree-dialog h2{overflow-wrap:anywhere}

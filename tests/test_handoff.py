@@ -105,6 +105,13 @@ def test_only_explicit_decision_markers_change_effectiveness():
                  '候选方案 | 理由（建议，未确认）', '候选方案 | 待确认', '候选方案 | 理由（建议）'):
         assert not handoff.decision_active(text)
     assert handoff.decision_active('不要恢复被取代的方案 | 用户要求')
+    assert handoff.decision_active('未确认订单保留七天 | 用户已确定该保留期')
+    assert handoff.decision_active('建议书归档七年 | 用户约定')
+    fields = '\n理由：便于维护\n取舍：先做试验\n决定人：Agent'
+    for headline in ('先试验重排 | 建议，待用户确认', '建议按候选方案实现 | 需要试验'):
+        assert handoff.decision_state(headline + fields) == 'pending'
+    assert handoff.decision_state('旧方案 | 理由（被取代）' + fields) == 'inactive'
+    assert handoff.decision_active('使用 SQLite | 简单' + fields)
 
 
 def test_fingerprint_ignores_trailing_whitespace_and_newlines():

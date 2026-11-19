@@ -262,12 +262,12 @@ def test_resume_view_child_project_filter(index: Index):
     assert {row["session_id"] for row in with_child} == {"root", "child"}
 
 
-def test_resume_view_independent_pool_and_cwd_priority(index: Index):
+def test_resume_view_independent_pool_and_cwd_priority(index: Index, tmp_path):
     add_session(index, "same", "", project="", status="进行中", updated_at=iso_days_ago(5),
-                cwd=r"D:\work\a")
+                cwd=str(tmp_path / "a"))
     add_session(index, "other", "", project="", status="进行中", updated_at=iso_days_ago(1),
-                cwd=r"D:\work\b")
-    rows = index.resume_view("", [], cwd=r"D:\WORK\A".lower())
+                cwd=str(tmp_path / "b"))
+    rows = index.resume_view("", [], cwd=str(tmp_path / "a"))
     assert [row["session_id"] for row in rows] == ["same", "other"]
     rows = index.resume_view("", [])
     assert [row["session_id"] for row in rows] == ["other", "same"]
@@ -433,3 +433,14 @@ def test_concurrent_schema_initialization_on_fresh_home(tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_history_search_relevance_is_independent_of_task_age_and_status(index):
+    add_session(index, 'old', 'sculpture tools hammer chisel ' * 5,
+                status='已完成', updated_at=iso_days_ago(180))
+    add_session(index, 'new', 'sculpture tools paint brush gallery exhibition event ' * 3)
+    add_session(index, 'noise', 'sculpture gallery room event crowd ' * 10)
+    rows = index.search_sessions('sculpture tools', limit=3)
+    assert rows[0]['session_id'] == 'old'
+    assert rows[0]['relevance'] > rows[1]['relevance']
+    assert index.resume_view('P1')[0]['session_id'] != 'old'

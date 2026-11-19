@@ -769,6 +769,10 @@
     prompt.type = "button";
     prompt.addEventListener("click", () => openProjectPrompt(project));
     footer.append(prompt);
+    const memory = el("button", "button secondary small", "项目长期记忆");
+    memory.type = "button";
+    memory.addEventListener("click", () => openProjectMemory(project));
+    footer.append(memory);
     body.append(footer);
     inner.append(body);
     details.append(inner);
@@ -1012,6 +1016,40 @@
     $("delete-dialog").showModal();
   }
 
+  async function openProjectMemory(project) {
+    $("memory-project").textContent = project.name;
+    const container = $("memory-content");
+    container.replaceChildren(emptyState("正在读取"));
+    $("memory-dialog").showModal();
+    try {
+      const result = await call("project_memory", project.name);
+      container.replaceChildren();
+      const location = el("div", "memory-location");
+      const copy = el("button", "button secondary small", "复制路径");
+      copy.type = "button";
+      copy.addEventListener("click", () => copyText(result.path));
+      location.append(el("p", "dialog-meta", result.path), copy);
+      container.append(location);
+      if (!result.entries.length) container.append(emptyState("暂无项目长期记忆"));
+      for (const entry of result.entries.slice().reverse()) {
+        const card = el("article", "memory-entry");
+        card.append(el("p", "dialog-meta", `${entry.id} · ${entry.at} · ${entry.active ? "当前有效" : "已被替代"}`));
+        card.append(el("p", "memory-text", entry.text));
+        if (entry.why) card.append(el("p", "memory-text", `用户理由：${entry.why}`));
+        const details = el("details");
+        details.append(el("summary", "", `用户原话来源 ${entry.source || ""}`));
+        details.append(el("p", "memory-text", entry.source_text || "未找到原话，请核对来源会话；此记录未重新校验。"));
+        details.append(el("p", "dialog-meta", entry.source_path || entry.session_id || ""));
+        if (entry.supersedes.length) details.append(el("p", "dialog-meta", `替代：${entry.supersedes.join("、")}`));
+        card.append(details);
+        container.append(card);
+      }
+    } catch (error) {
+      container.replaceChildren(emptyState("读取失败"));
+      if (!error.bridge) toast(errorText(error), true);
+    }
+  }
+
   function openProjectPrompt(project) {
     $("prompt-dialog-title").textContent = "项目提示词";
     $("prompt-dialog-project").textContent = project.name || "";
@@ -1149,7 +1187,6 @@
     $("timeout-hours").value = Number.isFinite(hours) && hours > 0 ? hours : 6;
     $("ntp-enabled").checked = settings.ntp_enabled !== false;
     $("reminder-context-switch").checked = !!settings.reminder_context_switch;
-    $("task-mode").checked = !!settings.task_mode;
     renderTimezoneOptions(settings.timezone || "");
   }
 
@@ -1159,7 +1196,6 @@
     $("timeout-hours").value = "";
     $("ntp-enabled").checked = false;
     $("reminder-context-switch").checked = false;
-    $("task-mode").checked = false;
     renderTimezoneOptions("");
     updateStatusUI(null);
     renderHosts(null);
@@ -1590,6 +1626,7 @@
       });
     }
     $("close-prompt").addEventListener("click", () => $("prompt-dialog").close());
+    $("close-memory").addEventListener("click", () => $("memory-dialog").close());
     $("prompt-dialog").addEventListener("close", () => {
       const container = $("prompt-editor");
       container.replaceChildren();
@@ -1616,18 +1653,6 @@
     }, true);
     window.addEventListener("resize", () => closeMenu());
 
-    $("task-mode").addEventListener("change", async (event) => {
-      const control = event.currentTarget;
-      if (!hasBridge()) { control.checked = false; return; }
-      const enabled = control.checked;
-      const result = await withBusy(control, () => call("save_settings", { task_mode: enabled }));
-      if (result && result.settings) {
-        state.settings = result.settings;
-        control.checked = !!result.settings.task_mode;
-        toast(`${enabled ? "任务模式已开启" : "普通记忆模式已开启"}，新会话生效`);
-      } else control.checked = !enabled;
-    });
-
     $("settings-form").addEventListener("submit", (event) => {
       event.preventDefault();
       if (!hasBridge()) return;
@@ -1639,7 +1664,6 @@
         ntp_enabled: $("ntp-enabled").checked,
         timeout_hours: timeoutHours,
         reminder_context_switch: $("reminder-context-switch").checked,
-        task_mode: $("task-mode").checked,
       };
       withBusy(event.submitter || $("save-settings"), async () => {
         const result = await call("save_settings", values);

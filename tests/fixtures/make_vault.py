@@ -30,7 +30,7 @@ def setup(root: Path):
     service = TbrainService(home, vault=vault)
     service.settings.update({"vault_path": str(vault), "timezone": "Asia/Shanghai", "ntp_enabled": False,
                              "timeout_hours": 0, "reminder_context_switch": True,
-                             "install_root": str(root / "install"), "task_mode": False})
+                             "install_root": str(root / "install")})
     return service, work
 
 
@@ -99,7 +99,7 @@ def base(root: Path) -> dict:
                            mismatched_session="codex:base-moved", deleted_session="codex:base-deleted")
 
 
-def n1_case(root: Path, host: str, mode: bool, variant: str) -> dict:
+def n1_case(root: Path, host: str, variant: str) -> dict:
     service, work = setup(root)
     folder = work / "项目甲"
     folder.mkdir()
@@ -121,11 +121,8 @@ def n1_case(root: Path, host: str, mode: bool, variant: str) -> dict:
     result = service.save_project_prompt("项目甲", sections)
     assert result["ok"], result
     assert service.project_prompt("项目甲")["sections"] == sections
-    criteria = service.store.project_dir("项目甲") / "完成标准.md"
-    criteria.write_text(f"## 目标\n{padded('合成目标', 300)}\n\n## 完成标准\n{padded('合成标准', 400)}\n", encoding="utf-8")
     if variant == "F-B":
         (service.store.project_dir("项目甲") / "待用户确认.md").write_text(padded("待确认", 1700), encoding="utf-8")
-    service.settings.update({"task_mode": mode})
     sid = f"{host}:n1-probe"
     session(service, sid, "项目甲", folder)
     prompts = [padded("第一条合成任务指令", 300), "确认"]
@@ -133,19 +130,13 @@ def n1_case(root: Path, host: str, mode: bool, variant: str) -> dict:
     prompts.append("按既定范围继续核对合成项目记忆")
     if variant == "F-B":
         prompts.extend(padded(f"最坏输入指令{n}", 800) for n in range(5))
-    for number, text in enumerate(prompts):
+    for text in prompts:
         message(service, sid, folder, text)
-        if mode and number == 0:
-            save(service, sid, [{"op": "understanding", "goal": "核对合成项目记忆", "scope": "仅合成文件",
-                                  "deliverables": "合成结果", "done": "合成检查通过"}])
-        if mode and number == 1:
-            save(service, sid, [{"op": "confirm", "question": "Q1", "source": "U2",
-                                  "why": "合成确认事件", "tradeoffs": "仅合成范围", "decided_by": "用户"}])
     save(service, sid, [{"op": "replace", "section": "target", "text": padded("合成目标", 200)},
                         {"op": "replace", "section": "next_step", "text": padded("运行合成检查验证", 150)},
                         {"op": "append", "section": "done", "items": [{"text": padded(f"完成合成步骤{n}→结果", 200)} for n in range(5)]},
                         {"op": "append", "section": "goal", "items": [{"text": padded(f"待办{n}", 200)} for n in range(3)]}])
-    return finish_manifest(service, root, profile="n1", host=host, task_mode=mode, variant=variant,
+    return finish_manifest(service, root, profile="n1", host=host, variant=variant,
                            session_id=sid, project="项目甲", cwd=str(folder), sections=sections,
                            user_lengths=[len(text) for text in prompts])
 
@@ -153,10 +144,9 @@ def n1_case(root: Path, host: str, mode: bool, variant: str) -> dict:
 def n1(root: Path) -> dict:
     cases = []
     for host in ("codex", "pi"):
-        for mode in (False, True):
-            for variant in ("F-A", "F-B"):
-                case = root / f"{host}-{'task' if mode else 'memory'}-{variant}"
-                cases.append(n1_case(case, host, mode, variant))
+        for variant in ("F-A", "F-B"):
+            case = root / f"{host}-memory-{variant}"
+            cases.append(n1_case(case, host, variant))
     manifest = {"profile": "n1", "cases": cases}
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest

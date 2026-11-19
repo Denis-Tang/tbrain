@@ -82,30 +82,6 @@ PROMPT_HEADINGS = ("## 用户补充", "## 最终目标", "## 硬规则", "## 当
 INDEX_COMMENT = "<!-- 本文件由程序生成，请勿手动编辑；重新生成会覆盖本文件。 -->"
 
 PROJECT_PROMPT_TEMPLATE_MODEL = "\n\n".join(f"## {section}\n" for section in PROMPT_SECTIONS)
-COMPLETION_FILE = "完成标准.md"
-WORKTREE_NOTE_FILE = "工作区.md"
-COMPLETION_FIELDS = ("goal", "done", "evidence", "verify")
-COMPLETION_TEMPLATE = """\
----
-fields:
-  - goal
-  - done
-  - evidence
-  - verify
----
-
-## 目标
-（待填写：这个项目要做成什么样）
-
-## 完成标准
-- [ ] （待填写：可以核对的完成条件）
-
-## 证据
-（待填写：用什么真实结果证明完成）
-
-## 验证
-（待填写：本地检查命令，例如 tbrain check）
-"""
 GLOBAL_PROMPT_TEMPLATE = {
     "user": "",
     "model": "（第一期不启用模型区）",
@@ -155,29 +131,6 @@ def split_front_matter(text: str) -> tuple[dict, str]:
     if not isinstance(data, dict):
         data = {}
     return data, body
-
-
-def _worktree_note(name: str, data: dict) -> str:
-    status = str(data.get("worktree_status") or "")
-    error = str(data.get("worktree_error") or "").strip()
-    lines = [
-        INDEX_COMMENT,
-        "",
-        f"# {name} 的工作区",
-        "",
-        "一个项目只使用一处 git 工作区。",
-        "",
-        f"- 约定：{data.get('worktree_convention') or ''}",
-        f"- 代码目录：{data.get('git_root') or ''}",
-        f"- 工作区：{data.get('worktree') or ''}",
-        f"- 分支：{data.get('worktree_branch') or ''}",
-        f"- 状态：{status}",
-        f"- 本地检查：{data.get('check_config') or ''}",
-    ]
-    if error:
-        lines.append(f"- 说明：{error}")
-    lines.append("")
-    return "\n".join(lines)
 
 
 def render_note(data: dict, body: str = "") -> str:
@@ -753,36 +706,6 @@ class Store:
             return {'ok': True, 'projects': projects, 'assignments': planned, 'applied': apply,
                     'updated': len(edits), 'backup': backup}
 
-    @serialized
-    def record_execution(self, name: str, setup: dict) -> dict:
-        """Record the worktree and write the completion-criteria template once."""
-        value = str(name or "").strip()
-        if self.project(value) is None:
-            raise ValueError(f"项目不存在：{value}")
-        card = self.project_card_path(value)
-        data, body = split_front_matter(self.read_text(card))
-        for key in ("git_root", "worktree", "worktree_convention", "worktree_branch",
-                    "worktree_status", "check_config"):
-            data[key] = str((setup or {}).get(key) or "")
-        error = str((setup or {}).get("worktree_error") or "").strip()
-        if error:
-            data["worktree_error"] = error
-        else:
-            data.pop("worktree_error", None)
-        limitation = str((setup or {}).get("worktree_limitation") or "").strip()
-        if limitation:
-            data["worktree_limitation"] = limitation
-        else:
-            data.pop("worktree_limitation", None)
-        data["completion_criteria"] = COMPLETION_FILE
-        data["completion_fields"] = list(COMPLETION_FIELDS)
-        self.write_text(card, render_note(data, body))
-        criteria = self.project_dir(value) / COMPLETION_FILE
-        if not criteria.exists():
-            self.write_text(criteria, COMPLETION_TEMPLATE)
-        self.write_text(self.project_dir(value) / WORKTREE_NOTE_FILE, _worktree_note(value, data))
-        return self.project(value) or {}
-
     def _ensure_project_files(self, name: str) -> None:
         self._ensure_block_file(
             self.project_prompt_path(name),
@@ -1313,19 +1236,17 @@ class Store:
 
     # -- 附件（只读） -------------------------------------------------------
 
-    def attachments(self, project_name: str = "") -> list[dict]:
+    def attachments(self, project_name: str | Sequence[str] = "") -> list[dict]:
         base = self.vault / ATTACHMENTS_DIR
         if not base.exists():
             return []
-        project = str(project_name or "").strip()
-        identities = {project} if project else set()
-        if project:
-            record = self.project(project) or next(
-                (item for item in self.projects() if item.get('project_id') == project), None)
-            if record:
-                identities.add(record['name'])
-                if record.get('project_id'):
-                    identities.add(record['project_id'])
+        identities = {project_name} if isinstance(project_name, str) else set(project_name)
+        identities.discard("")
+        if identities:
+            for record in self.projects():
+                keys = {record['name'], record['project_id']} - {None, ''}
+                if identities & keys:
+                    identities.update(keys)
         cards: list[dict] = []
         for directory in sorted(child for child in base.iterdir() if child.is_dir()):
             for card_path in sorted(directory.glob("*.md")):
@@ -1499,7 +1420,8 @@ class Store:
 
     @serialized
     def append_decision_log(self, project: str, text: str, why: str, decided_by: str,
-                            session_id: str, source: str = '', supersedes: list[str] | None = None) -> dict:
+                            session_id: str, source: str = '', supersedes: list[str] | None = None,
+                            source_text: str = '') -> dict:
         card = self.project(project)
         if card is None:
             raise ValueError(f'项目不存在：{project}')
@@ -1517,6 +1439,8 @@ class Store:
                  'text': text, 'why': why, 'decided_by': decided_by}
         if source:
             entry['source'] = source
+        if source_text:
+            entry['source_text'] = source_text
         if supersedes:
             entry['supersedes'] = ', '.join(supersedes)
         if not existing.strip():

@@ -134,13 +134,17 @@ def new_summary(*, name: str, project: str, session_id: str, agent: str, cwd: st
 
 
 def decision_state(text: str) -> str:
-    """Read explicit suffixes; pending proposals are not retired decisions."""
+    """Read explicit markers, including before structured rationale fields."""
     value = str(text).strip().rstrip('。.!！')
+    headline = value.splitlines()[0].rstrip('。.!！') if value else ''
     retired = r'(?:被取代|已被取代|已废止|已废弃|已作废|已失效)'
-    if re.search(rf'[（(]{retired}[）)]\s*$|(?:^|[；;|。])\s*{retired}\s*$', value):
+    if any(re.search(rf'[（(]{retired}[）)]\s*$|(?:^|[；;|。])\s*{retired}\s*$', part)
+           for part in (value, headline)):
         return 'inactive'
     pending = r'(?:建议(?:[，,、 ]*(?:待用户确认|待确认|未确认))?|待用户确认|待确认|未确认)'
-    if re.search(rf'[（(]{pending}[）)]\s*$|(?:^|[；;|。])\s*{pending}\s*$|^(?:建议|待确认|未确认)[：:]', value):
+    if re.match(r'^(?:建议按|(?:建议|待用户确认|待确认|未确认)\s*[:：])', headline) or any(
+            re.search(rf'[（(]{pending}[）)]\s*$|(?:^|[；;|。])\s*{pending}\s*$', part)
+            for part in (value, headline)):
         return 'pending'
     return 'active'
 

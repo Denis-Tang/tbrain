@@ -4,6 +4,14 @@
 
 0.6.3 新用户可解压后双击 `tbrain.exe`，在首次设置页选择知识库和 Agent，点击“开始使用”。安装完成后从 Windows 开始菜单启动；下文命令用于手动安装、管理与排查。Agent 需要提前安装和登录；未勾选的宿主不写配置。
 
+## 0.7.11 按事项保存与接续
+
+从 0.7.10 升级时，使用固定入口 `%LOCALAPPDATA%\Programs\Tbrain\bin\tbrain.cmd upgrade --from <新版ZIP路径>`。旧版经 `current\tbrain.exe` 切换目录时可能报告编码加载失败。可用固定入口运行 `version` 查看实际选中的版本。
+
+同一聊天可用 `save` 和 `save_decision` 的 `project` 参数把进度和长期决定分别保存到已有项目。省略参数时沿用会话所属项目。目标项目可以搜索、读回和接续自己的记录。
+
+这一版移除了内置任务模式。旧设置中的 `task_mode` 不再启用确认、暂停或收尾，已有 Markdown、Git 工作树和项目目录保留。调试入口为 `desktop --stdio`。自定义工作流可通过 `TBRAIN_WORKFLOW` 接收宿主事件。Pi 接入需更新扩展并重载，MCP 宿主需重开会话。完整示例见[接入指南](../integrations/README.md#agent-调试与工作流插件)。
+
 ## 0.7.10 的记忆工具拆分与修复
 
 新增 `save_decision`，专门保存当前项目的用户长期决定，关联用户原话，支持明确替代旧决定、父项目继承及搜索和交接读取。临时要求、工作进展和技术决定仍使用 `save`。

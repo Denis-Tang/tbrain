@@ -30,13 +30,14 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="应用数据目录")
         return item
 
-    sub("desktop", "打开桌面界面（默认）")
+    desktop = sub("desktop", "打开桌面界面，或通过标准输入输出调用桌面后端")
+    desktop.add_argument("--stdio", action="store_true", help="每行一个 JSON 请求；methods 列出可用方法和参数")
     mcp = sub("mcp", "启动 stdio MCP 服务")
     mcp.add_argument('--agent', default='', choices=['', 'claude-code', 'codex', 'dsh'], help='接入的 Agent')
     hook = sub("hook", "读取宿主 hook 的 stdin JSON，输出宿主可消费的 JSON")
     hook.add_argument("--host", required=True, help="claude-code|codex|dsh|pi")
     tool = sub("tool", "以命令行调用 MCP 工具（供 pi 扩展等使用）")
-    tool.add_argument("name", help="bootstrap|search|save|save_decision|resume")
+    tool.add_argument("name", help="bootstrap|search|read|save|save_decision|resume")
     tool.add_argument("payload", nargs="?", help="JSON 参数（省略或 - 时从 stdin 读取）")
 
     for name in ("connect", "disconnect"):
@@ -450,6 +451,10 @@ def main(argv=None) -> int:
             run(home=_app_home(args), agent=args.agent)
             return 0
         if command == "desktop":
+            if getattr(args, 'stdio', False):
+                from .desktop import run_stdio
+                run_stdio(_service(_app_home(args)))
+                return 0
             from .desktop import run
 
             run(home=_app_home(args))

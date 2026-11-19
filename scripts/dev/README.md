@@ -22,7 +22,7 @@ JSON 输入使用 `-InputJson`，由包装脚本按 UTF-8 字节写入 stdin，�
   -Vault "$env:TEMP\tbrain-example-fixture\vault" -CommandArgs @('sessions')
 ```
 
-夹具输出目录必须为空或不存在。`base` 覆盖项目隔离，`n1` 生成8个预算组合，`n3` 覆盖改名引用。
+夹具输出目录必须为空或不存在。`base` 覆盖项目隔离，`n1` 生成 Codex、Pi 各两组启动包预算夹具，`n3` 覆盖改名引用。
 N1 的 F-B 按明确的输入定义添加5条800字指令，共12条消息；不沿用旧提示词的“共7条”。
 
 测试也经包装脚本的 `check --config <临时YAML>` 执行。检查命令要显式设置工作树目录：

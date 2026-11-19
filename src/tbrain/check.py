@@ -15,27 +15,7 @@ from pathlib import Path
 import yaml
 
 CONFIG_NAMES = (Path(".tbrain") / "check.yaml", Path("tbrain.check.yaml"))
-DEFAULT_LINTS = (
-    "decision-missing-why",
-    "handoff-personal-path",
-    "paused-without-handoff",
-    "unresolved-marked-pass",
-)
-STARTER_CONFIG = """\
-version: 1
-# 本地检查：tbrain check 按顺序运行 checks，再跑 lints。
-# 这是每天的门禁，不连接 GitHub。远程拉取请求仍用仓库自己的 CI。
-checks: []
-lints:
-  - decision-missing-why
-  - handoff-personal-path
-  - paused-without-handoff
-  - unresolved-marked-pass
-# 连续多少次同一失败后暂停。只数尝试，不算 token、费用或时长。
-stall:
-  unproductive_attempts: 3
-"""
-
+DEFAULT_LINTS = ("decision-missing-why",)
 # A decision has a why only when all three lines have text after the label.
 _REASON_LABELS = {
     "rationale": ("理由：", "理由:", "Rationale:", "Rationale："),
@@ -71,28 +51,6 @@ def has_decision_reasons(text: str) -> bool:
         return False
 
     return all(present(marks) for marks in _REASON_LABELS.values())
-
-
-def starter_config_path(folder: Path) -> Path:
-    return Path(folder) / ".tbrain" / "check.yaml"
-
-
-def write_starter_config(folder: Path) -> Path:
-    """Write a starter only when the project has no check config yet.
-
-    An existing ``tbrain.check.yaml`` is the user's gate. Creating
-    ``.tbrain/check.yaml`` beside it would hide those commands.
-    """
-    folder = Path(folder)
-    user = folder / "tbrain.check.yaml"
-    if user.is_file():
-        return user
-    path = starter_config_path(folder)
-    if path.exists():
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(STARTER_CONFIG, encoding="utf-8")
-    return path
 
 
 def find_configs(start: Path) -> list[Path]:

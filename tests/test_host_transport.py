@@ -26,6 +26,7 @@ def brain(tmp_path, monkeypatch):
 def test_mcp_save_returns_without_closing_stdin(brain, tmp_path):
     sid = "claude-code:stdio-regression"
     brain.bootstrap(sid, "claude-code", str(tmp_path))
+    brain.store.save_project('工程', [])
     process = subprocess.Popen(
         [sys.executable, "-m", "tbrain", "--home", str(brain.home), "mcp", '--agent', 'claude-code'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -52,10 +53,12 @@ def test_mcp_save_returns_without_closing_stdin(brain, tmp_path):
         request({"method": "notifications/initialized"})
         for number in (2, 3):
             reply = request({"id": number, "method": "tools/call", "params": {
-                "name": "save", "arguments": {"session_id": sid, "operations": [
+                "name": "save", "arguments": {"session_id": sid, "project": '工程' if number == 3 else '', "operations": [
                     {"op": "append", "section": "done", "items": [{"text": f"实际管道保存 {number}"}]}]}}})
             assert reply["id"] == number and not reply["result"].get("isError")
-        assert len(flow.load_session(brain, sid)[0].items("已完成")) == 2
+        assert len(flow.load_session(brain, sid)[0].items("已完成")) == 1
+        note, = brain.index.sessions('工程', source_session_id=sid)
+        assert flow.load_session(brain, note)[0].items("已完成")[0]['text'] == '实际管道保存 3'
         from tbrain.hosts import config
         config.clear_connect_state(brain.home, 'claude-code')
         reply = request({'id': 4, 'method': 'tools/call', 'params': {'name': 'search', 'arguments': {'query': '管道'}}})
@@ -191,61 +194,9 @@ try {
 
 
 @pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
-def test_pi_confirmation_dialog_through_real_cli(brain, tmp_path):
-    brain.settings.update({"task_mode": True})
-    entry = tmp_path / 'pi entry.cmd'
-    entry.write_text(f'@echo off\n"{sys.executable}" -m tbrain %*\n', encoding='utf-8')
-    driver = tmp_path / 'pi-confirm-driver.mjs'
-    driver.write_text(r'''
-import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
-const [source, entry, home, cwd] = process.argv.slice(2);
-process.env.TBRAIN_ENTRY = entry;
-process.env.TBRAIN_HOME = home;
-let code = stripTypeScriptTypes(readFileSync(source, 'utf8'));
-code = code.replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => () => ({}) });');
-const { default: extension } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
-const handlers = {}, tools = {};
-extension({ on: (name, fn) => handlers[name] = fn, registerTool: tool => tools[tool.name] = tool });
-const ctx = { cwd, hasUI: false, sessionManager: { getSessionId: () => 'dialog', getSessionFile: () => '' } };
-await handlers.input({ text: '把错误提示改成中文' }, ctx);
-let answer, dialogs = 0;
-ctx.ui = { select: async (title, options) => {
-  dialogs++;
-  if (!title.includes('任务目标：把错误提示改成中文') || !title.includes('完成标准：提示使用中文')) throw Error(title);
-  if (options.join(',') !== '继续补充,确认') throw Error('wrong confirmation options');
-  return answer;
-} };
-const operations = [{ op: 'understanding', goal: '把错误提示改成中文', scope: '全部错误提示',
-  deliverables: '修改后的代码', done: '提示使用中文' }];
-let saved = await tools.tbrain_save.execute('no-ui', { operations }, null, null, ctx);
-if (!saved.details.ok || dialogs || saved.details.written.confirms.length) throw Error('headless session confirmed');
-if (!saved.content.some(item => item.text.includes('单独回复“确认”'))) throw Error('headless session did not wait');
-ctx.hasUI = true;
-for (answer of [undefined, '继续补充', '确认']) {
-  saved = await tools.tbrain_save.execute('dialog', { operations }, null, null, ctx);
-  if (!saved.details.ok) throw Error(JSON.stringify(saved));
-  const expected = answer === '确认' ? ['Q1'] : [];
-  if (JSON.stringify(saved.details.written.confirms) !== JSON.stringify(expected)) throw Error('wrong confirmation result');
-  if (answer !== '确认' && !saved.content.some(item => item.text.includes('停止执行'))) throw Error('missing wait instruction');
-}
-await tools.tbrain_save.execute('ordinary', { operations: [{ op: 'replace', section: 'next_step', text: '执行确认的任务' }] }, null, null, ctx);
-if (dialogs !== 3) throw Error('unexpected dialog count: ' + dialogs);
-console.log('OK: headless waited; dismissal waited; supplement waited; explicit confirmation accepted');
-''', encoding='utf-8')
-    source = Path(__file__).resolve().parents[1] / 'integrations/pi/tbrain.ts'
-    result = subprocess.run([shutil.which('node'), str(driver), str(source), str(entry), str(brain.home), str(tmp_path)],
-                            capture_output=True, text=True, encoding='utf-8', timeout=40)
-    assert result.returncode == 0, result.stderr
-    summary, _ = flow.load_session(brain, 'pi:dialog')
-    assert len(summary.users) == 1
-    assert summary.header['goal_questions'][0]['status'] == 'confirmed'
-    assert '确认来源：弹窗' in summary.extra['任务理解']
-
-
-@pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
 def test_pi_extension_tools_through_real_cli(brain, tmp_path):
     brain.store.save_project('Pi工具', [str(tmp_path)])
+    brain.store.save_project('日志项目', [])
     entry = tmp_path / 'pi entry.cmd'
     entry.write_text(f'@echo off\n"{sys.executable}" -m tbrain %*\n', encoding='utf-8')
     driver = tmp_path / 'pi-driver.mjs'
@@ -326,13 +277,18 @@ if (afterRetirement.details.handoff.includes('超时固定为10秒')) throw Erro
 await handlers.input({text: '本项目日志只保存在本地'}, ctx);
 await handlers.tool_result({toolName: 'edit', input: {}, isError: false}, ctx);
 const longTerm = await tools.tbrain_save_decision.execute('long-term', {
-  text: '本项目日志只保存在本地', source: ['U2']
+  text: '本项目日志只保存在本地', source: ['U2'], project: '日志项目'
 }, null, null, ctx);
 if (!longTerm.details.ok || longTerm.details.written.id !== 'DL-0001') throw Error(JSON.stringify(longTerm.details));
 if (longTerm.details.written.why !== '') throw Error('invented decision reason');
+if (longTerm.details.written.project !== '日志项目') throw Error('wrong decision project');
 messages.length = 0;
 await handlers.agent_end({}, ctx);
 if (!messages.some(message => message.content.includes('请调用 tbrain_save'))) throw Error('long-term decision hid unsaved progress');
+const routed = await tools.tbrain_save.execute('routed', {project: '日志项目', operations: [
+  {op: 'replace', section: 'next_step', text: '复核本地日志'}
+]}, null, null, ctx);
+if (routed.details.session.project !== '日志项目') throw Error('wrong progress project');
 console.log('OK');
 ''', encoding='utf-8')
     source = Path(__file__).resolve().parents[1] / 'integrations/pi/tbrain.ts'
@@ -344,7 +300,8 @@ console.log('OK');
     assert summary.header['host_record'].endswith('/session.jsonl')
     assert summary.all_items('决策')[0]['text'].endswith('（被取代）')
     assert not summary.active_decisions()
-    assert len(brain.index.sessions()) == 2
+    assert len(brain.index.sessions()) == 3
+    assert brain.index.sessions('日志项目')[0]['next_step'] == '复核本地日志'
 
 
 @pytest.mark.skipif(os.name != 'nt' or not shutil.which('node'), reason='Windows Node adapter')
@@ -411,7 +368,7 @@ const { default: extension } = await import('data:text/javascript;base64,' + Buf
 const tools = {};
 extension({ on: () => {}, registerTool: tool => tools[tool.name] = tool });
 console.log(JSON.stringify({ save: tools.tbrain_save.description, search: tools.tbrain_search.description,
-  decision: tools.tbrain_save_decision.description }));
+  decision: tools.tbrain_save_decision.description, read: tools.tbrain_read.description }));
 ''', encoding='utf-8')
     source = Path(__file__).resolve().parents[1] / 'integrations/pi/tbrain.ts'
     result = subprocess.run([shutil.which('node'), str(driver), str(source)],
@@ -420,7 +377,9 @@ console.log(JSON.stringify({ save: tools.tbrain_save.description, search: tools.
     pi_descriptions = json.loads(result.stdout)
     mcp_tools = asyncio.run(create_server(service=object()).list_tools())
     mcp_descriptions = {tool.name: tool.description for tool in mcp_tools}
-    assert set(mcp_descriptions) == {'bootstrap', 'search', 'save', 'save_decision', 'resume'}
+    assert set(mcp_descriptions) == {'bootstrap', 'search', 'read', 'save', 'save_decision', 'resume'}
+    for description in (pi_descriptions['read'], mcp_descriptions['read']):
+        assert 'next_start' in description and '不接续任务' in description
     decision_schema = next(tool.inputSchema for tool in mcp_tools if tool.name == 'save_decision')
     assert set(decision_schema['required']) == {'session_id', 'text', 'source'}
     assert decision_schema['properties']['source']['items']['type'] == 'string'

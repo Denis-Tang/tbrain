@@ -59,7 +59,7 @@ DSH 多目录、未启动或未更新插件，以及宿主接口失败时，Tbra
 
 - `tbrain-native` 统一处理 `agent/session-start`、`agent/pre-step`、`agent/turn-stopping`、`session/event` 与 `agent/disposed`；仅记录根 Agent 的用户指令，子代理由根 Agent 汇总。
 - 收尾未保存时用 `agent.steer()` 续跑一次，避免重复提醒循环；PreCompact 注入最近用户指令。
-- 原生 CLI 响应使用 `additional_context`；MCP 提供五个工具，包括长期决定入口 `save_decision`，启动参数必须包含 `--home <目录> mcp`。
+- 原生 CLI 响应使用 `additional_context`；MCP 提供六个工具，包括长期决定入口 `save_decision`，启动参数必须包含 `--home <目录> mcp`。
 - `connect dsh` 仅替换 Tbrain 条目，原生插件放在固定应用数据目录；旧官方桥包不再加载，不自动卸载。
 
 ### Codex 信任
@@ -70,9 +70,8 @@ Codex 的 hook 按内容 hash 记录信任。Tbrain 的 hook 命令指向固定�
 
 Pi 扩展异步等待固定入口的 Hook 和工具调用，避免 Tbrain 进程运行时阻塞 Pi 后台线程。Hook 等待 15 秒，长于 Tbrain 的 10 秒锁等待；工具调用仍等待 60 秒。
 
-任务模式下，Pi 扩展成功保存 `understanding` 后，在 `ctx.hasUI` 为真时用原生选择框展示完整复述，选项为“继续补充”和“确认”。用户提交“确认”后才保存 `confirm`；取消或选择继续补充时停止执行。没有交互界面时，模型必须结束回复，等待用户单独回复“确认”。其他宿主优先使用各自的原生确认工具，规则与记录方式见 [LOCAL-LOOP](../docs/LOCAL-LOOP.md#首条消息先确认任务理解--confirm-the-task-once)。
 
-`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_save` / `tbrain_save_decision` / `tbrain_resume` 五个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功调用 `tbrain_save` 后重置计数；保存长期决定不代表已保存工作进展，不重置提醒。重载扩展也会重置计数，shell 的其他文件修改不会被识别。
+`pi/tbrain.ts` 是 pi 的 TypeScript 扩展：扩展在 `session_start` / `input` / `agent_end` / `session_shutdown` / `session_before_compact` 时调用 `tbrain hook --host pi`，并注册 `tbrain_bootstrap` / `tbrain_search` / `tbrain_read` / `tbrain_save` / `tbrain_save_decision` / `tbrain_resume` 六个工具（通过 `tbrain tool <name>` 传 JSON）。上下文用量来自 `ctx.getContextUsage()`。`edit` / `write` 修改文件、shell 运行测试或距上次保存达到三轮时，在下一轮提醒模型保存；压缩后保留压缩前提醒，并请求模型继续处理。成功调用 `tbrain_save` 后重置计数；保存长期决定不代表已保存工作进展，不重置提醒。重载扩展也会重置计数，shell 的其他文件修改不会被识别。
 
 ## 升级后旧进程
 
@@ -98,6 +97,56 @@ tbrain disconnect <host>           # 只移除 Tbrain 条目
 |---|---|
 | `hooks.json` | DSH 桥使用的 Claude 风格 hook 模板（`__TBRAIN_ENTRY__` 占位） |
 | `tbrain-dsh.mjs` | DSH 原生 cordis 插件（PreCompact / SessionEnd / 上下文提醒） |
-| `pi/tbrain.ts` | pi 扩展（生命周期 hook + 五个工具） |
+| `pi/tbrain.ts` | pi 扩展（生命周期 hook + 六个工具） |
 
 会话记忆适配保存模型接续所需的信息，项目联动另向宿主登记项目名称和工作目录。适配不读取宿主完整会话记录、不收集工具原始输出、不写入任何凭据。
+
+## Agent 调试与工作流插件
+
+桌面后端和窗口共用 `DesktopAPI`。用独立的 `--home` 和测试知识库调试，可直接传目录路径。每行输入一条 UTF-8 JSON 请求，每行输出同一 `id` 的结果。`methods` 列出本版本的方法和参数。
+
+```powershell
+'{"id":1,"method":"methods"}' | .\tbrain.exe --home D:\TbrainDev\home desktop --stdio
+```
+
+保持同一进程打开，依次发送以下请求。后台保存返回 `running: true` 时，用同一进程轮询 `project_save_status`，直至 `running: false`，再检查结果。`save_settings` 的 `vault_path` 指向测试库。
+
+```jsonl
+{"id":1,"method":"save_settings","args":[{"vault_path":"D:/TbrainDev/vault","ntp_enabled":false}]}
+{"id":2,"method":"project_save","args":["样例",["D:/TbrainDev/work"]]}
+{"id":3,"method":"project_save_status"}
+{"id":4,"method":"projects"}
+{"id":5,"method":"project_memory","args":["样例"]}
+```
+
+用 `tool` 复现单次记忆调用，用 `hook --host codex` 等入口发送宿主事件，用 `check --path <项目目录>` 运行项目检查。索引错误记录在应用数据目录的 `tbrain.log`，公共卡及项目提示词写入记录见同目录的 `w3-writes.jsonl`。在 PowerShell 里可用 `Get-Content -LiteralPath <日志路径> -Tail 40`。标准输入输出模式启动独立后端实例，后台任务状态属于该实例。页面渲染和系统选择框属于窗口宿主。
+
+验证真实页面时，可把解压包的窗口宿主接到同一个测试后端。以下 Python 示例在 Windows 上运行，工作目录为解压后的 `tbrain` 目录，`home` 为前例中已配置测试库的目录。调试端口仅在这个窗口进程启用。
+
+```python
+import os
+import subprocess
+from pathlib import Path
+
+pkg = Path.cwd()
+home = Path("D:/TbrainDev/home")
+env = {**os.environ, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": "--remote-debugging-port=9222"}
+with subprocess.Popen([pkg / "tbrain.exe", "--home", home, "desktop", "--stdio"],
+                      stdin=subprocess.PIPE, stdout=subprocess.PIPE) as api:
+    subprocess.run([pkg / "desktop/Tbrain.Desktop.exe", pkg / "_internal/tbrain/web", home / "webview"],
+                   stdin=api.stdout, stdout=api.stdin, env=env, check=True)
+    api.stdin.close()
+```
+
+另一个测试进程使用 Playwright 的 `chromium.connect_over_cdp("http://127.0.0.1:9222")` 连接此窗口，即可按 DOM 操作、检查页面错误、断言内容或截图。测试结束后退出托盘中的测试窗口。
+
+工作流插件是一个本地 Python 文件。给运行 Hook 的进程设置环境变量 `TBRAIN_WORKFLOW`，值为该文件的绝对路径。插件在首次宿主事件时载入，在普通记忆处理完成后、宿主响应生成前收到规范化的 `HookEvent`、`HookResult` 和当前 `TbrainService`，返回 `HookResult`。例如以下插件在用户消息后附加一条工作提示。
+
+```python
+def on_hook(event, result, service):
+    if event.kind == "user-prompt":
+        result.additional_context += "\n请核对本项目的验收说明。"
+    return result
+```
+
+清除变量并重启对应进程即可恢复纯记忆流程。仅通过 MCP 工具调用的客户端可自行用六个记忆工具组织工作流。历史会话、任务文本和用户原话仍可用 `read` 查阅。

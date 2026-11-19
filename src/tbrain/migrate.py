@@ -410,9 +410,10 @@ def execute(service, old_home: Path, new_vault: Path | None = None) -> dict:
                 f"旧文件：{session['source']}\n\n{session['body']}".strip()
             )
             path = service.store.session_path(project_name or "独立", created, name)
-            service.store.write_text(path, handoff.render(summary))
+            body = handoff.render(summary)
+            service.store.write_text(path, body)
             relative = path.resolve().relative_to(vault.resolve()).as_posix()
-            service.index.upsert_session(service._row_from_summary(summary, relative), handoff.render(summary))
+            service.index.upsert_session(service.session_index_row(summary, relative, path.stat().st_mtime), body)
             ledger.setdefault("session_hashes", {})[session["source"]] = session["hash"]
             existing_names.add(name)
             report["imported"]["sessions"] += 1

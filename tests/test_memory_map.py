@@ -37,24 +37,19 @@ def hashes(root):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_map_cli_is_bounded_deterministic_and_preserves_git(tmp_path, monkeypatch, capsys, legacy):
+def test_map_cli_is_bounded_deterministic_and_preserves_git(tmp_path, capsys, legacy):
     repo = repository(tmp_path, tmp_path / "linked")
     service = TbrainService(tmp_path / "home", vault=tmp_path / "vault")
-    service.settings.save({"vault_path": str(service.vault_root()), "ntp_enabled": False, "task_mode": False})
+    service.settings.save({"vault_path": str(service.vault_root()), "ntp_enabled": False})
     service.store.save_project("地图项目", [] if legacy else [str(repo)])
-    service.store.record_execution("地图项目", {"worktree_status": "worktree", "worktree": str(tmp_path / "linked")})
     card = service.store.project_card_path("地图项目")
     data, body = split_front_matter(card.read_text(encoding="utf-8"))
+    data.update(worktree_status="worktree", worktree=str(tmp_path / "linked"), completion_criteria="完成标准.md")
     if legacy:
         data.pop("project_id")
-        card.write_text(render_note(data, body), encoding="utf-8")
+    card.write_text(render_note(data, body), encoding="utf-8")
     original_paths = data["paths"]
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("map must not prepare or initialize a workspace")
-
-    monkeypatch.setattr(worktree, "prepare", forbidden)
-    monkeypatch.setattr(worktree, "ensure", forbidden)
     before = [git(repo, *args) for args in (("branch", "--list"), ("worktree", "list", "--porcelain"), ("status", "--porcelain"))]
     arguments = ["--home", str(service.home), "map", "--project", "地图项目"]
     if legacy:

@@ -430,7 +430,7 @@ class TbrainService:
     def bootstrap(self, host, host_session_id, cwd, host_record="", project=None) -> dict
     def search(self, query, session_id="", limit=5) -> dict
     def handoff_pack(self, project: str, limit: int = 3) -> dict   # 项目树内有效历史决定，带 project/来源/时间/verified/git_head
-    def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict
+    def save(self, session_id: str, operations: list[dict], last_test: dict | None = None, project: str = "") -> dict
     def resume(self, session_id: str, target: str) -> dict
     def status(self) -> dict
     def sessions(self, filter="all") -> list[dict]
@@ -464,15 +464,18 @@ save 操作（JSON 数组，每项一个 dict）：
 
 ## 11. mcp_server.py（Lead）
 
-五个工具，会话身份显式传（P9）：
+六个工具均显式传入会话身份（P9）。
 
 - `bootstrap(session_id, agent, cwd, host_record="", project="")`
 - `search(query, session_id="", limit=5)`
-- `save(session_id, operations, last_test=None)`
-- `save_decision(session_id, text, source, why="", supersedes=None)`
+- `read(session_id, target, entry_id="", start=0, limit=6000, source=False)`
+- `save(session_id, operations, last_test=None, project="")`
+- `save_decision(session_id, text, source, why="", supersedes=None, project="")`
 - `resume(session_id, target)`
 
-`save` 记录工作进展和本次技术决定；用户长期决定统一由 `save_decision` 写入当前项目的决策日志，`source` 为当前会话 U# 数组，理由可空，`supersedes` 只引用本项目 DL 编号。日志的有效决定进入搜索和启动包，旧记录保留。历史 K# 沿用原有退役入口。
+`save` 和 `save_decision` 默认写入当前项目，也可按事项指定已有项目名。同一宿主聊天在每个其他目标项目使用一份独立的 Markdown 进度记录，记录头的 `source_session_id` 指回来源聊天。SQLite 从记录头索引这个关系。目标、下一步、D#/E#/K# 等编号各自归属该项目记录，后续通过该项目的常规搜索和接续入口读取。宿主继续使用原会话 ID 提交。跨项目保存时，若要把宿主采集的测试结果归入目标项目，随本次 `save` 提交相同的 `last_test`。
+
+`save_decision` 将长期决定和所引用的完整原话写入目标项目的决策日志。`source` 为来源聊天的 U# 数组，`supersedes` 使用目标项目的 DL 编号。日志的有效决定进入搜索和启动包，旧记录保留。历史 K# 沿用原有退役入口。
 
 全部返回带 `tbrain_version` 与 `current_time`。工具 description 给出对应职责、参数和必要写作规范。
 

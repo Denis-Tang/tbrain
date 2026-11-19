@@ -60,6 +60,16 @@ if getattr(sys, "frozen", False):
         setattr(sys, name, stream)
         setattr(sys, "__" + name + "__", stream)
 
+    # Switching the current junction would otherwise change the runtime under a live process.
+    from pathlib import Path
+    executable = Path(sys.executable)
+    if executable.parent.name.lower() == "current" and executable.resolve() != executable:
+        import subprocess
+        raise SystemExit(subprocess.call(
+            [str(executable.resolve()), *sys.argv[1:]], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+            env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}, creationflags=subprocess.CREATE_NO_WINDOW,
+        ))
+
 from tbrain.cli import main
 
 if __name__ == "__main__":
@@ -77,7 +87,8 @@ if __name__ == "__main__":
     Copy-Item -LiteralPath @('README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') -Destination $packageDirectory -Force
     Copy-Item -LiteralPath 'build/desktop' -Destination $packageDirectory -Recurse -Force
     Copy-Item -LiteralPath 'integrations' -Destination $packageDirectory -Recurse -Force
-    Copy-Item -LiteralPath 'docs' -Destination $packageDirectory -Recurse -Force
+    $docsDirectory = New-Item -ItemType Directory -Path (Join-Path $packageDirectory 'docs') -Force
+    Copy-Item -LiteralPath @('docs/UPGRADE.md', 'docs/ARCHITECTURE.md', 'docs/BENCHMARK.md', 'docs/benchmark-summary.csv') -Destination $docsDirectory
 
     $nodeExecutable = @(Get-Command node -CommandType Application)[0].Source
     $nodeVersion = & $nodeExecutable --version
@@ -103,6 +114,8 @@ if __name__ == "__main__":
         'tbrain.exe',
         'VERSION',
         'desktop/Tbrain.Desktop.exe',
+        '_internal/jieba/dict.txt',
+        '_internal/jieba/analyse/idf.txt',
         'runtime/node.exe',
         'integrations/README.md',
         'integrations/tbrain-dsh.mjs',

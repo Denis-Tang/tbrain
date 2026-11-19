@@ -101,7 +101,7 @@ def measure_copy(real_vault: Path, work: Path, handoff, flow, prompt_mod, servic
     os.environ["TBRAIN_INSTALL_ROOT"] = str(work / "install")
     service = service_type(home, vault=vault)
     service.settings.save({"vault_path": str(vault), "timezone": "Asia/Shanghai",
-                           "ntp_enabled": False, "timeout_hours": 0, "task_mode": False})
+                           "ntp_enabled": False, "timeout_hours": 0})
     service.refresh_index()
     projects = service.store.projects()
     by_project = defaultdict(list)

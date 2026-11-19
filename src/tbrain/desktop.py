@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ctypes
+import inspect
 import json
 import os
 from pathlib import Path
@@ -22,8 +23,9 @@ from . import __version__, installer, paths
 
 
 class DesktopAPI:
-    def __init__(self, service: TbrainService):
+    def __init__(self, service: TbrainService, *, window=True):
         self._service = service
+        self._window = window
         self._quit_requested = False
         self._restart_executable = None
         self._update_thread = None
@@ -157,6 +159,9 @@ class DesktopAPI:
     def project_prompt(self, name):
         return self._call(self._service.project_prompt, name)
 
+    def project_memory(self, name):
+        return self._call(self._service.project_memory, name)
+
     def project_prompt_save(self, name, sections):
         return self._call(self._service.save_project_prompt, name, sections)
 
@@ -219,7 +224,7 @@ class DesktopAPI:
 
     def update_status(self):
         result = dict(self._update_result)
-        if result.get('ok') and result.get('upgraded'):
+        if self._window and result.get('ok') and result.get('upgraded'):
             self._restart_executable = Path(result['install_root']) / 'versions' / result['to'] / 'tbrain.exe'
             self._quit_requested = True
             result['restarting'] = True
@@ -233,6 +238,36 @@ class DesktopAPI:
 
     def open_document(self, path):
         return self._call(self._service.open_document, path)
+
+
+def _reply(api, line):
+    request_id = None
+    try:
+        request = json.loads(line)
+        request_id = request["id"]
+        method = request["method"]
+        if method == "methods":
+            result = {name: str(inspect.signature(fn)) for name, fn in
+                      inspect.getmembers(api, inspect.ismethod) if not name.startswith('_')}
+        else:
+            if not isinstance(method, str) or method.startswith('_'):
+                raise ValueError("需要公开的桌面方法名")
+            args = request.get("args", [])
+            if not isinstance(args, list):
+                raise ValueError("args 必须是数组")
+            result = getattr(api, method)(*args)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        result = {"ok": False, "error": str(exc)}
+    return json.dumps({"id": request_id, "result": result}, ensure_ascii=False)
+
+
+def run_stdio(service):
+    api = DesktopAPI(service, window=False)
+    for line in sys.stdin:
+        print(_reply(api, line), flush=True)
+    for worker in (api._project_thread, api._update_check_thread, api._update_thread):
+        if worker:
+            worker.join()
 
 
 def _maintenance_free_run(api: DesktopAPI, home: Path, stop: threading.Event | None = None) -> None:
@@ -271,9 +306,7 @@ def _maintenance_free_run(api: DesktopAPI, home: Path, stop: threading.Event | N
                     continue
                 if not line:
                     continue
-                request = json.loads(line)
-                result = getattr(api, str(request["method"]))(*request.get("args") or [])
-                process.stdin.write(json.dumps({"id": request["id"], "result": result}, ensure_ascii=False) + "\n")
+                process.stdin.write(_reply(api, line) + "\n")
                 process.stdin.flush()
                 if api._quit_requested:
                     break

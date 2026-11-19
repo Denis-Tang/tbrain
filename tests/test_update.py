@@ -134,15 +134,17 @@ def test_check_latest_degrades_to_structured_failure(tmp_path):
 
 
 @pytest.mark.parametrize("installed", ["0.6.4", NEXT_VERSION, ""])
-def test_check_latest_uses_target_installation_even_with_cached_release(tmp_path, installed):
+def test_check_latest_uses_target_installation_even_with_cached_release(tmp_path, installed, monkeypatch):
+    release = "0.7.10"
+    monkeypatch.setattr(update, "__version__", release)
     home, root = tmp_path / "home", tmp_path / "install"
     if installed:
         install_fake_version(root, tmp_path, installed)
-    fetcher = lambda timeout=8.0: release_for(__version__)
+    fetcher = lambda timeout=8.0: release_for(release)
 
     for cached in (False, True):
         result = update.check_latest(home, force=True, fetcher=fetcher, install_root=root)
-        assert result["current"] == (installed or __version__)
+        assert result["current"] == (installed or release)
         assert result["newer"] is (installed == "0.6.4")
         assert result["cached"] is cached
         assert ("发现新版本" if result["newer"] else "已是最新版本") in result["message"]
@@ -393,21 +395,23 @@ def test_upgrade_via_check_and_stream(tmp_path):
     assert install_calls == [True]
 
 
-def test_upgrade_installs_running_release_over_older_selected_version(tmp_path):
+def test_upgrade_installs_running_release_over_older_selected_version(tmp_path, monkeypatch):
+    release = "0.7.10"
+    monkeypatch.setattr(update, "__version__", release)
     home, root = tmp_path / "home", tmp_path / "install"
     install_fake_version(root, tmp_path, "0.6.4")
-    payload = zip_package(tmp_path / "release.zip", __version__)
+    payload = zip_package(tmp_path / "release.zip", release)
 
     result = update.upgrade(home=home, install_root=root,
-                            fetcher=lambda timeout=8.0: release_for(__version__, payload),
+                            fetcher=lambda timeout=8.0: release_for(release, payload),
                             stream=lambda url, timeout: FakeStream(payload))
 
     assert result["ok"] is True
     assert result["upgraded"] is True
     assert result["from"] == "0.6.4"
-    assert result["to"] == __version__
+    assert result["to"] == release
     assert result["check"]["current"] == "0.6.4"
-    assert installer.current_version(root) == __version__
+    assert installer.current_version(root) == release
 
 
 def test_upgrade_does_nothing_when_already_latest(tmp_path):

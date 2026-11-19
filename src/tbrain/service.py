@@ -31,6 +31,7 @@ class TbrainService:
         self._store = None
         self._index = None
         self._lock = threading.RLock()
+        self._workflow_hook = None
 
     # ------------------------------------------------------------------
     # 基础访问器
@@ -211,7 +212,7 @@ class TbrainService:
                 return
             if not summary.session_id:
                 return
-            index.upsert_session({**self._row_from_summary(summary, relative), 'file_mtime': stat.st_mtime}, text)
+            index.upsert_session(self.session_index_row(summary, relative, stat.st_mtime), text)
             for alias in [summary.session_id, *summary.header.get('session_aliases', [])]:
                 parts = identity.split_session_id(alias)
                 if parts:
@@ -227,10 +228,11 @@ class TbrainService:
         index.mark_scan(relative, stat.st_mtime, stat.st_size, digest)
         return summary.project if kind == "session" else None
 
-    def _row_from_summary(self, summary: handoff.Summary, relative: str) -> dict:
+    def session_index_row(self, summary: handoff.Summary, relative: str, modified: float) -> dict:
         goals = summary.goals()
         return {
             "session_id": summary.session_id, "project": summary.project, "name": summary.name,
+            "source_session_id": summary.header.get("source_session_id", ""),
             "path": relative, "status": summary.status, "agent": str(summary.header.get("agent") or ""),
             "cwd": str(summary.header.get("cwd") or ""), "started_at": str(summary.header.get("started_at") or ""),
             "updated_at": str(summary.header.get("updated_at") or ""),
@@ -241,7 +243,7 @@ class TbrainService:
             "git_dirty": int((summary.header.get("git") or {}).get("dirty") or 0),
             "last_verify": json.dumps(summary.header.get("last_verify") or {}, ensure_ascii=False),
             "file_hash": handoff.fingerprint(handoff.render(summary)),
-            "file_mtime": 0.0,
+            "file_mtime": modified,
         }
 
     # ------------------------------------------------------------------
@@ -332,6 +334,12 @@ class TbrainService:
         event = hosts.normalize(host, raw)
         with self.store.write_lock():
             result = hooks.handle(event, self)
+        workflow = os.environ.get('TBRAIN_WORKFLOW')
+        if workflow:
+            if self._workflow_hook is None:
+                from runpy import run_path
+                self._workflow_hook = run_path(workflow)['on_hook']
+            result = self._workflow_hook(event, result, self)
         raw_event = str(raw.get("hook_event_name") or raw.get("event") or "")
         return hosts.render(host, result, raw_event)
 
@@ -356,34 +364,38 @@ class TbrainService:
     def search(self, query: str, session_id: str = "", limit: int = 5) -> dict:
         return self._agent_disabled(session_id) or flow.search(self, query, session_id, limit)
 
+    def read(self, session_id: str, target: str, entry_id: str = '', start: int = 0,
+             limit: int = 6000, source: bool = False) -> dict:
+        try:
+            return self._agent_disabled(session_id) or flow.read(self, session_id, target, entry_id, start, limit, source)
+        except (ValueError, OSError, UnicodeError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
     def handoff_pack(self, project: str, limit: int = 3) -> dict:
         name = str(project or "").strip()
         if not name or not self.store.project(name):
             return {"ok": False, "error": "项目不存在"}
         self.refresh_index()
         scope, _ = self.visible_projects_for_project(name)
-        from .contract import render_contract
 
         payload = {"ok": True, "project": name, "scope": scope,
                    "items": self.store.handoff_items(scope, limit, decision_projects=self.decision_projects(name))}
-        if self.settings.load().task_mode:
-            payload["contract"] = render_contract(self, name, task_mode=True)
         return payload
 
-    def save(self, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
+    def save(self, session_id: str, operations: list[dict], last_test: dict | None = None, project: str = '') -> dict:
         try:
             with self.store.write_lock():
-                return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test)
+                return self._agent_disabled(session_id) or flow.save(self, session_id, operations, last_test, project)
         except FileLockTimeout as exc:
             return {"ok": False, "written": {},
                     "rejected": [{"op": "save", "reason": str(exc)}]}
 
     def save_decision(self, session_id: str, text: str, source: list[str], why: str = '',
-                      supersedes: list[str] | None = None) -> dict:
+                      supersedes: list[str] | None = None, project: str = '') -> dict:
         try:
             with self.store.write_lock():
                 return self._agent_disabled(session_id) or flow.save_decision(
-                    self, session_id, text, source, why, supersedes)
+                    self, session_id, text, source, why, supersedes, project)
         except (ValueError, OSError, FileLockTimeout) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -401,11 +413,14 @@ class TbrainService:
                                arguments.get("limit", 5))
         if name == "save":
             return self.save(arguments.get("session_id", ""), arguments.get("operations") or [],
-                             arguments.get("last_test"))
+                             arguments.get("last_test"), arguments.get("project", ""))
+        if name == "read":
+            return self.read(**{key: arguments[key] for key in arguments if key in
+                               ('session_id', 'target', 'entry_id', 'start', 'limit', 'source')})
         if name == "save_decision":
             return self.save_decision(arguments.get("session_id", ""), arguments.get("text", ""),
                                       arguments.get("source"), arguments.get("why", ""),
-                                      arguments.get("supersedes"))
+                                      arguments.get("supersedes"), arguments.get("project", ""))
         if name == "resume":
             return self.resume(arguments.get("session_id", ""), arguments.get("target", ""),
                                arguments.get("fork_user_count"), arguments.get("fork_revision", ""))
@@ -546,19 +561,14 @@ class TbrainService:
     def configure_project(self, name: str, paths_list: list[str], parent: str = "",
                           allow_child: bool = False, rename_from: str = "") -> dict:
         from .hosts import create_workspaces
-        from .worktree import prepare
 
         is_new = not self.store.project(str(rename_from or name).strip())
         result = self.store.save_project(name, paths_list, parent=parent,
                                            allow_child=allow_child, rename_from=rename_from)
-        recorded = result
-        if self.settings.load().task_mode:
-            setup = prepare(result.get("name") or name, list(result.get("paths") or []))
-            recorded = self.store.record_execution(result["name"], setup)
         self.refresh_index()
         if is_new:
-            recorded["workspace_sync"] = create_workspaces(recorded, self.home)
-        return recorded
+            result["workspace_sync"] = create_workspaces(result, self.home)
+        return result
 
     def set_project_read_standalone(self, name: str, enabled: bool) -> dict:
         return {"ok": True, "project": self.store.set_project_read_standalone(name, enabled)}
@@ -578,6 +588,25 @@ class TbrainService:
         data = self.store.project_prompt(str(project or ""))
         return {"ok": True, "project": project, "user": data.get("user") or "",
                 "sections": data.get("sections") or prompt_mod.empty_sections()}
+
+    def project_memory(self, project: str) -> dict:
+        if not self.store.project(project):
+            return {'ok': False, 'error': '项目不存在'}
+        self.refresh_index()
+        entries = [self.decision_source(entry) for entry in self.store.project_decisions(project)
+                   if entry.get('decided_by') in ('用户', 'user')]
+        return {'ok': True, 'project': project,
+                'path': str(self.store.project_dir(project) / '决策日志.md'), 'entries': entries}
+
+    def decision_source(self, entry: dict) -> dict:
+        row = self.index.session(entry.get('session_id', ''))
+        entry['source_path'] = str(self.vault_root() / row['path']) if row else ''
+        if not entry.get('source_text') and row:
+            summary = handoff.parse(self.store.read_text(Path(entry['source_path'])))
+            identifiers = str(entry.get('source', '')).split(', ')
+            entry['source_text'] = '\n\n'.join(f"{item['id']}: {item['text']}"
+                for item in summary.users if item['id'] in identifiers)
+        return entry
 
     def save_project_prompt(self, project: str, sections: dict, base_sha: dict | None = None) -> dict:
         result = self.store.save_project_prompt(str(project or ""), sections if isinstance(sections, dict) else {},

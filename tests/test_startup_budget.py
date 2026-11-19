@@ -9,7 +9,7 @@ import tempfile
 
 import pytest
 
-from tbrain import progress, prompt, session as flow
+from tbrain import prompt, session as flow
 from tbrain.service import TbrainService
 
 
@@ -21,11 +21,11 @@ def case(tmp_path, monkeypatch):
         monkeypatch.setenv(key, os.environ.get(key, ''))
     make = runpy.run_path(str(Path(__file__).parent / 'fixtures' / 'make_vault.py'))['n1_case']
 
-    def build(host='codex', mode=True, variant='F-A'):
+    def build(host='codex', variant='F-A'):
         base = Path(tempfile.gettempdir()) / 'tbrain-dev-work'
         base.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix='b-', dir=base))
-        manifest = make(root, host, mode, variant)
+        manifest = make(root, host, variant)
         service = TbrainService(Path(manifest['home']), vault=Path(manifest['vault']))
         return service, manifest
 
@@ -49,15 +49,13 @@ def check_package(service, manifest, package):
 
 
 @pytest.mark.parametrize('host', ['codex', 'pi'])
-@pytest.mark.parametrize('mode', [False, True])
 @pytest.mark.parametrize('resume', [False, True])
 @pytest.mark.parametrize('variant', ['F-A', 'F-B'])
-def test_startup_budget_matrix(case, host, mode, resume, variant):
-    service, manifest = case(host, mode, variant)
+def test_startup_budget_matrix(case, host, resume, variant):
+    service, manifest = case(host, variant)
     sid = manifest['session_id'] if resume else host + ':budget-new'
     package = service.bootstrap(sid, host, manifest['cwd'], project='项目甲')['package']
     check_package(service, manifest, package)
-    assert ('## 工作约定' in package) == mode
     if resume:
         assert manifest['sections']['最终目标'] in package
         assert '下一步：' in package
@@ -68,7 +66,7 @@ def test_startup_budget_matrix(case, host, mode, resume, variant):
 
 @pytest.mark.parametrize('host,pressure',
                          [(host, pressure) for host in ('codex', 'pi')
-                          for pressure in ('user', 'error', 'limitation', 'first', 'paused', 'combined')] +
+                          for pressure in ('user', 'error', 'limitation', 'first', 'combined')] +
                          [('claude-code', 'combined'), ('dsh', 'combined')])
 def test_startup_budget_pressure(case, host, pressure):
     service, manifest = case(host)
@@ -76,7 +74,7 @@ def test_startup_budget_pressure(case, host, pressure):
     filler = '合成压力原文' * 4000
     if pressure in ('error', 'limitation', 'combined'):
         key = 'worktree_limitation' if pressure == 'limitation' else 'worktree_error'
-        service.store.record_execution('项目甲', {key: filler[:20000]})
+        service.store._set_front_matter_field(service.store.project_card_path('项目甲'), key, filler[:20000])
     if pressure in ('user', 'combined'):
         service.store.write_text(service.store.project_prompt_path('项目甲'),
                                  prompt.render(manifest['sections'], filler[:20000]))
@@ -85,16 +83,10 @@ def test_startup_budget_pressure(case, host, pressure):
         service.bootstrap(sid, host, manifest['cwd'], project='项目甲')
         service.hook(host, {'hook_event_name': 'UserPromptSubmit', 'session_id': 'first-budget',
                             'cwd': manifest['cwd'], 'prompt': '合成任务'})
-        fields = {key: (label + '合成事实' * 160)[:160] for key, label in progress.UNDERSTANDING_FIELDS}
-        fields['scope'] = ('先说明核对来源的方法；旧任务目标：甲已废弃' + '合成事实' * 160)[:160]
-        assert service.save(sid, [{'op': 'understanding', **fields},
-                                  {'op': 'replace', 'section': 'next_step', 'text': '核对来源'}])['ok']
-    if pressure in ('paused', 'combined'):
+        assert service.save(sid, [{'op': 'replace', 'section': 'next_step', 'text': '核对来源'}])['ok']
+    if pressure == 'combined':
         assert service.save(sid, [{'op': 'append', 'section': 'done', 'items': [
             {'text': f'完成{n}→结果' + '合成证据' * 40} for n in range(15)]}])['ok']
-        for _ in range(3):
-            assert service.save(sid, [{'op': 'attempt', 'route': 'pytest -q exit 1',
-                                      'evidence': '1 failed', 'productive': False}])['ok']
         assert service.save(sid, [{'op': 'replace', 'section': 'next_step',
                                   'text': '先核对失败证据，改用另一条路线并验证'}])['ok']
     if pressure == 'combined':
@@ -116,13 +108,7 @@ def test_startup_budget_pressure(case, host, pressure):
         assert '工作区说明正文：省略20000字' in package
         assert str(service.store.project_card_path('项目甲')) in package
     if pressure == 'first':
-        assert all(value in package for value in fields.values())
         assert '\n下一步：核对来源\n' in package
-        assert len(progress.lead_block(service, summary)) <= 750
-    if pressure in ('paused', 'combined'):
-        assert package.startswith('已暂停')
-        assert '先核对失败证据，改用另一条路线并验证' in package
-        assert '#热交接' in package
     if pressure == 'combined':
         line = next(line for line in package.splitlines() if line.startswith('写入冲突：'))
         assert len(line) <= 80 and '公共池1条' in line and '本项目1条' in line

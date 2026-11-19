@@ -60,7 +60,7 @@ if (Get-ChildItem -LiteralPath $envPaths.TBRAIN_SHORTCUT_DIRS) { throw 'Shortcut
 $settingsPath = Join-Path $AppHome 'settings.json'
 if (-not (Test-Path -LiteralPath $settingsPath)) {
     $settings = @{ vault_path = $Vault; timezone = 'Asia/Shanghai'; ntp_enabled = $false; timeout_hours = 0;
-        reminder_context_switch = $true; install_root = $Root; task_mode = $false }
+        reminder_context_switch = $true; install_root = $Root }
     [IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json), $utf8)
 } else {
     $settings = [IO.File]::ReadAllText($settingsPath, $utf8) | ConvertFrom-Json

@@ -14,13 +14,11 @@ import sys
 import platform
 from importlib import metadata
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from . import clock, handoff, identity, naming, prompt as prompt_mod
-from .contract import render_contract
 from .hooks import HookEvent, HookResult
-from .policy import TIERS, classify
-from . import progress
 
 HOST_BUDGETS = {"claude-code": 9000, "codex": 8000, "dsh": 12000, "pi": 12000, "unknown": 8000}
 STATUS_PRIORITY = {"已中断": 0, "已暂停": 0, "进行中": 1, "受阻": 2, "待验证": 3, "已完成": 4, "已放弃": 5}
@@ -69,6 +67,10 @@ def _same_text(left: str, right: str) -> bool:
 
 def _session_row(service, session_id: str) -> dict | None:
     service.refresh_index()
+    return _indexed_session(service, session_id)
+
+
+def _indexed_session(service, session_id: str) -> dict | None:
     row = service.index.session(session_id)
     if not row:
         parts = identity.split_session_id(session_id)
@@ -80,14 +82,15 @@ def _session_row(service, session_id: str) -> dict | None:
     path = service.vault_root() / row["path"]
     if not path.is_file():
         return None
-    return {**row, "abs_path": path}
+    return row
 
 
 def load_session(service, session_id_or_row) -> tuple[handoff.Summary, Path] | None:
     row = session_id_or_row if isinstance(session_id_or_row, dict) else _session_row(service, str(session_id_or_row))
     if not row:
         return None
-    text = service.store.read_text(row["abs_path"])
+    path = service.vault_root() / row["path"]
+    text = service.store.read_text(path)
     summary = handoff.parse(text)
     _refresh_dead_ends(service, summary)
     owners = summary.header.setdefault("user_owned_fields", [])
@@ -95,7 +98,7 @@ def load_session(service, session_id_or_row) -> tuple[handoff.Summary, Path] | N
         if field in ("target", "next_step") and digest != handoff.fingerprint(getattr(summary, field)):
             if field not in owners:
                 owners.append(field)
-    return summary, row["abs_path"]
+    return summary, path
 
 
 def write_session(service, summary: handoff.Summary, path: Path, *, create: bool = False) -> None:
@@ -111,7 +114,7 @@ def write_session(service, summary: handoff.Summary, path: Path, *, create: bool
     body = handoff.render(summary)
     service.store.write_text(path, body, create=create)
     service.remember_write(path, body)
-    service.index.upsert_session(_row_from_summary(service, summary, path), body)
+    service.index.upsert_session(service.session_index_row(summary, service.store._rel(path), path.stat().st_mtime), body)
     service.sync_session_index(summary.project)
     folder = service.vault_root() / ".tbrain" / "会话版本" / handoff.fingerprint(summary.session_id)
     snapshot_path = folder / (revision + ".md")
@@ -121,34 +124,6 @@ def write_session(service, summary: handoff.Summary, path: Path, *, create: bool
         service.store.write_text(snapshot_path, body, create=True)
     except FileExistsError:
         pass  # 心跳没有改变交接内容时复用同一个版本。
-
-
-def _row_from_summary(service, summary: handoff.Summary, path: Path) -> dict:
-    try:
-        relative = path.resolve().relative_to(service.vault_root().resolve()).as_posix()
-    except ValueError:
-        relative = path.as_posix()
-    goals = summary.goals()
-    return {
-        "session_id": summary.session_id,
-        "project": summary.project,
-        "name": summary.name,
-        "path": relative,
-        "status": summary.status,
-        "agent": str(summary.header.get("agent") or ""),
-        "cwd": str(summary.header.get("cwd") or ""),
-        "started_at": str(summary.header.get("started_at") or ""),
-        "updated_at": str(summary.header.get("updated_at") or ""),
-        "last_activity_at": str(summary.header.get("last_activity_at") or ""),
-        "next_step": summary.next_step,
-        "open_goals": sum(1 for item in goals if not item.get("done")),
-        "git_branch": (summary.header.get("git") or {}).get("branch", ""),
-        "git_head": (summary.header.get("git") or {}).get("head", ""),
-        "git_dirty": int((summary.header.get("git") or {}).get("dirty") or 0),
-        "last_verify": json.dumps(summary.header.get("last_verify") or {}, ensure_ascii=False),
-        "file_hash": handoff.fingerprint(handoff.render(summary)),
-        "file_mtime": path.stat().st_mtime if path.exists() else 0.0,
-    }
 
 
 def next_sequence(service, project: str, date: str) -> int:
@@ -171,34 +146,41 @@ def _project_dir(service, project: str) -> Path:
     return service.vault_root() / "项目" / project
 
 
-def create_summary(service, *, host: str, host_session_id: str, cwd: str,
+def create_summary(service, *, host: str, host_session_id: str = "", cwd: str,
                    host_record: str = "", first_message: str = "",
-                   project_override: str | None = None) -> tuple[handoff.Summary, Path]:
+                   project_override: str | None = None, source_session_id: str = "") -> tuple[handoff.Summary, Path]:
     now = service.now()
     date = now.local.strftime("%Y-%m-%d")
     project = project_override if project_override is not None else service.store.match_project(cwd)
     history = _history_names(service, project)
     sequence = next_sequence(service, project, date)
-    provisional = naming.is_low_information(first_message) or not first_message.strip()
+    provisional = not source_session_id and (naming.is_low_information(first_message) or not first_message.strip())
     service.store.ensure_layout()
+    session_id = (f"project-note:{uuid4().hex}" if source_session_id else
+                  identity.build_session_id(host, host_session_id))
     while True:
-        name = (naming.temp_name(date, sequence) if provisional else
-                naming.session_name(first_message, project, history, date, sequence))
+        if source_session_id:
+            name = f"{project}进展-{date}-{sequence}"
+        else:
+            name = (naming.temp_name(date, sequence) if provisional else
+                    naming.session_name(first_message, project, history, date, sequence))
         summary = handoff.new_summary(
-            name=name, project=project, session_id=identity.build_session_id(host, host_session_id),
+            name=name, project=project, session_id=session_id,
             agent=host, cwd=cwd, host_record=host_record, started_at=_utc_iso(now.utc),
             raw_command=first_message, provisional=provisional,
         )
-        summary.header["task_mode"] = service.settings.load().task_mode
+        if source_session_id:
+            summary.header["source_session_id"] = source_session_id
         path = service.store.session_path(project or "独立", now.local, name)
         try:
             write_session(service, summary, path, create=True)
             break
         except FileExistsError:
             sequence += 1
-    service.index.register_link(host, host_session_id, summary.session_id, cwd,
-                                identity.first_message_hash(first_message), summary.header["started_at"])
-    service.index.log_access(summary.session_id, "bootstrap")
+    if not source_session_id:
+        service.index.register_link(host, host_session_id, summary.session_id, cwd,
+                                    identity.first_message_hash(first_message), summary.header["started_at"])
+        service.index.log_access(summary.session_id, "bootstrap")
     return summary, path
 
 
@@ -219,7 +201,7 @@ def resolve_session(service, host: str, host_session_id: str, cwd: str,
 def _mark_active(service, summary: handoff.Summary, path: Path) -> None:
     now = _utc_iso(service.now().utc)
     changed = False
-    if summary.status == "已中断":
+    if summary.status in ("已中断", "已暂停"):
         summary.header["status"] = "进行中"
         changed = True
     summary.header["last_activity_at"] = now
@@ -240,12 +222,8 @@ def rename_session(service, summary: handoff.Summary, path: Path, new_name: str)
     if "aliases" in renamed_header:
         summary.header["aliases"] = renamed_header["aliases"]
     summary.header["provisional_name"] = False
-    try:
-        relative = new_path.resolve().relative_to(service.vault_root().resolve()).as_posix()
-    except ValueError:
-        relative = new_path.as_posix()
     service.index.remove_session(summary.session_id)
-    service.index.upsert_session({**_row_from_summary(service, summary, new_path), "path": relative},
+    service.index.upsert_session(service.session_index_row(summary, service.store._rel(new_path), new_path.stat().st_mtime),
                                  handoff.render(summary))
     return new_path
 
@@ -345,26 +323,19 @@ def _time_block(service) -> str:
 
 def _identity_block(service, summary: handoff.Summary) -> str:
     return (f"## 当前会话\nsession_id: {summary.session_id}\n"
-            f"之后调用 search/save/save_decision/resume 时原样传入该 session_id。" +
+            f"之后调用 search/read/save/save_decision/resume 时原样传入该 session_id。" +
             (f"\n当前用户原话编号：{summary.users[-1]['id']}" if summary.users else ''))
 
 
 def assemble_startup(service, summary: handoff.Summary, host: str, *,
                      resume: bool = False, related_query: str = "") -> str:
     budget = HOST_BUDGETS.get(host, HOST_BUDGETS["unknown"])
-    lead = progress.lead_block(service, summary)
-    contract = render_contract(service, summary.project, cwd=str(summary.header.get("cwd") or ""),
-                               task_mode=progress.enabled(summary))
-    mode = ("## 工作模式\n任务模式：已开启（本会话）。" if progress.enabled(summary) else
-            "## 工作模式\n普通记忆模式：本会话不附加任务确认、停滞暂停或固定收尾要求；用户指令和项目业务规则始终有效。")
-    blocks = [("任务提示", lead, None, True), ("工作约定", contract, None, True),
-              ("工作模式", mode, None, True), ("当前时间", _time_block(service), None, True),
+    blocks = [("当前时间", _time_block(service), None, True),
               ("当前会话", _identity_block(service, summary), None, True)]
     inline = []
-    lead_lines = lead.splitlines()
-    if summary.target and '任务目标：' + summary.target not in lead_lines:
+    if summary.target:
         inline.append('目标：' + summary.target)
-    if summary.next_step and '具体下一步：' + summary.next_step not in lead_lines:
+    if summary.next_step:
         inline.append('下一步：' + summary.next_step)
     if inline:
         blocks.append(('当前目标与下一步', '## 当前进度\n' + '\n'.join(inline), None, True))
@@ -410,15 +381,17 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
         detail(f'本会话已保存进度（未完成{pending_goals}条）', current_path,
                len(summary.items('已完成')) + len(summary.goals()), progress_text)
         detail('完整用户原话', current_path, len(summary.users), ''.join(item.get('text', '') for item in summary.users))
+    decision_groups = {}
     if summary.project:
         scope, _ = service.visible_projects_for_project(summary.project)
         for project in service.decision_projects(summary.project):
             decisions = [entry for entry in service.store.project_decisions(project) if entry['active']]
             if decisions:
                 path = service.store.project_dir(project) / '决策日志.md'
-                detail('项目长期决定：' + project, path, len(decisions), '\n'.join(entry['text'] for entry in decisions))
-                text = '\n'.join(f"{entry['id']} {entry['text']}" for entry in decisions)
-                blocks.append(('项目长期决定：' + project, f'## 项目长期决定：{project}\n{text}', 800, False))
+                title = '项目长期决定：' + project
+                lines = [f"{entry['id']} {entry['text']}" for entry in decisions]
+                decision_groups[len(blocks)] = (lines, path)
+                blocks.append((title, f'## {title}', 800, True))
         historical = service.index.sessions(scope)
         historical.sort(key=lambda row: str(row.get('updated_at') or ''), reverse=True)
         found = 0
@@ -487,6 +460,22 @@ def assemble_startup(service, summary: handoff.Summary, host: str, *,
 
     def allocate(index, limit=None):
         _, text, initial, whole = blocks[index]
+        if index in decision_groups:
+            lines, path = decision_groups[index]
+            shown = []
+            kept[index] = ''
+            for count in range(len(lines) + 1):
+                remaining = len(lines) - count
+                tail = [f'另有{remaining}条；{path}'] if remaining else []
+                candidate = '\n'.join([text, *shown, *tail])
+                previous = kept[index]
+                kept[index] = candidate
+                if len(candidate) > initial or len(render()) > budget:
+                    kept[index] = previous
+                    break
+                if remaining:
+                    shown.append(lines[count])
+            return
         if index == map_index and kept[project_prompt_index] != blocks[project_prompt_index][1]:
             kept[index] = ''
             return
@@ -560,26 +549,6 @@ def _stop_reminder(service, summary: handoff.Summary, path: Path, host: str) -> 
                       reason=message)
 
 
-def _wrap_up_hook(service, summary, path, host: str) -> HookResult:
-    from .wrapup import gaps, message
-
-    if not (progress.enabled(summary) if summary is not None else service.settings.load().task_mode):
-        return HookResult()
-    if summary is None:
-        text = "收尾未通过：没有会话记录，不能核对证据、本地检查、决定理由和权限。"
-        return HookResult(decision="block", reason=text,
-                          additional_context=text if host == "pi" else "")
-    found = gaps(summary)
-    summary.header["last_activity_at"] = _utc_iso(service.now().utc)
-    if path is not None:
-        write_session(service, summary, path)
-    if not found:
-        return HookResult()
-    text = message(found)
-    return HookResult(decision="block", reason=text,
-                      additional_context=text if host == "pi" else "")
-
-
 def _needs_save(summary: handoff.Summary) -> bool:
     verification = summary.header.get("last_verify") or {}
     return (len(summary.users) > int(summary.header.get("saved_users") or 0) or
@@ -603,25 +572,17 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                                               "exit_code": result["exit_code"],
                                               "at": _utc_iso(service.now().utc), "source": "tool",
                                               "platform": platform.system()}
-            progress.observe_saved(service, summary, attempts=[], dead_ends=[], evidence=[], done=[],
-                                   verify=result, now=summary.header["last_verify"]["at"])
             write_session(service, summary, path)
-            if progress.is_paused(summary):
-                return HookResult(additional_context=progress.pause_instruction(summary))
         return HookResult()
 
     if event.kind == "session-end":
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is not None:
-            if summary.status in ("进行中", "受阻", "待验证") and not progress.is_paused(summary):
+            if summary.status in ("进行中", "受阻", "待验证"):
                 summary.header["status"] = "已中断"
             summary.header["last_activity_at"] = _utc_iso(service.now().utc)
             write_session(service, summary, path)
         return HookResult()
-
-    if event.kind == "wrap-up":
-        summary, path = _load_or_none(service, host, event.host_session_id)
-        return _wrap_up_hook(service, summary, path, host)
 
     if event.kind == "stop":
         if event.stop_hook_active:
@@ -629,16 +590,8 @@ def handle_hook(service, event: HookEvent) -> HookResult:
         summary, path = _load_or_none(service, host, event.host_session_id)
         if summary is None:
             return HookResult()
-        if progress.is_paused(summary):
-            # Block on Stop asks the host to take another autonomous turn. A pause
-            # must end the turn instead, and keep refusing completion on save.
-            summary.header["last_activity_at"] = _utc_iso(service.now().utc)
-            write_session(service, summary, path)
-            return HookResult(additional_context=progress.pause_instruction(summary))
         if _needs_save(summary):
             return _stop_reminder(service, summary, path, host)
-        if summary.status == "已完成" or event.extra.get("wrap_up"):
-            return _wrap_up_hook(service, summary, path, host)
         summary.header["last_activity_at"] = _utc_iso(service.now().utc)
         write_session(service, summary, path)
         return HookResult()
@@ -719,7 +672,6 @@ def handle_hook(service, event: HookEvent) -> HookResult:
             summary, path, created = resolve_session(service, host, event.host_session_id, event.cwd,
                                                      first_message=first_message,
                                                      host_record=event.extra.get("host_record", ""))
-            progress.start_confirmation(summary)
             write_session(service, summary, path)
             package = assemble_startup(service, summary, host, related_query=first_message)
             if warning:
@@ -741,18 +693,14 @@ def handle_hook(service, event: HookEvent) -> HookResult:
                 name = naming.session_name(first_message, summary.project,
                                           _history_names(service, summary.project), date, sequence)
                 path = rename_session(service, summary, path, name)
-            progress.start_confirmation(summary)
             write_session(service, summary, path)
             package = assemble_startup(service, summary, host, related_query=first_message)
             if warning:
                 package = warning + "\n\n" + package
             return HookResult(additional_context=package)
-        if summary.header.get("branch_user_count") == len(summary.users):
-            progress.start_confirmation(summary)
         record_user(service, summary, path, first_message)
-        notice = progress.turn_notice(service, summary)
         reference = f"当前用户原话编号：{summary.users[-1]['id']}"
-        return HookResult(additional_context='\n'.join(part for part in (notice, reference) if part))
+        return HookResult(additional_context=reference)
 
     return HookResult()
 
@@ -843,13 +791,14 @@ SECTION_ALIASES = {
 
 
 def save_decision(service, session_id: str, text: str, source: list[str], why: str = '',
-                  supersedes: list[str] | None = None) -> dict:
+                  supersedes: list[str] | None = None, project: str = '') -> dict:
     row = _session_row(service, session_id)
     if not row:
         raise ValueError('会话不存在：请先调用 bootstrap')
     summary, path = load_session(service, row)
-    if not summary.project:
-        raise ValueError('长期决定需要归属项目；请先明确当前会话的项目')
+    project = str(project or '').strip() or summary.project
+    if not project:
+        raise ValueError('长期决定需要归属项目；请指定 project')
     if not isinstance(source, list) or not source or any(not isinstance(value, str) for value in source):
         raise ValueError('source 必须是用户原话 U# 的非空数组')
     identifiers = {entry['id'] for entry in summary.users}
@@ -857,23 +806,41 @@ def save_decision(service, session_id: str, text: str, source: list[str], why: s
         raise ValueError('source 必须引用当前会话已有的用户原话 U#')
     if supersedes is not None and (not isinstance(supersedes, list) or
                                    any(not isinstance(value, str) for value in supersedes)):
-        raise ValueError('supersedes 必须是当前项目 DL-xxxx 编号数组')
-    written = service.store.append_decision_log(summary.project, text, why, '用户',
-                                                summary.session_id, ', '.join(source), supersedes)
+        raise ValueError('supersedes 必须是目标项目 DL-xxxx 编号数组')
+    written = service.store.append_decision_log(project, text, why, '用户',
+        summary.session_id, ', '.join(source), supersedes,
+        source_text='\n\n'.join(f"{entry['id']}: {entry['text']}" for entry in summary.users if entry['id'] in source))
     saved = int(summary.header.get('saved_users') or 0)
     while f'U{saved + 1}' in source:
         saved += 1
     summary.header['saved_users'] = saved
     write_session(service, summary, path)
-    return {'ok': True, 'written': written, 'current_time': _time_block(service)}
+    return {'ok': True, 'written': {**written, 'project': project}, 'current_time': _time_block(service)}
 
 
-def save(service, session_id: str, operations: list[dict], last_test: dict | None = None) -> dict:
+def save(service, session_id: str, operations: list[dict], last_test: dict | None = None, project: str = '') -> dict:
     row = _session_row(service, session_id)
     if not row:
         return {"ok": False, "error": "会话不存在：请先让 hook 完成立项，或调用 bootstrap(session_id=...)",
                 "current_time": _time_block(service)}
-    summary, path = load_session(service, row)
+    if not isinstance(operations, list) or not operations:
+        return {"ok": False, "error": "operations 必须是非空数组", "current_time": _time_block(service)}
+    origin, origin_path = load_session(service, row)
+    summary, path = origin, origin_path
+    project = str(project or '').strip()
+    if project and project != origin.project:
+        card = service.store.project(project)
+        if not card:
+            return {"ok": False, "error": f"项目不存在：{project}"}
+        records = service.index.sessions(project, source_session_id=origin.session_id)
+        if records:
+            summary, path = load_session(service, records[0])
+            _mark_active(service, summary, path)
+        else:
+            summary, path = create_summary(
+                service, host=row["agent"], cwd=next(iter(card["paths"]), ""),
+                project_override=card["name"], source_session_id=origin.session_id,
+            )
     raw_text = service.store.read_text(path)
     program_hash = service.program_written_hash(path)
     user_edited = bool(program_hash) and handoff.fingerprint(raw_text) != program_hash
@@ -882,14 +849,9 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     protected = summary.header.get("user_owned_fields", [])
     written: dict = {"users": [], "done": [], "decisions": [], "dead_ends": [], "evidence": [],
                      "goals": [], "target": "", "next_step": "", "status": "", "env": [],
-                     "project_prompt": {}, "permissions": [], "acceptance": {},
-                     "attempts": [], "confirms": [], "continues": [], "understanding": ""}
-    observed: list[dict] = []
+                     "project_prompt": {}}
     rejected: list[dict] = []
     warnings: list[str] = []
-
-    if not isinstance(operations, list) or not operations:
-        return {"ok": False, "error": "operations 必须是非空数组", "current_time": _time_block(service)}
 
     for operation in operations:
         reject_start = len(rejected)
@@ -898,10 +860,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
             continue
         op = str(operation.get("op") or "")
         try:
-            if op in {"permission", "acceptance", "understanding", "confirm", "continue", "attempt"} and not progress.enabled(summary):
-                raise ValueError("本会话未开启任务模式；设置中的开关仅影响新会话")
-            if progress.is_paused(summary) and op not in {"confirm", "continue", "append", "replace"}:
-                raise ValueError("已暂停。可以保存证据和理由；解除暂停需要用户原话里的新路线。")
             if op == "append":
                 section_key = str(operation.get("section") or "").strip()
                 section = SECTION_ALIASES.get(section_key)
@@ -910,13 +868,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 items = operation.get("items")
                 if not isinstance(items, list) or not items:
                     raise ValueError("items 必须是非空数组")
-                if progress.is_paused(summary) and section not in {"证据", "决策", "未走通的路"}:
-                    raise ValueError("已暂停。可以保存证据、走不通的路和决定理由，不能把实现写成已完成。")
-                if section == "已完成" and progress.approval_block(service, summary):
-                    raise ValueError(
-                        "任务目标理解还没确认，不能把实现写成已完成。"
-                        "先复述任务目标并等待用户确认，不要继续执行任务。"
-                        "Tbrain 不能拦住宿主直接改文件。")
                 for item in items:
                     item_start = len(rejected)
                     appended = _append_item(service, summary, section, item, rejected, warnings)
@@ -926,20 +877,9 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         written_key = {"已完成": "done", "决策": "decisions", "未走通的路": "dead_ends",
                                        "证据": "evidence", "未完成目标": "goals"}[section]
                         written[written_key].append(appended)
-                        if section == "未走通的路":
-                            observed.append({"kind": "dead_end", "productive": False,
-                                             "text": str(item.get("attempt") or item.get("text") or "")})
-                        elif section == "证据":
-                            observed.append({"kind": "evidence", "productive": False,
-                                             "text": str(item.get("text") or "")})
-                        elif section == "已完成":
-                            observed.append({"kind": "done", "productive": True,
-                                             "text": str(item.get("text") or "")})
             elif op == "replace":
                 section = str(operation.get("section") or "")
                 text = str(operation.get("text") or "").strip()
-                if progress.is_paused(summary) and section != "next_step":
-                    raise ValueError("已暂停。可以记下下一步提议，不能改写目标。")
                 if section in protected:
                     summary.conflicts.append(
                         f"- 用户手改过本会话总结，{section} 的模型更新未覆盖（{_utc_iso(service.now().utc)}），待用户确认")
@@ -948,8 +888,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                                      "example": "请手动合并；确认恢复模型维护后，移除文件头 user_owned_fields 中的对应字段"})
                     continue
                 if section == "target":
-                    if progress.approval_block(service, summary):
-                        raise ValueError("任务目标理解还没确认。先用 understanding 保存复述，用户确认后再用 confirm 记录。")
                     if len(text) > handoff.TARGET_MAX_CHARS:
                         raise ValueError(f"目标不超过 {handoff.TARGET_MAX_CHARS} 字")
                     summary.target = text
@@ -961,10 +899,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         raise ValueError(f"下一步不超过 {handoff.NEXT_MAX_CHARS} 字")
                     summary.next_step = text
                     written["next_step"] = text
-                    if progress.is_paused(summary):
-                        stall = summary.header.setdefault("stall", {})
-                        if isinstance(stall, dict):
-                            stall["proposed_route"] = text
                 else:
                     raise ValueError("replace.section 只允许 target / next_step")
             elif op == "set_status":
@@ -973,10 +907,6 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                     raise ValueError("status 只允许：" + " / ".join(handoff.STATUSES))
                 if status in {"已中断", "已暂停"}:
                     raise ValueError(f"{status}只由程序写入")
-                if progress.is_paused(summary):
-                    raise ValueError("已暂停。要继续先 continue，不能直接改状态。")
-                if status == "已完成" and progress.approval_block(service, summary):
-                    raise ValueError(progress.approval_block(service, summary))
                 goal_ids = operation.get('complete_goals') or []
                 if not isinstance(goal_ids, list) or any(not isinstance(value, str) for value in goal_ids):
                     raise ValueError('complete_goals 必须是目标编号数组')
@@ -1007,32 +937,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                         error["operation"] = {**operation, "items": [item]}
                     if card:
                         written["env"].append(card)
-            elif op == "permission":
-                recorded = _record_permission(summary, operation)
-                written["permissions"].append(recorded)
-            elif op == "acceptance":
-                written["acceptance"] = _save_acceptance(service, summary, operation)
-            elif op == "understanding":
-                written["understanding"] = progress.apply_understanding(summary, operation)
-            elif op == "confirm":
-                written["confirms"].append(progress.apply_confirm(service, summary, operation))
-            elif op == "continue":
-                written["continues"].append(progress.apply_continue(
-                    service, summary, operation, now=_utc_iso(service.now().utc)))
-            elif op == "attempt":
-                normalized = progress.normalize_attempt(operation)
-                written["attempts"].append(normalized)
-                observed.append({
-                    "kind": "attempt",
-                    "productive": normalized["productive"],
-                    "text": " ".join(dict.fromkeys(
-                        part for part in (normalized["route"], normalized["evidence"]) if part)),
-                })
             elif op == "project_prompt":
-                if progress.approval_block(service, summary):
-                    raise ValueError(
-                        "任务目标理解还没确认，不能改项目提示词把实现当成已经批准。"
-                        "Tbrain 不能拦住宿主直接改文件。")
                 sections = operation.get("sections")
                 if not summary.project:
                     raise ValueError("独立会话没有项目提示词")
@@ -1048,7 +953,7 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
                 rejected.extend(result.get("rejected") or [])
                 warnings.extend(result.get("warnings") or [])
             else:
-                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt/permission/acceptance/understanding/confirm/continue/attempt")
+                raise ValueError("op 只允许 append/replace/set_status/env/project_prompt")
         except (ValueError, OSError) as exc:
             rejected.append({"op": op, "reason": str(exc),
                              "example": _op_example(op)})
@@ -1060,25 +965,30 @@ def save(service, session_id: str, operations: list[dict], last_test: dict | Non
     summary.header["updated_at"] = now_iso
     summary.header["last_activity_at"] = now_iso
     summary.header["git"] = service.git_info(str(summary.header.get("cwd") or ""))
-    applied_verify = None
+    verification = origin.header.get("last_verify") or {}
     if last_test is not None:
         if not isinstance(last_test, dict) or not isinstance(last_test.get("command"), str) or type(last_test.get("exit_code")) is not int:
             rejected.append({"op": "last_test", "operation": {"last_test": last_test},
                              "reason": "last_test 必须包含 command 和整数 exit_code"})
-        elif summary.header.get("last_verify", {}).get("source") == "tool":
-            if any(last_test[key] != summary.header["last_verify"].get(key) for key in ("command", "exit_code")):
+        elif verification.get("source") == "tool":
+            if any(last_test[key] != verification.get(key) for key in ("command", "exit_code")):
                 rejected.append({"op": "last_test", "operation": {"last_test": last_test},
                                  "reason": "last_test 不能覆盖宿主采集的测试结果；请省略补报并以实际执行结果为准。"})
+            else:
+                summary.header["last_verify"] = verification
         else:
             summary.header["last_verify"] = {"command": last_test["command"], "exit_code": last_test["exit_code"],
                                               "at": now_iso, "source": "model"}
-            applied_verify = last_test
-    progress.observe_saved(service, summary, ordered=observed, verify=applied_verify, now=now_iso)
     if not rejected:
         summary.header["saved_users"] = len(summary.users)
         summary.header["saved_verify_at"] = summary.header.get("last_verify", {}).get("at")
     pending_added = _record_rejections(service, summary, rejected)
     write_session(service, summary, path)
+    if summary is not origin and not rejected:
+        origin.header["saved_users"] = len(origin.users)
+        if last_test is not None and verification.get("source") == "tool":
+            origin.header["saved_verify_at"] = verification["at"]
+        write_session(service, origin, origin_path)
     _log_agent_changes(service, handoff.parse(raw_text), summary)
     service.index.log_access(summary.session_id, "save")
     return {
@@ -1102,15 +1012,6 @@ def _op_example(op: str) -> str:
         "set_status": '{"op":"set_status","status":"已完成","complete_goals":["G1"]}',
         "env": '{"op":"env","items":[{"type":"安装","name":"jieba","version":"0.42.1","base_sha":"ab12cd34","state":"生效"}]}',
         "project_prompt": '{"op":"project_prompt","sections":{"当前阶段":"阶段名：完成标准"},"base_sha":{"当前阶段":"ab12cd34"}}',
-        "permission": '{"op":"permission","action":"push branch"}',
-        "understanding": '{"op":"understanding","goal":"用户需要的结果","scope":"本次范围","deliverables":"交付结果","done":"可核对的完成标准"}',
-        "confirm": '{"op":"confirm","question":"Q1","source":"U2","why":"用户确认任务目标理解","tradeoffs":"先不扩大范围","decided_by":"用户"}',
-        "continue": '{"op":"continue","route":"改为先补失败用例再改解析","why":"同一失败已重复","tradeoffs":"先不重写解析器","decided_by":"用户"}',
-        "attempt": '{"op":"attempt","route":"pytest -q","evidence":"AssertionError test_parse","productive":false}',
-        "acceptance": ('{"op":"acceptance","task":"本地检查已接上，这一轮可以提交",'
-                       '"verification":"在项目目录运行 tbrain check，退出码 0。证据 E1。没有在 Windows 上安装",'
-                       '"risks":"没有还要人接受的风险",'
-                       '"deliverables":"commit 4c8fa05。在该目录运行 tbrain check","conclusion":"PASS"}'),
     }.get(op, "")
 
 
@@ -1145,18 +1046,6 @@ def _supersede_decisions(service, summary, references):
     return changed
 
 
-def _save_acceptance(service, summary, operation: dict) -> dict:
-    from .acceptance import apply_report, normalize
-
-    fields = normalize(operation)
-    blocked = progress.approval_block(service, summary)
-    if blocked:
-        raise ValueError(blocked + " 验收不能代替目标确认。")
-    apply_report(summary, fields)
-    return {"conclusion": fields["conclusion"], "windows_installable": fields["windows_installable"],
-            "windows_verified": fields["windows_verified"]}
-
-
 def _format_decision(item: dict) -> str:
     """Keep the first line as 决策 | 理由 and store why on the following lines."""
     text = str(item.get("text") or "").strip()
@@ -1175,38 +1064,6 @@ def _format_decision(item: dict) -> str:
     if who and "决定人：" not in text and "决定人:" not in text and "Decided by:" not in text:
         lines.append(f"决定人：{who}")
     return "\n".join(line for line in lines if line).strip()
-
-
-def _record_permission(summary, operation: dict) -> dict:
-    grants = summary.header.get("permission_grants")
-    if not isinstance(grants, list):
-        grants = ["auto"]
-    elif "auto" not in grants:
-        grants = ["auto", *grants]
-    grant = str(operation.get("grant") or "").strip()
-    action = str(operation.get("action") or "").strip()
-    if not grant and not action:
-        raise ValueError("permission 需要 grant 或 action")
-    if grant:
-        if grant not in TIERS:
-            raise ValueError("grant 只允许 auto / conditional / auth-required")
-        if grant not in grants:
-            grants.append(grant)
-    tier = str(operation.get("tier") or "").strip()
-    recorded = {"grant": grant}
-    if action:
-        if tier and tier not in TIERS:
-            raise ValueError("tier 只允许 auto / conditional / auth-required")
-        tier = tier or classify(action)
-        actions = summary.header.get("permission_actions")
-        if not isinstance(actions, list):
-            actions = []
-        entry = {"action": action, "tier": tier}
-        actions.append(entry)
-        summary.header["permission_actions"] = actions
-        recorded.update(entry)
-    summary.header["permission_grants"] = grants
-    return recorded
 
 
 def _append_item(service, summary, section, item, rejected, warnings):
@@ -1394,6 +1251,95 @@ def _save_env(service, summary, item, rejected):
 # search / resume / bootstrap
 # ---------------------------------------------------------------------------
 
+def read(service, session_id: str, target: str, entry_id: str = '', start: int = 0,
+         limit: int = 6000, source: bool = False) -> dict:
+    """Read saved memory or its registered text source without resuming a task."""
+    current = _session_row(service, session_id)
+    if not current:
+        raise ValueError('当前会话不存在；请先调用 bootstrap')
+    if not isinstance(start, int) or start < 0 or not isinstance(limit, int) or not 1 <= limit <= 20000:
+        raise ValueError('start 为非负字符偏移；limit 为 1–20000 个字符')
+    projects, standalone = service.visible_projects_for_project(current.get('project', ''))
+    candidate = (service.vault_root() / target).resolve()
+    row = _indexed_session(service, target)
+    if not row:
+        row = next((item for item in service.index.sessions()
+                    if (service.vault_root() / item['path']).resolve() == candidate), None)
+    path, content, references = None, None, []
+    metadata = {}
+    if row:
+        if row.get('project') not in projects and not (not row.get('project') and standalone):
+            raise ValueError('目标会话不在当前可见范围')
+        path = service.vault_root() / row['path']
+        content = service.store.read_text(path)
+        if entry_id:
+            summary = handoff.parse(content)
+            section = next((key for key, prefix in handoff.ITEM_PREFIXES.items() if entry_id.startswith(prefix)), None)
+            entries = summary.all_items(section) if section else summary.users
+            entry = next((item for item in entries if item['id'] == entry_id), None)
+            if not entry:
+                raise ValueError(f'条目不存在：{entry_id}')
+            content = entry['text']
+            references = re.findall(r'\bE\d+\b', content)
+            if entry_id.startswith('K'):
+                metadata['decision_state'] = handoff.decision_state(content)
+            if entry_id.startswith('G'):
+                metadata['done'] = entry['done']
+            if source:
+                match = re.fullmatch(r'(.+?):(\d+)', content) if entry_id.startswith('E') else None
+                if not match:
+                    raise ValueError('source 仅用于读取 E# 引用的文本文件；命令和 commit 证据直接读条目')
+                path = Path(match[1])
+                if not path.is_absolute():
+                    path = Path(summary.header.get('cwd') or '') / path
+                metadata['source_line'] = int(match[2])
+                path = path.resolve()
+                owner = service.store.match_project(str(path))
+                if owner in projects or any(card['path'] and
+                        (service.vault_root() / card['path']).resolve() == path
+                        for card in service.store.attachments(projects)):
+                    metadata['source_note'] = '当前文件内容，不是保存证据时的快照'
+                    content = None
+                else:
+                    metadata['source_note'] = '仅返回引用位置；登记为可见附件后可读取正文'
+        elif source:
+            raise ValueError('读取证据文件需要提供 entry_id=E#')
+    else:
+        for project in service.decision_projects(current.get('project', '')):
+            decision_path = service.store.project_dir(project) / '决策日志.md'
+            if candidate == decision_path.resolve():
+                path = decision_path
+                if entry_id:
+                    entries = service.store.project_decisions(project)
+                    entry = next((item for item in entries if item['id'] == entry_id), None)
+                    if not entry:
+                        raise ValueError(f'长期决定不存在：{entry_id}')
+                    content = '\n'.join(f'{key}: {value}' for key, value in service.decision_source(entry).items())
+                break
+        if path is None:
+            paths = [service.vault_root() / card['path'] for card in service.store.public_cards()]
+            for card in service.store.attachments(projects):
+                paths.append(Path(card['card_path']))
+                if card['path']:
+                    paths.append(service.vault_root() / card['path'])
+            path = next((item for item in paths if item.resolve() == candidate), None)
+            if path is not None and entry_id:
+                raise ValueError('此文档按字符分页读取，不支持条目编号')
+        if path is None:
+            raise ValueError('目标不是当前可见的记忆文档或已登记附件')
+        if source:
+            raise ValueError('source 仅用于会话 E# 的文件来源')
+    if content is None:
+        content = path.read_text(encoding='utf-8-sig')
+        if '\x00' in content:
+            raise ValueError('仅支持 UTF-8 文本文件，二进制附件请使用对应文档工具')
+    end = min(start + limit, len(content))
+    return {'ok': True, 'target': target, 'entry_id': entry_id, 'path': str(path.resolve()),
+            'content': content[start:end], 'start': start, 'total_chars': len(content),
+            'truncated': end < len(content), 'next_start': end if end < len(content) else None,
+            'evidence': list(dict.fromkeys(references)), **metadata}
+
+
 def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
     service.refresh_index()
     timeout_fallback(service)
@@ -1401,7 +1347,7 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
     if not query:
         return {"ok": False, "error": "query 不能为空", "results": []}
     limit = max(1, min(int(limit or 5), 5))
-    row = _session_row(service, session_id) if session_id else None
+    row = _indexed_session(service, session_id) if session_id else None
     project = str(row.get("project") or "") if row else ""
     projects, include_standalone = service.visible_projects_for_project(project)
     terms = [term.casefold() for term in service.index.bigram_terms(query)]
@@ -1414,7 +1360,16 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
                 decision_hits.append({**entry, 'kind': 'decision', 'snippet': label + content})
     decision_hits.sort(key=lambda item: (item['active'], item['at']), reverse=True)
     decision_hits = decision_hits[:min(3, limit)]
-    available = limit - len(decision_hits)
+    attachments = []
+    for card in service.store.attachments(projects):
+        description = card['note'] or card['body']
+        haystack = (card['name'] + '\n' + description).casefold()
+        matches = sum(term in haystack for term in terms)
+        if matches:
+            hit = {'kind': 'attachment', 'name': card['name'], 'path': card['card_path'],
+                   'file_path': card['path'], 'snippet': _clip(description, 500)}
+            attachments.append(((query.casefold() == card['name'].casefold(), matches), hit))
+    attachment_hits = [hit for _, hit in sorted(attachments, key=lambda pair: pair[0], reverse=True)]
     current_id = row["session_id"] if row else ""
     project_hits = [{**item, "kind": "session", "source": "项目"}
                     for item in service.index.search_sessions(query, projects, limit + 1)
@@ -1424,24 +1379,25 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
     standalone_hits = [{**item, "kind": "session", "source": "独立会话池"}
                        for item in service.index.search_sessions(query, [""], limit + 1)
                        if item["session_id"] != current_id] if include_standalone else []
-    if project:
-        project_count = min(3, len(project_hits), available)
-        public_count = min(1, len(public_hits), available - project_count)
-        remaining = available - project_count - public_count
-        extra = min(remaining, len(project_hits) - project_count)
-        project_count += extra
-        remaining -= extra
-        public_count += min(remaining, len(public_hits) - public_count)
-        remaining = available - project_count - public_count
-        unique = decision_hits + project_hits[:project_count] + public_hits[:public_count] + standalone_hits[:min(1, remaining)]
-    else:
-        unique = (public_hits + standalone_hits)[:limit]
+    primary = decision_hits + attachment_hits[:1]
+    slots = max(0, limit - len(primary))
+    reserve_public = 1 if public_hits and slots > min(3, len(project_hits)) else 0
+    unique = (primary + project_hits[:slots - reserve_public] + public_hits + attachment_hits[1:] +
+              (standalone_hits[:1] if project else standalone_hits))[:limit]
     for item in unique:
+        item['read'] = {'target': item.get('session_id') if item['kind'] == 'session' else item['path']}
         if item['kind'] == 'decision':
+            item['read']['entry_id'] = item['id']
+            item.pop('source_text', None)
             continue
         if item['kind'] == 'public':
             from .store import public_card_sha
+            body = item.pop('body')
+            first = min((pos for term in terms if (pos := body.casefold().find(term)) >= 0), default=0)
+            item['snippet'] = _clip(body[max(0, first - 80):], 500)
             item['sha'] = public_card_sha(service.store.read_text(service.vault_root() / item['path']))
+            continue
+        if item['kind'] == 'attachment':
             continue
         summary = handoff.parse(service.store.read_text(service.vault_root() / item["path"]))
         candidates = [f"目标：{summary.target}", f"下一步：{summary.next_step}"]
@@ -1452,6 +1408,8 @@ def search(service, query: str, session_id: str = "", limit: int = 5) -> dict:
                 candidates.append(f"{label}{entry['id']} {entry['text']}")
         matches = sorted(candidates, key=lambda text: sum(term in text.casefold() for term in terms), reverse=True)
         item["snippet"] = _clip("\n".join(text for text in matches[:3] if any(term in text.casefold() for term in terms)), 500)
+        item['entry_ids'] = [match[1] for text in matches[:3] if any(term in text.casefold() for term in terms)
+                             if (match := re.search(r'\b([UDKXEG]\d+)\b', text))]
     payload = {"ok": True, "query": query, "results": unique, "current_time": _time_block(service)}
     return payload
 
@@ -1509,13 +1467,9 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
         current.target, current.next_step = old.target, old.next_step
         current.archive = list(old.archive)
         current.extra = dict(old.extra)
-        current.extra.pop("任务理解", None)
-        current.extra.pop(progress.QUESTION_SECTION, None)
-        for key in ("last_verify", "git", "dead_end_conditions", "user_owned_fields", "model_fingerprints", "stall"):
-            if key in old.header and (key != "stall" or progress.enabled(current)):
+        for key in ("last_verify", "git", "dead_end_conditions", "user_owned_fields", "model_fingerprints"):
+            if key in old.header:
                 current.header[key] = copy.deepcopy(old.header[key])
-        if progress.enabled(current) and progress.is_paused(old):
-            current.header["status"] = "已暂停"
         current.header.update(branched_from=f"[[{old.name}]]", branch_revision=version.stem,
                               branch_user_count=len(old.users))
     users = old.users[-3:]
@@ -1541,11 +1495,6 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
     if acceptance_text:
         lines += ["### 最终验收", acceptance_text, ""]
     handoff_text = "\n".join(lines)
-    if progress.enabled(current) and progress.is_paused(old):
-        current.header["status"] = "已暂停"
-        current.header["stall"] = copy.deepcopy(old.header.get("stall") or {})
-        if old.extra.get(progress.HANDOFF_SECTION):
-            current.extra[progress.HANDOFF_SECTION] = old.extra[progress.HANDOFF_SECTION]
     # 当前会话写“接续自”
     if current.name != old.name:
         current.header["resumed_from"] = f"[[{old.name}]]"
@@ -1554,11 +1503,6 @@ def resume(service, session_id: str, target: str, *, fork_user_count=None, fork_
             seq = next_sequence(service, current.project, date)
             current_path = rename_session(service, current, current_path, naming.resume_name(old.name, date, seq))
         write_session(service, current, current_path)
-    lead = progress.lead_block(service, current)
-    contract = render_contract(service, current.project or old.project,
-                               cwd=str(current.header.get("cwd") or old.header.get("cwd") or ""),
-                               task_mode=progress.enabled(current))
-    handoff_text = "\n\n".join(part for part in (lead, contract, handoff_text) if part)
     service.index.log_access(old.session_id, "resume")
     ranking = service.index.record_resume_feedback(current.session_id, current.project, old.session_id)
     return {"ok": True, "resumed_from": old.name, "session_id": current.session_id,

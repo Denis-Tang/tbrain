@@ -49,6 +49,7 @@ def test_save_decision_is_project_scoped_and_available_after_restart(tmp_path):
     assert result['written']['id'] == 'DL-0001'
     assert result['written']['why'] == ''
     assert result['written']['source'] == 'U1'
+    assert result['written']['source_text'] == 'U1: 以后默认离线保存，用户数据不上传'
     stop = service.hook('codex', {'hook_event_name': 'Stop', 'session_id': 'decision', 'cwd': str(work)})
     assert stop.get('decision') != 'block'
     assert not (service.store.project_dir('Other') / '决策日志.md').exists()
@@ -58,6 +59,9 @@ def test_save_decision_is_project_scoped_and_available_after_restart(tmp_path):
     hits = restarted.search('离线', 'codex:fresh')['results']
     assert hits[0]['kind'] == 'decision' and hits[0]['text'] == result['written']['text']
     assert hits[0]['source'] == 'U1'
+    full = restarted.read('codex:fresh', **hits[0]['read'])
+    assert full['ok'] and 'U1: 以后默认离线保存，用户数据不上传' in full['content']
+    assert 'source_text' not in hits[0]  # discovery stays small; read carries the full quote
     assert 'DL-0001 默认离线保存' in restarted.resume('codex:fresh', 'codex:decision')['handoff']
     restarted.bootstrap('codex:other', 'codex', str(work), project='Other')
     assert not any(hit['kind'] == 'decision' for hit in restarted.search('离线', 'codex:other')['results'])
@@ -85,6 +89,20 @@ def test_long_term_decisions_inherit_parent_scope(tmp_path):
     assert [entry['id'] for entry in handed] == ['DL-0001']
     service.bootstrap('codex:child-fresh', 'codex', str(work))
     assert '所有项目数据离线保存' in service.resume('codex:child-fresh', 'codex:child')['handoff']
+
+
+def test_startup_omits_whole_decisions_and_points_to_the_log(store, tmp_path):
+    from tbrain.service import TbrainService
+    service = TbrainService(tmp_path / 'home', vault=store.vault)
+    service.settings.save({'ntp_enabled': False})
+    store.save_project('P', [])
+    for n in range(9):
+        store.append_decision_log('P', f'决定{n} ' + '适用条件。' * 28 + '\n仅在试运行期间', '', '用户', 'codex:old')
+    package = service.bootstrap('codex:reader', 'codex', str(tmp_path), project='P')['package']
+    shown = sum(entry['text'] in package for entry in store.project_decisions('P'))
+    assert 0 < shown < 9
+    assert package.count('DL-') == shown
+    assert f'另有{9-shown}条；{store.project_dir("P") / "决策日志.md"}' in package
 
 
 def test_save_decision_requires_real_source_and_preserves_replaced_history(tmp_path):

@@ -14,7 +14,7 @@ def service(tmp_path, monkeypatch):
         monkeypatch.setenv(key, str(tmp_path / key))
     value = TbrainService(tmp_path / 'home', vault=tmp_path / 'vault')
     value.settings.save({'vault_path': str(tmp_path / 'vault'), 'ntp_enabled': False,
-                         'timeout_hours': 0, 'task_mode': False})
+                         'timeout_hours': 0})
     value.configure_project('项目甲', [])
     value.configure_project('项目乙', [])
     return value

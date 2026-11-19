@@ -41,11 +41,9 @@ STATUS_PRIORITY = {
     "已完成": 4,
     "已放弃": 4,
 }
-UNFINISHED_STATUSES = ("已中断", "已暂停", "进行中", "受阻", "待验证")
 TAU_UNFINISHED_DAYS = 7.0
 TAU_FINISHED_DAYS = 30.0
 HISTORY_DAYS = 90.0
-STATUS_COUNT = 5  # 优先级 0..4
 
 SESSION_FIELDS = (
     "project",
@@ -108,6 +106,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     body,
     cn,
     tokenize = 'unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS project_notes (
+    session_id TEXT PRIMARY KEY,
+    source_session_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS public_cards (
@@ -483,6 +486,10 @@ class Index:
                 f"ON CONFLICT(session_id) DO UPDATE SET {assignments}",
                 [session_id, *[values[field] for field in SESSION_FIELDS]],
             )
+            if row.get("source_session_id"):
+                conn.execute("INSERT OR REPLACE INTO project_notes VALUES (?, ?)", (session_id, row["source_session_id"]))
+            else:
+                conn.execute("DELETE FROM project_notes WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (session_id,))
             conn.execute(
                 "INSERT INTO sessions_fts(session_id, project, name, body, cn) VALUES(?, ?, ?, ?, ?)",
@@ -491,6 +498,7 @@ class Index:
 
     def remove_session(self, session_id: str) -> None:
         with self.connect() as conn:
+            conn.execute("DELETE FROM project_notes WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (str(session_id),))
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (str(session_id),))
 
@@ -505,6 +513,7 @@ class Index:
         self,
         project: str | None = None,
         status: list[str] | None = None,
+        *, source_session_id: str = "",
     ) -> list[dict]:
         where: list[str] = []
         args: list[Any] = []
@@ -518,6 +527,9 @@ class Index:
             else:
                 where.append("project = ?")
                 args.append(str(project))
+        if source_session_id:
+            where.append("session_id IN (SELECT session_id FROM project_notes WHERE source_session_id = ?)")
+            args.append(source_session_id)
         if status:
             values = [str(item) for item in status]
             where.append("status IN (" + ", ".join("?" for _ in values) + ")")
@@ -617,17 +629,6 @@ class Index:
         ).fetchall()
         return {str(row["session_id"]): dict(row) for row in rows}
 
-    @staticmethod
-    def _composite_score(row: dict, relevance: float, now: datetime) -> float:
-        status = str(row.get("status") or "")
-        updated = str(row.get("updated_at") or row.get("last_activity_at") or "")
-        priority = status_priority(status)
-        status_score = 1.0 - priority / STATUS_COUNT
-        score = 0.6 * relevance + 0.25 * recency(updated, status, now) + 0.15 * status_score
-        if status in UNFINISHED_STATUSES:
-            score += 0.1
-        return score
-
     # -- 检索：会话 ---------------------------------------------------------
 
     def search_sessions(
@@ -639,7 +640,6 @@ class Index:
         query = str(query or "").strip()
         if not query or limit <= 0:
             return []
-        now = self._now()
         with self.connect() as conn:
             single = self._single_cjk_query(query)
             raw_rel: dict[str, float] = {}
@@ -659,16 +659,9 @@ class Index:
         if not rows:
             return []
         normalized = _minmax(raw_rel)
-        scored: list[tuple[float, dict]] = []
-        for session_id, row in rows.items():
-            relevance = normalized.get(session_id, 0.0)
-            score = self._composite_score(row, relevance, now)
-            enriched = dict(row)
-            enriched["score"] = round(score, 6)
-            enriched["relevance"] = round(relevance, 6)
-            scored.append((score, enriched))
-        scored.sort(key=lambda item: (-item[0], str(item[1].get("session_id") or "")))
-        return [item[1] for item in scored[: int(limit)]]
+        ordered = sorted(rows, key=lambda sid: (-normalized[sid], sid))
+        return [{**rows[sid], "score": round(normalized[sid], 6), "relevance": round(normalized[sid], 6)}
+                for sid in ordered[:limit]]
 
     def resume_view(
         self,

@@ -162,9 +162,8 @@ def test_global_prompt_roundtrip(api):
 @pytest.mark.parametrize("enabled", [True, False])
 def test_project_standalone_switch_and_form_save_preserve_other_fields(api, enabled):
     brain, service, _, work = api
-    service.settings.update({"task_mode": False})
     service.configure_project("已有项目", [str(work)], allow_child=True)
-    service.store.record_execution("已有项目", {"worktree_branch": "tbrain/已有项目"})
+    service.store._set_front_matter_field(service.store.project_card_path("已有项目"), "worktree_branch", "tbrain/已有项目")
     before = service.store.project("已有项目")
     result = brain.project_set_read_standalone("已有项目", enabled)
     assert result["ok"] is True
@@ -338,3 +337,33 @@ def test_packaged_desktop_selects_new_version_before_host_reconnect(api, monkeyp
     desktop._prepare_installation(service)
     assert copied == ([(executable.parent, __version__, root)] if should_install else [])
     assert repaired == ([root] if installed == __version__ else [])
+
+
+def test_project_memory_is_readonly_and_keeps_user_sources(api):
+    brain, service, vault, work = api
+    service.store.save_project('P', [str(work)])
+    session = _create_session(service, work, text='以后先支持离线，联网同步还没决定')
+    service.store.append_decision_log('P', '优先离线；联网同步未定', '', '用户', session, 'U1')
+    service.store.append_decision_log('P', '模型实施选择', '', 'Agent', session)
+    path = service.store.project_dir('P') / '决策日志.md'
+    before = path.read_bytes()
+    view = brain.project_memory('P')
+    assert view['ok'] and view['path'] == str(path)
+    assert len(view['entries']) == 1
+    assert view['entries'][0]['source_text'] == 'U1: 以后先支持离线，联网同步还没决定'
+    assert Path(view['entries'][0]['source_path']).is_file()
+    assert path.read_bytes() == before
+    assert not hasattr(brain, 'project_memory_save')
+
+
+def test_headless_bridge_discovers_methods_and_recovers_after_a_bad_call(api):
+    from tbrain.desktop import _reply
+    import json
+    brain, _, _, _ = api
+    def call(method, args=()):
+        reply = json.loads(_reply(brain, json.dumps({'id': 7, 'method': method, 'args': args})))
+        assert reply['id'] == 7
+        return reply['result']
+    assert call('methods')['project_memory'] == '(name)'
+    assert call('_setup', ['ignored', []])['ok'] is False
+    assert call('projects') == brain.projects()

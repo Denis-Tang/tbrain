@@ -2,7 +2,7 @@
 
 > 给编程 Agent 用的本地记忆工具。把要求、决定和进度存成 Markdown，换会话或换 Agent 时接着做。
 
-[**下载 0.7.10**](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.10) · [**使用文档**](#usage--使用指南) · [**实验与结果**](#experiments--长任务评测) · [**问题反馈**](https://github.com/Denis-Tang/tbrain/issues)
+[**下载发布版**](https://github.com/Denis-Tang/tbrain/releases/latest) · [**使用文档**](#usage--使用指南) · [**实验与结果**](#experiments--长任务评测) · [**问题反馈**](https://github.com/Denis-Tang/tbrain/issues)
 
 ## Overview | 产品介绍
 
@@ -18,13 +18,7 @@ Tbrain 面向在 Windows 上使用 Claude Code、Codex、DeepSeek Harness（DSH�
 
 ## Preview | 产品预览
 
-当前正式版为 **0.7.3**，在 0.7.2 的可选任务模式上明确开工确认：原生弹窗优先，没有弹窗时只接受用户单独回复“确认”。不包含 Dream 冷蒸馏。
-
-在「设置 → 工作模式」切换「任务模式」。默认关闭，切换后立即保存，只影响新建会话；已有会话及升级前的旧会话保持原模式。开关不批量改动已有项目，总观页不变。
-
-开启后，Agent 首轮确认目标、范围、业务规则和验收标准；新业务缺口集中补问，不依赖答案的工作继续。连续没有实质进展时暂停并保存交接；完成时核对本地检查与证据。关闭时保留普通记忆、检索、保存和接续，不附加这些任务要求。用户本次指令和项目业务规则始终有效。
-
-任务模式开启时，保存项目配置会准备工作树及本地检查模板。已有项目可继续使用当前目录；`tbrain check` 只执行项目配置的命令和规范检查，测试命令需按项目实际填写。完整说明见 [本地任务流程](docs/LOCAL-LOOP.md)。
+本版为 **0.7.11**。Tbrain 按事项和项目保存记忆。工作流可以通过宿主事件接入，桌面后端支持 JSON 行调试。
 
 桌面提供总观、项目配置、Agent 管理和设置四页。一次接续的流程是：
 
@@ -122,9 +116,11 @@ DSH 的 Tbrain 条件相对原生总输入减少 **26.2%**、统一价格估算�
 
 ### 1. 保存进度，按需接续
 
-通过五个工具工作：`bootstrap` 返回启动包，`search` 检索历史，`save` 保存工作进展，`save_decision` 保存用户长期决定，`resume` 读取旧会话交接包。
+通过六个工具工作：`bootstrap` 返回启动包，`search` 发现历史，`read` 只读完整记忆，`save` 保存工作进展，`save_decision` 保存用户长期决定，`resume` 接续旧任务。
 
-长期决定写入当前会话所属项目的 `决策日志.md`，模型提交决定正文和用户原话编号；项目、时间与决定人由程序填写。决定含义清楚就记录，有关键歧义先交流，明确后再记录。理由仅在用户说明时填写，未说明可以留空；正文与理由合计最多200字。临时要求和本次技术决定仍用 `save`，同一长期决定不重复写进会话 K# 或项目硬规则。
+同一聊天谈到多个事项时，按项目分次调用 `save` 或 `save_decision`。例如在工程聊天中，用 `save_decision(..., project="个人", source=["U2"])` 保存用户明确的长期偏好。一次性承诺可用同项目的 `save` 记入待办，再用 `save` 保存工程进度。省略 `project` 时使用会话所属项目。跨项目保存进展时，同一聊天在每个目标项目各有一份进度记录，可在该项目搜索、读取和接续。后续写入继续使用原宿主会话 ID。文件证据的相对路径以该记录的工作目录为准，跨项目记录默认使用目标项目的第一个配置目录。
+
+长期决定写入目标项目的 `决策日志.md`。模型从用户提示词提炼决定，提交正文和原话编号。程序保存时间、决定人及所引用 U# 的完整原话。上下文用于消解指代，提炼应保留条件、否定、事实时间和未定范围。来源存在表示可追溯，语义准确性仍需核对。决定含义清楚就记录，有关键歧义先交流。理由仅在用户说明时填写，正文与理由合计最多200字。临时要求和本次技术决定用 `save`，同一长期决定不重复写进会话 K# 或项目硬规则。
 
 用户明确改变长期决定时，用 `supersedes` 指定本项目的旧 `DL-xxxx` 编号。旧记录保留，搜索和启动包读取有效决定，子项目继承父项目的长期决定。历史会话 K# 的退役仍使用原有 `save.set_status.supersede`，新工具不改写历史 K#。Hook 负责采集原话和提醒，模型负责理解与调用工具；Tbrain 不额外调用模型判断理解程度。
 
@@ -133,6 +129,12 @@ DSH 的 Tbrain 条件相对原生总输入减少 **26.2%**、统一价格估算�
 为项目关联一个或多个目录，维护目标、硬规则、当前阶段和常用命令。新建项目可向已接入的 Codex、DSH 登记；Codex 保留多目录，DSH 支持单目录。Pi Desktop 暂无可用的外部项目登记接口，具体条件见 [宿主接入说明](integrations/README.md#新建项目联动)。
 
 ### 3. 在本地查看和核对记忆
+
+项目卡片中的「项目长期记忆」只读展示用户长期约定、有效/被替代状态、来源原话及 `决策日志.md` 的完整路径，可复制路径，没有编辑入口。旧记录从来源会话读取原话，不迁移或重写；无法找到时明确提示。任务技术选择 K# 不在此页面展示。
+
+查询历史事实时，先 `search`，再将结果的 `read` 参数传给 `read(session_id=当前会话, target=..., entry_id=...)`。支持按 U#/D#/K#/E# 等编号读取归档条目，也可省略编号读取全文。响应含 `total_chars`、`truncated` 和 `next_start`；截断时保持其余参数不变，以 `start=next_start` 继续，默认每页6000字符、最多20000。读取不建立接续关系，不影响任务排序。历史会话搜索按文本相关性排序，不再因旧会话已完成而降低权重；任务接续仍保留状态和时间排序。
+
+按名称或说明搜索可见附件卡，结果的 `read.target` 指向卡片，`file_path` 指向已登记文件。E# 使用 `source=true` 时，可见项目目录内或已登记的文件返回当前正文；其他文件返回原始引用、行号和登记提示。仅支持 UTF-8 文本，返回的是当前文件内容，不是历史快照；Tbrain 没有保存的完整聊天、二进制附件或已删除文件不能凭空恢复。
 
 Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文分词和代码标识符；归档条目仍可查找。明确标为被取代、已废止或待确认的决定不进入有效决定交接，但旧决定的识别与退役仍依赖 Agent 正确维护。
 
@@ -152,7 +154,7 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 
 ### 安装与配置
 
-1. 下载 [0.7.10 发布页](https://github.com/Denis-Tang/tbrain/releases/tag/v0.7.10) 中的 `tbrain-0.7.10-windows-x64.zip` 并解压。
+1. 从[发布页](https://github.com/Denis-Tang/tbrain/releases)下载对应版本的 Windows x64 ZIP 并解压。
 2. 双击解压目录里的 `tbrain.exe`，选择知识库文件夹，勾选要接入的 Agent，点击“开始使用”。
 3. 按完成页提示重开 Agent。Codex 还需在 `/hooks` 中审核并信任 Tbrain Hook；Pi 新开会话或执行 `/reload`；DSH 完整退出后重开。
 4. 在“项目配置”添加项目及代码目录，让会话匹配到对应项目。
@@ -171,7 +173,7 @@ Markdown 是事实源，SQLite 是可重建的检索索引。检索支持中文�
 & "$env:LOCALAPPDATA\Programs\Tbrain\bin\tbrain.cmd" upgrade --from .\tbrain-0.7.3-windows-x64.zip
 ```
 
-升级到 0.7.3 后，Pi 用户需重新运行 `tbrain connect pi` 更新扩展，再新开会话或执行 `/reload`，才能使用自动确认弹窗。其他宿主由 Agent 优先调用其原生提问工具；没有确认弹窗时结束回复，等待用户单独回复“确认”。
+升级到 0.7.11 后，Pi 用户需重新运行 `tbrain connect pi` 更新扩展，再新开会话或执行 `/reload`。MCP 宿主重开会话后即可使用按项目保存。
 
 升级后重开 Agent，核对 `version` 输出中的 `installed_version`。升级与回退细节见 [升级文档](docs/UPGRADE.md)。
 
@@ -246,13 +248,14 @@ LICENSE          Apache-2.0 许可证
 | `timezone` | IANA 时区，留空跟随系统 | 否 |
 | `ntp_enabled` | 联网校时 | 否 |
 | `timeout_hours` | 会话超时处理的小时数 | 否 |
-| `task_mode` | 可选任务模式，默认关闭，仅新建会话生效 | 否 |
 | `reminder_context_switch` | DSH、Pi 的换会话提醒 | 否 |
 | `install_root` | 程序安装目录 | 否 |
 
 `TBRAIN_HOME` 可指定独立应用数据目录。程序默认安装到 `%LOCALAPPDATA%\Programs\Tbrain`；知识库由你选择。切换知识库路径不会自动搬迁旧文件。
 
 ## Development | 开发指南
+
+Agent 调试可从 `tbrain desktop --stdio` 开始。桌面业务方法、后台操作、日志位置和工作流插件示例见[接入指南](integrations/README.md#agent-调试与工作流插件)。
 
 准备 Python 3.11+。构建 Windows 分发包还需要 .NET 8 SDK、Node.js 和 PyInstaller。
 
@@ -265,13 +268,13 @@ python -m venv .venv
 .venv\Scripts\python.exe -m tbrain desktop
 ```
 
-构建 0.7.3 分发包：
+构建 Windows 分发包：
 
 ```powershell
-pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/0.7.3
+pwsh -NoProfile -File scripts/build.ps1 -OutputDirectory dist/release-0.7.11
 ```
 
-版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.3 的本地全量回归为 **339 项通过**，覆盖模式开关、任务理解确认、业务缺口补问、暂停接续，以及既有记忆与安装更新行为。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
+版本号统一定义在 `src/tbrain/__init__.py`。构建产出可运行目录、ZIP、同名 `.sha256` 和 `latest.json`，Release 上传后三项。0.7.11 的离线回归覆盖按事项保存、跨会话接续、宿主工具调用和安装更新。真实宿主验证需单独执行，见 [验证说明](https://github.com/Denis-Tang/tbrain/blob/main/scripts/verify/README.md)。
 
 ## Roadmap | 开发计划
 

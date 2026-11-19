@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from tbrain import session as flow, store as store_module, worktree
+from tbrain import session as flow, store as store_module
 from tbrain.service import TbrainService
 from tbrain.settings import SettingsStore
 from tbrain.store import render_note, split_front_matter
@@ -28,7 +28,7 @@ def service(tmp_path, monkeypatch):
         monkeypatch.setenv(key, str(tmp_path / name))
     value = TbrainService(tmp_path / 'home', vault=tmp_path / 'vault')
     value.settings.save({'vault_path': str(tmp_path / 'vault'), 'ntp_enabled': False,
-                         'timeout_hours': 0, 'task_mode': False})
+                         'timeout_hours': 0})
     value.configure_project('项目甲', [])
     value.bootstrap('codex:write-integrity', 'codex', str(tmp_path), project='项目甲')
     return value
@@ -87,40 +87,6 @@ def test_timeout_fallback_preserves_concurrent_save(service, monkeypatch):
         if writer is not None:
             writer.result(5)
     assert 'B并发保存内容' in service.store.read_text(path)
-
-
-def test_prepare_stays_outside_vault_lock(service, monkeypatch):
-    """This invariant already passes before the fix."""
-    entered, release, saved = threading.Event(), threading.Event(), threading.Event()
-
-    def prepare(*args):
-        entered.set()
-        assert release.wait(5)
-        return {}
-
-    monkeypatch.setattr(worktree, 'prepare', prepare)
-    service.settings.save({'task_mode': True})
-
-    def save():
-        result = service.save('codex:write-integrity', [{
-            'op': 'append', 'section': 'decision',
-            'items': [{'text': '锁外保存完成 | prepare不持库锁'}],
-        }])
-        assert result['ok'], result
-        saved.set()
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        configure = pool.submit(service.configure_project, '项目甲', [])
-        writer = None
-        try:
-            assert entered.wait(5)
-            writer = pool.submit(save)
-            assert saved.wait(1)
-        finally:
-            release.set()
-        configure.result(5)
-        if writer is not None:
-            writer.result(5)
 
 
 @pytest.mark.parametrize('entry', ['store', 'service'])
